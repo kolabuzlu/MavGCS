@@ -17,9 +17,9 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.6.0 - HUD EKF/Vibe status indicators, matched to
-# Mission Planner's own thresholds. See CHANGELOG.md.
-APP_VERSION = "V1.6.0"
+# This is MavGCS V1.7.0 - Clear button now hold-to-confirm for wiping the
+# vehicle's mission, LOITER-safe. See CHANGELOG.md.
+APP_VERSION = "V1.7.0"
 
 import sys
 import math
@@ -290,6 +290,14 @@ class WaypointMissionPanel(QGroupBox):
     mode_toggled = Signal(bool)
     start_requested = Signal()
     clear_requested = Signal()
+    # Fired once, only after a completed hold on Clear (HOLD_DURATION_MS) -
+    # separate from clear_requested (a plain click, which still fires
+    # normally on release regardless of hold duration) so a quick click
+    # only tidies the map, while holding also wipes the vehicle's mission.
+    clear_mission_requested = Signal()
+
+    HOLD_DURATION_MS = 3000
+    HOLD_TICK_MS = 50
 
     def __init__(self, parent=None):
         super().__init__("Multi-Waypoint Mission", parent)
@@ -304,12 +312,47 @@ class WaypointMissionPanel(QGroupBox):
         self.start_btn = QPushButton("Start Mission")
         self.start_btn.setEnabled(False)
         self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setToolTip(
+            "Click: clear the map.\nHold 3s: also erase the mission stored on the vehicle."
+        )
         self.start_btn.clicked.connect(self.start_requested)
         self.clear_btn.clicked.connect(self.clear_requested)
         row.addWidget(self.count_label, stretch=1)
         row.addWidget(self.start_btn)
         row.addWidget(self.clear_btn)
         layout.addLayout(row)
+
+        self.clear_hold_progress = QProgressBar()
+        self.clear_hold_progress.setRange(0, self.HOLD_DURATION_MS)
+        self.clear_hold_progress.setValue(0)
+        self.clear_hold_progress.setTextVisible(False)
+        self.clear_hold_progress.setFixedHeight(4)
+        layout.addWidget(self.clear_hold_progress)
+
+        self._clear_hold_elapsed_ms = 0
+        self._clear_hold_timer = QTimer(self)
+        self._clear_hold_timer.setInterval(self.HOLD_TICK_MS)
+        self._clear_hold_timer.timeout.connect(self._tick_clear_hold)
+        self.clear_btn.pressed.connect(self._start_clear_hold)
+        self.clear_btn.released.connect(self._cancel_clear_hold)
+
+    def _start_clear_hold(self):
+        self._clear_hold_elapsed_ms = 0
+        self.clear_hold_progress.setValue(0)
+        self._clear_hold_timer.start()
+
+    def _cancel_clear_hold(self):
+        self._clear_hold_timer.stop()
+        self._clear_hold_elapsed_ms = 0
+        self.clear_hold_progress.setValue(0)
+
+    def _tick_clear_hold(self):
+        self._clear_hold_elapsed_ms += self.HOLD_TICK_MS
+        self.clear_hold_progress.setValue(min(self._clear_hold_elapsed_ms, self.HOLD_DURATION_MS))
+        if self._clear_hold_elapsed_ms >= self.HOLD_DURATION_MS:
+            self._clear_hold_timer.stop()
+            self.clear_hold_progress.setValue(0)
+            self.clear_mission_requested.emit()
 
     def set_count(self, count):
         self.count_label.setText(f"{count} waypoint{'s' if count != 1 else ''} queued")
@@ -676,6 +719,7 @@ class MainWindow(QMainWindow):
         self.waypoint_panel.mode_toggled.connect(self.on_waypoint_mode_toggled)
         self.waypoint_panel.start_requested.connect(self.on_start_mission)
         self.waypoint_panel.clear_requested.connect(self.on_clear_waypoints)
+        self.waypoint_panel.clear_mission_requested.connect(self.on_clear_vehicle_mission)
         # These two go through wrapper methods rather than binding
         # directly to self.link.set_mode/preflight_calibration - a direct
         # bind captures whatever self.link IS at connect() time, and
@@ -847,6 +891,16 @@ class MainWindow(QMainWindow):
         self._waypoint_queue = []
         self.map_view.clear_waypoints()
         self.waypoint_panel.set_count(0)
+
+    def on_clear_vehicle_mission(self):
+        """Fired only after a completed 3s hold on the Clear button (see
+        WaypointMissionPanel.clear_mission_requested) - erases the mission
+        actually stored on the vehicle. A plain click of the same button
+        still only clears the map (on_clear_waypoints, via clear_requested,
+        fires normally on release regardless of hold duration)."""
+        link = self._require_link()
+        if link:
+            link.clear_mission()
 
     def on_start_mission(self):
         if not self._waypoint_queue:

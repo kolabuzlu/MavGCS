@@ -96,6 +96,7 @@ class MavlinkLink(QThread):
         self._home_lon = None
         self._last_amsl_alt_m = None  # from GLOBAL_POSITION_INT.alt (AMSL)
         self._gps_fix_type = None  # from GPS_RAW_INT.fix_type, used by the EKF status color
+        self._clear_mission_deadline = None  # time.time() deadline for clear_mission()'s deferred send
 
         # Multi-waypoint mission upload state machine (see
         # upload_and_start_mission() and the MISSION_* handlers in run()).
@@ -179,6 +180,22 @@ class MavlinkLink(QThread):
                 except Exception:
                     pass
                 last_heartbeat_sent = now
+
+            # Deferred half of clear_mission() (see there for why) - fires
+            # once the LOITER mode switch it requested has had time to take
+            # effect. Checked here in the background thread's own loop
+            # rather than blocking the GUI thread that called clear_mission().
+            if self._clear_mission_deadline is not None and now >= self._clear_mission_deadline:
+                self._clear_mission_deadline = None
+                try:
+                    with self._send_lock:
+                        self.master.mav.mission_clear_all_send(
+                            self.master.target_system,
+                            self.master.target_component,
+                        )
+                    self.command_feedback.emit("Cleared onboard mission")
+                except Exception as e:
+                    self.command_feedback.emit(f"Failed to clear mission: {e}")
 
             try:
                 msg = self.master.recv_match(blocking=True, timeout=1)
@@ -558,6 +575,33 @@ class MavlinkLink(QThread):
             self._mission_state = None
             self._mission_pending = None
             self.command_feedback.emit(f"Failed to start mission upload: {e}")
+
+    def clear_mission(self):
+        """
+        Erase the vehicle's onboard mission via MISSION_CLEAR_ALL, standalone
+        from upload_and_start_mission()'s own clear-then-upload state
+        machine - used by the waypoint panel's Clear button, which should
+        wipe the vehicle's mission even when there's nothing queued up to
+        upload in its place. Also aborts any upload that happens to be
+        mid-flight, since a stale MISSION_ACK arriving afterward would
+        otherwise be misread as this clear's result.
+
+        ArduPilot silently refuses to clear/modify a mission while it's
+        actively flying it in AUTO (confirmed by testing: the identical
+        clear works instantly in LOITER, but does nothing in AUTO) - so
+        this forces LOITER first, then sends the actual clear ~0.5s later
+        via the run() loop rather than blocking here with a sleep (this
+        method is called directly from the GUI thread), giving the mode
+        switch time to take effect onboard before the clear arrives.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't clear mission")
+            return
+        self._mission_state = None
+        self._mission_pending = None
+        self.set_mode("LOITER")
+        self._clear_mission_deadline = time.time() + 0.5
+        self.command_feedback.emit("Switching to LOITER, then clearing mission...")
 
     def fly_to(self, lat: float, lon: float, alt_relative_m: float):
         """
