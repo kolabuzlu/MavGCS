@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V1.10.0 - Vehicle state indicator + Messages panel logo watermark.
+
 ## V1.9.0 - Terrain radar added.
 
 ## V1.8.0 - ESRI World Imagery added.

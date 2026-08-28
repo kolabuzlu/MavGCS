@@ -17,11 +17,12 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.9.0 - forward-looking Terrain Radar overlay on the map,
-# free Copernicus GLO-30 elevation data, no API key needed. See CHANGELOG.md.
-APP_VERSION = "V1.9.0"
+# This is MavGCS V1.10.0 - ARMED / READY-TO-ARM status indicator and a
+# watermark logo in the Messages panel. See CHANGELOG.md.
+APP_VERSION = "V1.10.0"
 
 import sys
+import os
 import math
 import html
 from datetime import datetime
@@ -549,9 +550,22 @@ class MessagesPanel(QGroupBox):
         self.text_edit = QPlainTextEdit()
         self.text_edit.setReadOnly(True)
         self.text_edit.setMaximumBlockCount(500)  # cap memory growth
+        # Watermark logo baked into the background layer itself (Qt style
+        # sheets have no background-size, so mavgcs_logo_watermark.png is
+        # pre-scaled/faded to sit right-aligned behind the scrolling text -
+        # see the chroma-key + alpha-fade preprocessing that produced it).
+        # The right-side gap comes from padding-right + background-origin:
+        # content (Qt's default background-origin ignores padding - without
+        # the explicit "content" it sits flush against the edge regardless
+        # of padding-right) rather than baking a transparent margin into the
+        # image itself, which visibly muted the logo's opacity.
+        logo_path = os.path.join(os.path.dirname(__file__), "mavgcs_logo_watermark.png").replace("\\", "/")
         self.text_edit.setStyleSheet(
             "background-color: #16171a; color: white; "
-            "font-family: Consolas, monospace; font-size: 10px; border: none;"
+            "font-family: Consolas, monospace; font-size: 10px; border: none; "
+            f"background-image: url({logo_path}); "
+            "background-repeat: no-repeat; background-position: right; "
+            "background-origin: content; padding-right: 20px;"
         )
         layout.addWidget(self.text_edit)
 
@@ -644,6 +658,11 @@ class MainWindow(QMainWindow):
         self.ack_label = QLabel("")
         self.ack_label.setStyleSheet("color: #888; font-size: 9px;")
         self.ack_label.setWordWrap(True)
+        self.vehicle_state_label = QLabel()
+        self.vehicle_state_label.setAlignment(Qt.AlignCenter)
+        self._armed = False
+        self._ready_to_arm = False
+        self._update_vehicle_state_label()
         self._last_alt = 30.0  # default guess used to pre-fill the fly-to dialog
         self._last_lat = None
         self._last_lon = None
@@ -676,7 +695,10 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_content)
         left_layout.setSpacing(4)
         left_layout.setContentsMargins(6, 6, 6, 6)
-        left_layout.addWidget(self.status_label)
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.status_label, stretch=1)
+        status_row.addWidget(self.vehicle_state_label)
+        left_layout.addLayout(status_row)
         left_layout.addWidget(self.command_label)
         left_layout.addWidget(self.ack_label)
         left_layout.addWidget(self.arm_panel)
@@ -769,6 +791,22 @@ class MainWindow(QMainWindow):
             self._last_amsl_alt, self._last_groundspeed, self._last_climb
         )
 
+    def _update_vehicle_state_label(self):
+        """Single box: ARMED (red) while armed; otherwise READY TO ARM
+        (green) / NOT READY TO ARM (red) from the prearm-check status -
+        "ready to arm" only means anything pre-arm, so armed always wins."""
+        if self._armed:
+            text, color = "ARMED", "#e74c3c"
+        elif self._ready_to_arm:
+            text, color = "READY TO ARM", "#2ecc71"
+        else:
+            text, color = "NOT READY TO ARM", "#e74c3c"
+        self.vehicle_state_label.setText(text)
+        self.vehicle_state_label.setStyleSheet(
+            f"background-color: black; color: {color}; font-weight: bold; "
+            "padding: 3px 12px; border-radius: 4px;"
+        )
+
     def on_terrain_fan_ready(self, elevations, range_m, ang_cells, rad_cells):
         self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)
 
@@ -827,7 +865,10 @@ class MainWindow(QMainWindow):
         if "mode" in status_dict:
             self.mode_panel.set_active_mode(status_dict["mode"])
         if "armed" in status_dict:
-            self.arm_panel.set_armed_state(status_dict["armed"] == "YES")
+            armed = status_dict["armed"] == "YES"
+            self._armed = armed
+            self.arm_panel.set_armed_state(armed)
+            self._update_vehicle_state_label()
         if "ekf_color" in status_dict:
             self.horizon.set_ekf_status(status_dict["ekf_color"])
         if "vibe_color" in status_dict:
@@ -836,6 +877,9 @@ class MainWindow(QMainWindow):
             self.horizon.set_battery_voltage(float(status_dict["battery_voltage"]))
         if "amsl_alt" in status_dict:
             self._last_amsl_alt = float(status_dict["amsl_alt"])
+        if "ready_to_arm" in status_dict:
+            self._ready_to_arm = status_dict["ready_to_arm"] == "YES"
+            self._update_vehicle_state_label()
 
     def on_connection_status(self, connected, message):
         self.status_label.setText(message)

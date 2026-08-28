@@ -429,10 +429,21 @@ class MavlinkLink(QThread):
                 self.status_update.emit({"terrain_gl": f"{msg.terrain_height:.2f}"})
 
             elif mtype == "SYS_STATUS":
+                # MAV_SYS_STATUS_PREARM_CHECK is just another bit in the
+                # sensor present/enabled/health bitmasks - "present" gates
+                # whether the bit means anything at all (mirrors how every
+                # other sensor flag here is interpreted), "healthy" is the
+                # actual pass/fail Mission Planner's "Ready to arm" reflects.
+                prearm_bit = mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK
+                ready_to_arm = bool(
+                    msg.onboard_control_sensors_present & prearm_bit
+                    and msg.onboard_control_sensors_health & prearm_bit
+                )
                 self.status_update.emit(
                     {
                         "battery_voltage": f"{msg.voltage_battery / 1000.0:.2f}",
                         "battery_remaining": f"{msg.battery_remaining}",
+                        "ready_to_arm": "YES" if ready_to_arm else "NO",
                     }
                 )
 
