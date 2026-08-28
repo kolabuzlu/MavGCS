@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V1.11.0 - ADS-B traffic, Change Loiter Radius, maximized window.
+
 ## V1.10.0 - Arm status and logo added.
 
 ## V1.9.0 - Terrain radar added.

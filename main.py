@@ -17,9 +17,9 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.10.0 - ARMED / READY-TO-ARM status indicator and a
-# watermark logo in the Messages panel. See CHANGELOG.md.
-APP_VERSION = "V1.10.0"
+# This is MavGCS V1.11.0 - ADS-B traffic overlay on the map, Change Loiter
+# Radius control, and the window now opens maximized. See CHANGELOG.md.
+APP_VERSION = "V1.11.0"
 
 import sys
 import os
@@ -27,6 +27,7 @@ import math
 import html
 from datetime import datetime
 from PySide6.QtCore import Signal, QTimer, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QGridLayout, QFrame, QInputDialog,
@@ -38,6 +39,7 @@ from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 from terrain_provider import TerrainRadarWorker
+from adsb_provider import AdsbWorker
 
 
 class TelemetryPanel(QFrame):
@@ -589,6 +591,7 @@ class GuidedControlPanel(QGroupBox):
 
     speed_requested = Signal(float)
     altitude_requested = Signal(float)
+    loiter_radius_requested = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__("Guided Control", parent)
@@ -600,15 +603,19 @@ class GuidedControlPanel(QGroupBox):
         btn_row.setSpacing(4)
         self.speed_btn = QPushButton("Change Speed")
         self.altitude_btn = QPushButton("Change Altitude")
+        self.loiter_radius_btn = QPushButton("Change Loiter Radius")
         btn_row.addWidget(self.speed_btn)
         btn_row.addWidget(self.altitude_btn)
+        btn_row.addWidget(self.loiter_radius_btn)
         layout.addLayout(btn_row)
 
         self._last_speed = 15.0
         self._last_alt = 30.0
+        self._last_loiter_radius = 100.0
 
         self.speed_btn.clicked.connect(self._prompt_speed)
         self.altitude_btn.clicked.connect(self._prompt_altitude)
+        self.loiter_radius_btn.clicked.connect(self._prompt_loiter_radius)
 
     def _prompt_speed(self):
         speed, ok = QInputDialog.getDouble(
@@ -628,6 +635,17 @@ class GuidedControlPanel(QGroupBox):
             self._last_alt = alt
             self.altitude_requested.emit(alt)
 
+    def _prompt_loiter_radius(self):
+        radius, ok = QInputDialog.getDouble(
+            self, "Change Loiter Radius",
+            "New loiter radius (m)\n(negative = counter-clockwise):",
+            value=self._last_loiter_radius,
+            minValue=-5000.0, maxValue=5000.0, decimals=0,
+        )
+        if ok:
+            self._last_loiter_radius = radius
+            self.loiter_radius_requested.emit(radius)
+
     def set_last_alt(self, alt):
         """Called from live telemetry so the dialog defaults to something sane."""
         self._last_alt = alt
@@ -637,6 +655,7 @@ class MainWindow(QMainWindow):
     def __init__(self, connection_string):
         super().__init__()
         self.setWindowTitle(f"MavGCS {APP_VERSION}")
+        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "mavgcs_icon.png")))
         self.resize(1300, 920)
 
         self.horizon = ArtificialHorizon()
@@ -678,6 +697,12 @@ class MainWindow(QMainWindow):
         self.terrain_worker = TerrainRadarWorker(self)
         self.terrain_worker.fan_ready.connect(self.on_terrain_fan_ready)
         self.terrain_worker.start()
+
+        # Same idea for ADS-B - starts disabled, only fetches while the
+        # map's "ADS-B" checkbox is on (see map_view.py's adsb_toggled).
+        self.adsb_worker = AdsbWorker(self)
+        self.adsb_worker.contacts_ready.connect(self.map_view.update_adsb_contacts)
+        self.adsb_worker.start()
 
         left_content = QWidget()
         left_content.setStyleSheet("""
@@ -750,6 +775,8 @@ class MainWindow(QMainWindow):
 
         self.map_view.fly_to_here.connect(self.on_fly_to_here)
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
+        self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
+        self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
         self.waypoint_panel.mode_toggled.connect(self.on_waypoint_mode_toggled)
         self.waypoint_panel.start_requested.connect(self.on_start_mission)
         self.waypoint_panel.clear_requested.connect(self.on_clear_waypoints)
@@ -766,6 +793,7 @@ class MainWindow(QMainWindow):
         self.preflight_cal_panel.calibration_requested.connect(self.on_calibration_requested)
         self.guided_panel.speed_requested.connect(self.on_speed_requested)
         self.guided_panel.altitude_requested.connect(self.on_altitude_requested)
+        self.guided_panel.loiter_radius_requested.connect(self.on_loiter_radius_requested)
 
     def on_attitude(self, roll, pitch, yaw):
         self.horizon.set_attitude(roll, pitch, yaw)
@@ -858,6 +886,11 @@ class MainWindow(QMainWindow):
         link = self._require_link()
         if link:
             link.change_altitude(alt_relative_m, current_alt_relative_m=self._last_alt)
+
+    def on_loiter_radius_requested(self, radius_m):
+        link = self._require_link()
+        if link:
+            link.change_loiter_radius(radius_m)
 
     def on_status(self, status_dict):
         for key, value in status_dict.items():
@@ -1057,6 +1090,7 @@ class MainWindow(QMainWindow):
         if self.link is not None:
             self.link.stop()
         self.terrain_worker.stop()
+        self.adsb_worker.stop()
         event.accept()
 
 
@@ -1064,7 +1098,7 @@ def main():
     connection_string = sys.argv[1] if len(sys.argv) > 1 else "udpin:0.0.0.0:14550"
     app = QApplication(sys.argv)
     window = MainWindow(connection_string)
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
 
 

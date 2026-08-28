@@ -48,6 +48,21 @@ LEAFLET_HTML = """
   }
   #terrain-radar .tr-mode.left { left: 4px; }
   #terrain-radar .tr-mode.right { right: 4px; }
+  .adsb-icon { background: none; border: none; }
+  .adsb-icon .adsb-label {
+    position: absolute; top: 34px; left: 50%; transform: translateX(-50%);
+    white-space: nowrap; font-family: sans-serif; font-size: 10px;
+    font-weight: 700; color: #ffffff;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
+    pointer-events: none;
+  }
+  .adsb-tip {
+    background: rgba(255,255,255,0.95); color: #111;
+    border: none; border-radius: 8px; padding: 4px 9px;
+    font-family: sans-serif; font-size: 11px; font-weight: 600;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  .adsb-tip::before { border-top-color: rgba(255,255,255,0.95); }
   #terrain-radar .tr-placeholder {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: #888; font-size: 11px; text-align: center; padding: 0 8px;
@@ -67,6 +82,18 @@ LEAFLET_HTML = """
            onchange="followDrone = this.checked;"
            style="margin: 0; cursor: pointer;">
     <label for="follow-checkbox" style="cursor: pointer; user-select: none;">Follow UAV</label>
+</div>
+<div id="adsb-control" style="
+    position: absolute; top: 42px; left: 46px;
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 4px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 12px;
+    z-index: 1000; display: flex; align-items: center; gap: 4px;
+" title="Nearby manned air traffic from the free adsb.lol public feed - centered on the UAV, ~50nm radius">
+    <input type="checkbox" id="adsb-checkbox"
+           onchange="setAdsbEnabled(this.checked);"
+           style="margin: 0; cursor: pointer;">
+    <label for="adsb-checkbox" style="cursor: pointer; user-select: none;">ADS-B</label>
 </div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
@@ -270,7 +297,18 @@ function _animateMarker(now) {
         }
 
         if (followDrone && haveCentered) {
-            map.panTo([lat, lon], {animate: false});
+            // Skip sub-pixel pans. panTo() repositions the whole tile layer
+            // and every marker on the map, and its cost scales with the
+            // viewport - which got much bigger once the app started opening
+            // maximized. At 2-3Hz telemetry interpolated over 450ms most
+            // frames move the map by well under a pixel, so those pans cost
+            // real work while changing nothing on screen. Drift accumulates
+            // until it crosses the threshold, so motion stays smooth.
+            var target = map.latLngToContainerPoint([lat, lon]);
+            var centre = map.latLngToContainerPoint(map.getCenter());
+            if (Math.abs(target.x - centre.x) >= 1 || Math.abs(target.y - centre.y) >= 1) {
+                map.panTo([lat, lon], {animate: false});
+            }
         }
     }
     requestAnimationFrame(_animateMarker);
@@ -352,6 +390,174 @@ function clearTarget() {
     if (targetMarker) {
         map.removeLayer(targetMarker);
         targetMarker = null;
+    }
+}
+
+// ---- ADS-B traffic overlay ------------------------------------------------
+// Nearby manned air traffic from adsb.lol's free public API (no key/account
+// needed, no local receiver hardware - one of the same built-in sources
+// KiteGCS's own Radar tool uses). The actual polling happens in Python
+// (see AdsbWorker in adsb_provider.py) and NOT here via fetch() - the API
+// has no CORS headers, so a browser-context fetch() from this page gets
+// blocked outright (confirmed directly: "blocked by CORS policy"), while a
+// plain server-side request from Python has no such restriction. This side
+// just renders whatever contact list Python pushes via renderAdsbContacts().
+var adsbMarkers = {};   // ICAO hex -> marker, reused across polls
+
+// Top-down airliner silhouette (swept wings + tailplane), sized and shaped
+// so its heading reads at a glance - the previous small arrow made the
+// direction ambiguous. The plane rotates to the aircraft's track; the
+// callsign label underneath deliberately does NOT rotate (hence the
+// separate .adsb-rot element that the rotation is applied to).
+function adsbIconFor(callsign) {
+    return L.divIcon({
+        className: 'adsb-icon',
+        html:
+            '<div style="width:34px;height:46px;position:relative;">' +
+              '<div class="adsb-rot" style="width:34px;height:34px;">' +
+                '<svg width="34" height="34" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg">' +
+                  '<path d="M0,-11 C1.1,-11 1.7,-9.6 1.7,-8 L1.7,-4.2 L10.5,1.6 L10.5,4 L1.7,1.6 ' +
+                  'L1.7,6.4 L4.6,8.6 L4.6,10.4 L0,9.2 L-4.6,10.4 L-4.6,8.6 L-1.7,6.4 L-1.7,1.6 ' +
+                  'L-10.5,4 L-10.5,1.6 L-1.7,-4.2 L-1.7,-8 C-1.7,-9.6 -1.1,-11 0,-11 Z" ' +
+                  'fill="#ff2e63" stroke="#ffffff" stroke-width="0.9" stroke-linejoin="round"/>' +
+                '</svg>' +
+              '</div>' +
+              '<div class="adsb-label">' + callsign + '</div>' +
+            '</div>',
+        iconSize: [34, 46],
+        iconAnchor: [17, 17]   // anchor on the plane itself, not the label
+    });
+}
+
+var adsbEnabled = false;
+
+function setAdsbEnabled(enabled) {
+    adsbEnabled = enabled;
+    if (bridge) {
+        // Send the centre first so the immediate poll this triggers has
+        // somewhere to look.
+        sendAdsbCenter();
+        bridge.adsbToggled(enabled);
+    }
+    if (!enabled) {
+        clearAdsbMarkers();
+    }
+}
+
+// Traffic is fetched around the area you're LOOKING AT (the map centre),
+// not around the UAV - the same thing KiteGCS does for its online feeds.
+// These community feeds only cover where volunteers run receivers, so a
+// rural flying site can legitimately show nothing while the map centred on
+// a nearby airway/airport shows plenty.
+function sendAdsbCenter() {
+    if (!bridge) return;
+    var c = map.getCenter();
+    bridge.adsbCenter(c.lat, c.lng);
+}
+
+// Throttled hard: while Follow UAV is on we call map.panTo() on EVERY
+// animation frame, and panTo fires 'moveend' each time - an unthrottled
+// handler here would fire a QWebChannel message to Python ~60x/second and
+// visibly wreck the map's smoothness.
+var adsbLastCenterSent = 0;
+map.on('moveend', function () {
+    if (!adsbEnabled) return;
+    var now = Date.now();
+    if (now - adsbLastCenterSent < 2000) return;
+    adsbLastCenterSent = now;
+    sendAdsbCenter();
+});
+
+function clearAdsbMarkers() {
+    for (var k in adsbMarkers) {
+        map.removeLayer(adsbMarkers[k]);
+    }
+    adsbMarkers = {};
+}
+
+// Great-circle distance in km - used for the "how far from me" figure in
+// each contact's readout, measured from the UAV when we have its position
+// (what actually matters in flight), else from the map centre.
+function adsbDistanceKm(lat, lon) {
+    var ref = marker ? marker.getLatLng() : map.getCenter();
+    var R = 6371, d2r = Math.PI / 180;
+    var dLat = (lat - ref.lat) * d2r, dLon = (lon - ref.lng) * d2r;
+    var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(ref.lat * d2r) * Math.cos(lat * d2r) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function adsbReadout(ac, callsign, track) {
+    // Feeds report feet / knots / feet-per-minute; shown in metric to match
+    // the rest of this app's telemetry.
+    var parts = [callsign];
+    if (typeof ac.alt_baro === 'number') {
+        parts.push(Math.round(ac.alt_baro * 0.3048) + ' m');
+    }
+    if (typeof ac.vert_rate === 'number' && Math.abs(ac.vert_rate) >= 50) {
+        var vs = ac.vert_rate * 0.00508;  // ft/min -> m/s
+        parts.push((vs > 0 ? '▲' : '▼') + Math.abs(vs).toFixed(1) + ' m/s');
+    }
+    if (typeof ac.gs === 'number') {
+        parts.push(Math.round(ac.gs * 1.852) + ' km/h');
+    }
+    parts.push(adsbDistanceKm(ac.lat, ac.lon).toFixed(0) + ' km');
+    parts.push(Math.round(track) + '°');
+    return parts.join(' · ');
+}
+
+// Markers are keyed by ICAO hex and REUSED across polls (moved/relabelled
+// in place), not torn down and rebuilt. At ~70 contacts refreshed every 5s,
+// recreating every divIcon + tooltip + popup meant a burst of DOM churn on
+// each poll - exactly the kind of hitch we just finished removing from the
+// map's motion.
+function renderAdsbContacts(contacts) {
+    var seen = {};
+    for (var i = 0; i < contacts.length; i++) {
+        var ac = contacts[i];
+        if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') continue;
+        var track = typeof ac.track === 'number' ? ac.track : 0;
+        var callsign = (ac.flight || ac.hex || '?').trim();
+        var key = ac.hex || callsign;
+        seen[key] = true;
+
+        var m = adsbMarkers[key];
+        if (!m) {
+            m = L.marker([ac.lat, ac.lon], { icon: adsbIconFor(callsign) }).addTo(map);
+            m.bindTooltip('', { direction: 'top', offset: [0, -14], className: 'adsb-tip' });
+            m.bindPopup('');
+            adsbMarkers[key] = m;
+        } else {
+            m.setLatLng([ac.lat, ac.lon]);
+        }
+
+        // Rotated the same way our own plane marker is (see _animateMarker):
+        // a CSS transform on the icon's rotating element, since vanilla
+        // Leaflet has no marker-rotation option built in.
+        var el = m.getElement();
+        if (el) {
+            var rot = el.querySelector('.adsb-rot');
+            if (rot) rot.style.transform = 'rotate(' + track + 'deg)';
+            var lbl = el.querySelector('.adsb-label');
+            if (lbl && lbl.textContent !== callsign) lbl.textContent = callsign;
+        }
+
+        m.setTooltipContent(adsbReadout(ac, callsign, track));
+        m.setPopupContent(
+            '<b>' + callsign + '</b>' +
+            (ac.type ? ('<br>Type: ' + ac.type) : '') +
+            (ac.squawk ? ('<br>Squawk: ' + ac.squawk) : '') +
+            (ac.hex ? ('<br>ICAO: ' + ac.hex) : '')
+        );
+    }
+
+    // Drop contacts that have dropped out of the feed.
+    for (var k in adsbMarkers) {
+        if (!seen[k]) {
+            map.removeLayer(adsbMarkers[k]);
+            delete adsbMarkers[k];
+        }
     }
 }
 
@@ -541,6 +747,8 @@ class Bridge(QObject):
     """
     fly_to_here = Signal(float, float)
     waypoint_added = Signal(float, float)
+    adsb_toggled = Signal(bool)
+    adsb_center_changed = Signal(float, float)
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
@@ -550,10 +758,20 @@ class Bridge(QObject):
     def waypointAdded(self, lat, lon):
         self.waypoint_added.emit(lat, lon)
 
+    @Slot(bool)
+    def adsbToggled(self, enabled):
+        self.adsb_toggled.emit(enabled)
+
+    @Slot(float, float)
+    def adsbCenter(self, lat, lon):
+        self.adsb_center_changed.emit(lat, lon)
+
 
 class MapView(QWebEngineView):
     fly_to_here = Signal(float, float)
     waypoint_added = Signal(float, float)
+    adsb_toggled = Signal(bool)
+    adsb_center_changed = Signal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -561,6 +779,8 @@ class MapView(QWebEngineView):
         self._bridge = Bridge()
         self._bridge.fly_to_here.connect(self.fly_to_here)
         self._bridge.waypoint_added.connect(self.waypoint_added)
+        self._bridge.adsb_toggled.connect(self.adsb_toggled)
+        self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
 
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
@@ -602,3 +822,9 @@ class MapView(QWebEngineView):
         """Push current altitude/speed/climb for the terrain radar's live
         (no new sampling) colour recompute - called on every telemetry tick."""
         self.page().runJavaScript(f"setTerrainRef({alt_msl}, {ground_speed}, {climb_mps});")
+
+    def update_adsb_contacts(self, contacts: list):
+        """Push a freshly-fetched ADS-B contact list (see AdsbWorker) for the
+        map to render as markers - replaces whatever was shown before."""
+        self.page().runJavaScript(f"renderAdsbContacts({json.dumps(contacts)});")
+

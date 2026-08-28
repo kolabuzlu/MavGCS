@@ -313,6 +313,18 @@ class MavlinkLink(QThread):
                     result_name = f"result {msg.result}"
                 self.command_feedback.emit(f"ACK: {cmd_name} -> {result_name}")
 
+            elif mtype == "PARAM_VALUE":
+                # Confirmation for change_loiter_radius() - a PARAM_SET is
+                # fire-and-forget (no COMMAND_ACK), so the echoed
+                # PARAM_VALUE is the only proof the vehicle took the value.
+                param_id = msg.param_id
+                if isinstance(param_id, bytes):
+                    param_id = param_id.decode(errors="replace")
+                if param_id.rstrip("\x00") == "WP_LOITER_RAD":
+                    self.command_feedback.emit(
+                        f"Loiter radius now {msg.param_value:.0f} m"
+                    )
+
             elif mtype == "WIND":
                 # ArduPilot-specific message (id 168): direction is where
                 # the wind is coming FROM, in degrees; speed in m/s.
@@ -727,6 +739,37 @@ class MavlinkLink(QThread):
             )
         except Exception as e:
             self.command_feedback.emit(f"Failed to change altitude: {e}")
+
+    def change_loiter_radius(self, radius_m: float):
+        """
+        Change the loiter radius by setting ArduPlane's WP_LOITER_RAD
+        parameter via PARAM_SET - the same mechanism Mission Planner uses
+        for this (it's a parameter, not a command: there is no MAVLink
+        "set loiter radius" message). Applies to every loiter the vehicle
+        flies from then on - LOITER mode, RTL's circle, AUTO loiter
+        waypoints - not just the current one.
+
+        A negative radius is meaningful to ArduPlane, not an error: it
+        makes the aircraft circle counter-clockwise instead of clockwise.
+
+        The vehicle echoes a PARAM_VALUE back on success, which the run()
+        loop turns into confirmation feedback.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't change loiter radius")
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_set_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    b"WP_LOITER_RAD",
+                    float(radius_m),
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+                )
+            self.command_feedback.emit(f"Requested loiter radius: {radius_m:.0f} m")
+        except Exception as e:
+            self.command_feedback.emit(f"Failed to change loiter radius: {e}")
 
     def set_mode(self, mode_name: str):
         """
