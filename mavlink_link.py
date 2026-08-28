@@ -219,6 +219,10 @@ class MavlinkLink(QThread):
                 self.position_update.emit(lat, lon, alt, heading)
 
                 self._last_amsl_alt_m = msg.alt / 1000.0
+                # AMSL (not relative) altitude - needed to compare against
+                # Copernicus terrain elevation for the terrain radar, which
+                # is geoid-referenced (~= MSL), not relative-to-home.
+                self.status_update.emit({"amsl_alt": f"{self._last_amsl_alt_m:.2f}"})
                 if self._home_lat is not None:
                     dist_home = self._haversine_m(lat, lon, self._home_lat, self._home_lon)
                     self.status_update.emit({"dist_home": f"{dist_home:.2f}"})

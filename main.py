@@ -17,9 +17,9 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.8.0 - ESRI World Imagery + Imagery Hybrid map layers
-# added alongside Google Hybrid/OpenStreetMap. See CHANGELOG.md.
-APP_VERSION = "V1.8.0"
+# This is MavGCS V1.9.0 - forward-looking Terrain Radar overlay on the map,
+# free Copernicus GLO-30 elevation data, no API key needed. See CHANGELOG.md.
+APP_VERSION = "V1.9.0"
 
 import sys
 import math
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
+from terrain_provider import TerrainRadarWorker
 
 
 class TelemetryPanel(QFrame):
@@ -647,6 +648,17 @@ class MainWindow(QMainWindow):
         self._last_lat = None
         self._last_lon = None
         self._waypoint_queue = []  # list of (lat, lon) tuples, in click order
+        self._last_amsl_alt = 0.0
+        self._last_groundspeed = 0.0
+        self._last_climb = 0.0
+
+        # Runs independently of the mavlink connection lifecycle (it just
+        # sits idle with no valid telemetry until on_position/on_vfr start
+        # feeding it) - terrain tile downloads take real time, so this
+        # can't run on the GUI thread. See terrain_provider.py.
+        self.terrain_worker = TerrainRadarWorker(self)
+        self.terrain_worker.fan_ready.connect(self.on_terrain_fan_ready)
+        self.terrain_worker.start()
 
         left_content = QWidget()
         left_content.setStyleSheet("""
@@ -752,12 +764,21 @@ class MainWindow(QMainWindow):
         self.guided_panel.set_last_alt(alt)
         self.telemetry.set_value("altitude", f"{alt:.2f}")
         self.map_view.update_position(lat, lon, heading)
+        self.terrain_worker.update_telemetry(lat, lon, heading, self._last_groundspeed)
+        self.map_view.update_terrain_reference(
+            self._last_amsl_alt, self._last_groundspeed, self._last_climb
+        )
+
+    def on_terrain_fan_ready(self, elevations, range_m, ang_cells, rad_cells):
+        self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)
 
     def on_vfr(self, airspeed, groundspeed, climb):
         self.telemetry.set_value("airspeed", f"{airspeed:.2f}")
         self.telemetry.set_value("groundspeed", f"{groundspeed:.2f}")
         self.telemetry.set_value("vspeed_mps", f"{climb:.2f}")
         self.horizon.set_airspeed(airspeed)
+        self._last_groundspeed = groundspeed
+        self._last_climb = climb
 
     def on_wind(self, direction, speed):
         self.horizon.set_wind(direction, speed)
@@ -813,6 +834,8 @@ class MainWindow(QMainWindow):
             self.horizon.set_vibe_status(status_dict["vibe_color"])
         if "battery_voltage" in status_dict:
             self.horizon.set_battery_voltage(float(status_dict["battery_voltage"]))
+        if "amsl_alt" in status_dict:
+            self._last_amsl_alt = float(status_dict["amsl_alt"])
 
     def on_connection_status(self, connected, message):
         self.status_label.setText(message)
@@ -989,6 +1012,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.link is not None:
             self.link.stop()
+        self.terrain_worker.stop()
         event.accept()
 
 

@@ -4,6 +4,8 @@ QWebChannel bridge so a map click can call back into Python (used for the
 "Fly to Here" guided-mode command).
 """
 
+import json
+
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtCore import QUrl, QObject, Signal, Slot
@@ -20,6 +22,35 @@ LEAFLET_HTML = """
   .fly-to-btn {
     margin-top: 4px; padding: 4px 10px; cursor: pointer;
     background: #2a6; color: white; border: none; border-radius: 4px;
+  }
+  #terrain-radar {
+    position: absolute; bottom: 26px; right: 8px;
+    width: 200px; height: 200px;
+    background: rgba(30,30,30,0.75);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    z-index: 1000;
+    overflow: hidden;
+    font-family: sans-serif;
+  }
+  #terrain-radar svg { display: block; width: 100%; height: 100%; }
+  #terrain-radar .tr-arc { fill: none; stroke: rgba(255,255,255,0.22); stroke-width: 1; }
+  #terrain-radar .tr-edge { fill: none; stroke: rgba(255,255,255,0.28); stroke-width: 1; }
+  #terrain-radar .tr-hdg { stroke: rgba(255,255,255,0.35); stroke-width: 1; stroke-dasharray: 4 3; }
+  #terrain-radar .tr-dist-label { fill: #b8b8b8; }
+  #terrain-radar .tr-uav-ring { fill: rgba(55,168,219,0.25); stroke: #fff; stroke-width: 2; }
+  #terrain-radar .tr-uav-dot { fill: #fff; stroke: #1a1a1a; stroke-width: 1; }
+  #terrain-radar .tr-mode {
+    position: absolute; top: 4px; padding: 2px 8px; font-size: 12px; font-weight: 700;
+    letter-spacing: 0.05em; color: #37a8db; background: rgba(0,0,0,0.4);
+    border: 1px solid rgba(55,168,219,0.4); border-radius: 6px; cursor: pointer;
+    font-family: sans-serif;
+  }
+  #terrain-radar .tr-mode.left { left: 4px; }
+  #terrain-radar .tr-mode.right { right: 4px; }
+  #terrain-radar .tr-placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #888; font-size: 11px; text-align: center; padding: 0 8px;
   }
 </style>
 </head>
@@ -44,6 +75,23 @@ LEAFLET_HTML = """
     font-family: sans-serif; font-size: 11px;
     z-index: 1000; pointer-events: none;
 ">Created by Derin Hakan Karakurt</div>
+<div id="terrain-radar">
+    <svg id="tr-svg" viewBox="0 0 200 200" style="display:none;">
+        <defs>
+            <clipPath id="tr-fan-clip"><path id="tr-fan-sector" d="" /></clipPath>
+        </defs>
+        <g id="tr-cells" clip-path="url(#tr-fan-clip)" opacity="0.85"></g>
+        <g id="tr-arcs"></g>
+        <path id="tr-edges" class="tr-edge" d="" />
+        <line id="tr-hdg-line" class="tr-hdg" x1="100" y1="0" x2="100" y2="0" />
+        <g id="tr-labels"></g>
+        <circle id="tr-uav-ring" class="tr-uav-ring" cx="100" cy="191" r="6" />
+        <circle id="tr-uav-dot" class="tr-uav-dot" cx="100" cy="191" r="3" />
+    </svg>
+    <div id="tr-placeholder" class="tr-placeholder">Terrain Radar - no data</div>
+    <button class="tr-mode left" onclick="cycleTerrainScale()" id="tr-scale-btn">120m</button>
+    <button class="tr-mode right" onclick="toggleTerrainMode()" id="tr-mode-btn">REL</button>
+</div>
 <script>
 // Set up before Leaflet loads and stays independent of it, so a map/tile
 // failure can't also take down the fly-to bridge.
@@ -306,6 +354,180 @@ function clearTarget() {
         targetMarker = null;
     }
 }
+
+// ---- Terrain Radar overlay -----------------------------------------------
+// Forward-looking, track-up terrain-awareness fan (EGPWS-style), ported
+// from KiteGCS's own terrain radar widget - same idea, same free Copernicus
+// GLO-30 elevation source (see terrain_provider.py), plain SVG here instead
+// of Svelte. Python pushes two kinds of updates:
+//   setTerrainFan()  - raw elevations. Rare: only when the vehicle's
+//                       position/heading/range moved enough to matter,
+//                       since a new fan can mean a fresh terrain tile
+//                       download on the Python side.
+//   setTerrainRef()  - current altitude/speed/climb. Frequent and cheap:
+//                       just recolours the already-sampled cells, no new
+//                       sampling - mirrors Kite's split between expensive
+//                       geometry and live colour.
+var TR_SIZE = 200;
+var TR_HALF_ANGLE = 60 * Math.PI / 180;  // must match TerrainRadarWorker.HALF_ANGLE_DEG
+var TR_RING_R = 6, TR_APEX_Y = TR_SIZE - TR_RING_R - 3, TR_R = TR_APEX_Y - 6;
+var TR_SCALES = [60, 120, 250];  // total clearance colour scale, metres
+var trScaleIdx = 1;
+var trPredictive = false;
+var trFan = null;  // {elev, rangeM, angCells, radCells, cellEls}
+var trAltMsl = 0, trSpeed = 0;
+var trVarioBuf = [];
+
+function trPx(thetaRel, dist, range) {
+    var r = (dist / range) * TR_R;
+    return [TR_SIZE / 2 + r * Math.sin(thetaRel), TR_APEX_Y - r * Math.cos(thetaRel)];
+}
+
+var TR_RAMP = [[231, 76, 60], [230, 126, 34], [241, 196, 15], [46, 204, 113]];
+function trRamp(t) {
+    var x = Math.min(1, Math.max(0, t)) * (TR_RAMP.length - 1);
+    var i = Math.min(TR_RAMP.length - 2, Math.floor(x));
+    var f = x - i, a = TR_RAMP[i], b = TR_RAMP[i + 1];
+    return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * f) + ',' +
+        Math.round(a[1] + (b[1] - a[1]) * f) + ',' + Math.round(a[2] + (b[2] - a[2]) * f) + ')';
+}
+
+function trSlope() {
+    if (trSpeed <= 2 || trVarioBuf.length === 0) return 0;
+    var avg = trVarioBuf.reduce(function (a, b) { return a + b; }, 0) / trVarioBuf.length;
+    return avg / trSpeed;
+}
+
+// Continuous red -> green ramp over 0..scale (clearance < 0 clamps red,
+// terrain more than `scale` below the reference is unpainted/transparent).
+function trColorFor(elev, dist) {
+    if (elev === null || elev === undefined) return null;
+    var scale = TR_SCALES[trScaleIdx];
+    var ref = trPredictive ? (trAltMsl + trSlope() * dist) : trAltMsl;
+    var clear = ref - elev;
+    if (clear >= scale) return null;
+    return trRamp(clear / scale);
+}
+
+function setTerrainRef(altMsl, groundSpeed, climbMps) {
+    trAltMsl = altMsl;
+    trSpeed = groundSpeed;
+    trVarioBuf.push(climbMps);
+    if (trVarioBuf.length > 5) trVarioBuf.shift();
+    trRenderTerrainRadar();
+}
+
+function setTerrainFan(elevJson, rangeM, angCells, radCells) {
+    trFan = { elev: elevJson, rangeM: rangeM, angCells: angCells, radCells: radCells };
+    trBuildTerrainGeometry();
+    trRenderTerrainRadar();
+}
+
+function trBuildTerrainGeometry() {
+    if (!trFan) return;
+    document.getElementById('tr-svg').style.display = 'block';
+    document.getElementById('tr-placeholder').style.display = 'none';
+
+    var range = trFan.rangeM, ang = trFan.angCells, rad = trFan.radCells;
+    var half = TR_HALF_ANGLE;
+    var SVGNS = 'http://www.w3.org/2000/svg';
+
+    var cellsG = document.getElementById('tr-cells');
+    cellsG.innerHTML = '';
+    trFan.cellEls = [];
+    for (var a = 0; a < ang; a++) {
+        var tA = -half + (2 * half * a) / ang, tB = -half + (2 * half * (a + 1)) / ang;
+        for (var b = 0; b < rad; b++) {
+            var r0 = range * b / rad, r1 = range * (b + 1) / rad;
+            var p0 = trPx(tA, r0, range), p1 = trPx(tB, r0, range);
+            var p2 = trPx(tB, r1, range), p3 = trPx(tA, r1, range);
+            var path = document.createElementNS(SVGNS, 'path');
+            path.setAttribute('d',
+                'M' + p0[0].toFixed(1) + ' ' + p0[1].toFixed(1) +
+                'L' + p1[0].toFixed(1) + ' ' + p1[1].toFixed(1) +
+                'L' + p2[0].toFixed(1) + ' ' + p2[1].toFixed(1) +
+                'L' + p3[0].toFixed(1) + ' ' + p3[1].toFixed(1) + 'Z');
+            cellsG.appendChild(path);
+            trFan.cellEls.push({ el: path, dist: range * (b + 0.5) / rad, elev: trFan.elev[a * rad + b] });
+        }
+    }
+
+    // Fan sector (apex -> outer arc -> apex), used to clip the cells above.
+    var sectorD = 'M' + (TR_SIZE / 2) + ' ' + TR_APEX_Y;
+    for (var s = 0; s <= ang; s++) {
+        var th = -half + (2 * half * s) / ang;
+        var p = trPx(th, range, range);
+        sectorD += 'L' + p[0].toFixed(1) + ' ' + p[1].toFixed(1);
+    }
+    document.getElementById('tr-fan-sector').setAttribute('d', sectorD + 'Z');
+
+    // Range arcs (thirds) + distance labels.
+    var arcsG = document.getElementById('tr-arcs');
+    var labelsG = document.getElementById('tr-labels');
+    arcsG.innerHTML = '';
+    labelsG.innerHTML = '';
+    for (var k = 1; k <= 3; k++) {
+        var dist = range * k / 3;
+        var d = '';
+        for (var s2 = 0; s2 <= ang; s2++) {
+            var th2 = -half + (2 * half * s2) / ang;
+            var pa = trPx(th2, dist, range);
+            d += (s2 === 0 ? 'M' : 'L') + pa[0].toFixed(1) + ' ' + pa[1].toFixed(1);
+        }
+        var arcPath = document.createElementNS(SVGNS, 'path');
+        arcPath.setAttribute('class', 'tr-arc');
+        arcPath.setAttribute('d', d);
+        arcsG.appendChild(arcPath);
+
+        var rr = (dist / range) * TR_R;
+        var label = document.createElementNS(SVGNS, 'text');
+        label.setAttribute('class', 'tr-dist-label');
+        label.setAttribute('x', TR_SIZE / 2 + 3);
+        label.setAttribute('y', TR_APEX_Y - rr + 4);
+        label.setAttribute('style', 'font-size:9px;');
+        label.textContent = Math.round(dist);
+        labelsG.appendChild(label);
+    }
+
+    // Fan edges + heading line (always straight up - the fan is already
+    // track-up since terrain was sampled relative to heading, not true bearing).
+    var l = trPx(-half, range, range), r = trPx(half, range, range);
+    document.getElementById('tr-edges').setAttribute('d',
+        'M' + (TR_SIZE / 2) + ' ' + TR_APEX_Y + 'L' + l[0].toFixed(1) + ' ' + l[1].toFixed(1) +
+        'M' + (TR_SIZE / 2) + ' ' + TR_APEX_Y + 'L' + r[0].toFixed(1) + ' ' + r[1].toFixed(1));
+    var top = trPx(0, range, range);
+    var hdgLine = document.getElementById('tr-hdg-line');
+    hdgLine.setAttribute('x1', TR_SIZE / 2); hdgLine.setAttribute('y1', TR_APEX_Y);
+    hdgLine.setAttribute('x2', top[0].toFixed(1)); hdgLine.setAttribute('y2', top[1].toFixed(1));
+
+    document.getElementById('tr-scale-btn').textContent = TR_SCALES[trScaleIdx] + 'm';
+    document.getElementById('tr-mode-btn').textContent = trPredictive ? 'PRED' : 'REL';
+}
+
+function trRenderTerrainRadar() {
+    if (!trFan || !trFan.cellEls) return;
+    for (var i = 0; i < trFan.cellEls.length; i++) {
+        var c = trFan.cellEls[i];
+        var fill = trColorFor(c.elev, c.dist);
+        if (fill) {
+            c.el.setAttribute('fill', fill);
+            c.el.style.display = '';
+        } else {
+            c.el.style.display = 'none';
+        }
+    }
+}
+
+function toggleTerrainMode() {
+    trPredictive = !trPredictive;
+    document.getElementById('tr-mode-btn').textContent = trPredictive ? 'PRED' : 'REL';
+    trRenderTerrainRadar();
+}
+function cycleTerrainScale() {
+    trScaleIdx = (trScaleIdx + 1) % TR_SCALES.length;
+    document.getElementById('tr-scale-btn').textContent = TR_SCALES[trScaleIdx] + 'm';
+    trRenderTerrainRadar();
+}
 </script>
 </body>
 </html>
@@ -367,3 +589,16 @@ class MapView(QWebEngineView):
 
     def commit_waypoints(self):
         self.page().runJavaScript("commitWaypoints();")
+
+    def update_terrain_fan(self, elevations: list, range_m: float, ang_cells: int, rad_cells: int):
+        """Push a freshly-sampled terrain fan (see TerrainRadarWorker) - rare,
+        only called when position/heading/range moved enough to matter."""
+        elev_json = json.dumps(elevations)
+        self.page().runJavaScript(
+            f"setTerrainFan({elev_json}, {range_m}, {ang_cells}, {rad_cells});"
+        )
+
+    def update_terrain_reference(self, alt_msl: float, ground_speed: float, climb_mps: float):
+        """Push current altitude/speed/climb for the terrain radar's live
+        (no new sampling) colour recompute - called on every telemetry tick."""
+        self.page().runJavaScript(f"setTerrainRef({alt_msl}, {ground_speed}, {climb_mps});")

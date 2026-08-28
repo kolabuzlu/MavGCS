@@ -1,3 +1,6 @@
 PySide6
 pymavlink
 pyserial
+numpy
+tifffile
+imagecodecs

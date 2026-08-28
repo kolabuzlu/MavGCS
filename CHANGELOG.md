@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V1.9.0 - Terrain Radar (forward-looking terrain awareness on the map)
+
 ## V1.8.0 - ESRI World Imagery added.
 
 ## V1.7.0 - Mission clear function added.
