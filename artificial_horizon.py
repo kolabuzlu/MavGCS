@@ -1,0 +1,395 @@
+"""
+A minimal artificial horizon (attitude indicator), drawn by hand with
+QPainter. No image assets needed.
+
+The trick behind every AI (attitude indicator) widget:
+  - Draw a big sky/ground rectangle pair, offset vertically by pitch,
+    then rotate the whole thing by -roll around the center.
+  - Draw the little yellow aircraft symbol and roll pointer un-rotated,
+    on top, since those stay fixed relative to the pilot's eyes.
+"""
+
+import math
+from PySide6.QtWidgets import QWidget, QComboBox
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QFont
+from PySide6.QtCore import Qt, QPointF, QRectF
+
+
+class ArtificialHorizon(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.roll = 0.0   # radians
+        self.pitch = 0.0  # radians
+        self.airspeed = None   # m/s, None until first update
+        self.altitude = None   # m, None until first update
+        self.heading = None    # degrees, None until first update
+        self.wind_dir = None   # degrees (direction wind is coming FROM), None until first update
+        self.wind_speed = None  # m/s, None until first update
+        self.battery_voltage = None  # total pack voltage (V), None until first update
+        self.cell_count = 4  # default guess: 4S is a common pack size
+        self.lat = None  # deg, None until first GLOBAL_POSITION_INT
+        self.lon = None  # deg, None until first GLOBAL_POSITION_INT
+        self.setMinimumSize(220, 220)
+
+        # A combo box has to be a real interactive widget, not something
+        # drawn in paintEvent - positioned to sit inside the battery box
+        # that IS painted there (see _battery_box_rect / resizeEvent).
+        self.cell_selector = QComboBox(self)
+        self.cell_selector.addItems(["3S", "4S", "6S"])
+        self.cell_selector.setCurrentText("4S")
+        self.cell_selector.setStyleSheet(
+            "QComboBox { background-color: #0f0f0f; color: white; "
+            "font-size: 9px; border: 1px solid white; padding: 1px 2px; }"
+            "QComboBox QAbstractItemView { background-color: #0f0f0f; color: white; }"
+        )
+        self.cell_selector.currentTextChanged.connect(self._on_cell_count_changed)
+        self._position_battery_widgets()
+
+    def _on_cell_count_changed(self, text):
+        try:
+            self.cell_count = int(text.rstrip("Ss"))
+        except ValueError:
+            self.cell_count = 4
+        self.update()
+
+    def _battery_box_rect(self):
+        box_w, box_h, margin = 104, 44, 6
+        return QRectF(self.width() - margin - box_w, margin, box_w, box_h)
+
+    def _position_battery_widgets(self):
+        rect = self._battery_box_rect()
+        combo_w, combo_h = 44, 16
+        x = int(rect.right() - 6 - combo_w)
+        y = int(rect.bottom() - 6 - combo_h)
+        self.cell_selector.setGeometry(x, y, combo_w, combo_h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_battery_widgets()
+
+    def set_battery_voltage(self, voltage):
+        self.battery_voltage = voltage
+        self.update()
+
+    def set_attitude(self, roll, pitch, yaw=0.0):
+        self.roll = roll
+        self.pitch = pitch
+        self.update()  # schedules a repaint
+
+    def set_airspeed(self, airspeed):
+        self.airspeed = airspeed
+        self.update()
+
+    def set_altitude(self, altitude):
+        self.altitude = altitude
+        self.update()
+
+    def set_heading(self, heading_deg):
+        self.heading = heading_deg % 360
+        self.update()
+
+    def set_position(self, lat, lon):
+        self.lat = lat
+        self.lon = lon
+        self.update()
+
+    def set_wind(self, direction_deg, speed_mps):
+        self.wind_dir = direction_deg % 360 if direction_deg is not None else None
+        self.wind_speed = speed_mps
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w, h = self.width(), self.height()
+        cx, cy = w / 2.0, h / 2.0
+        size = min(w, h)
+
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(-math.degrees(self.roll))
+
+        pixels_per_deg = size / 90.0
+        offset = math.degrees(self.pitch) * pixels_per_deg
+        big = size * 2
+
+        # Sky
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(70, 130, 220)))
+        painter.drawRect(QRectF(-big, -big + offset, 2 * big, big))
+
+        # Ground
+        painter.setBrush(QBrush(QColor(120, 80, 40)))
+        painter.drawRect(QRectF(-big, offset, 2 * big, big))
+
+        # Horizon line
+        painter.setPen(QPen(Qt.white, 2))
+        painter.drawLine(QPointF(-big, offset), QPointF(big, offset))
+
+        # Pitch ladder
+        painter.setFont(QFont("Sans", 8))
+        for deg in range(-90, 91, 10):
+            if deg == 0:
+                continue
+            y = offset - deg * pixels_per_deg
+            line_w = size * 0.15 if deg % 30 == 0 else size * 0.08
+            painter.setPen(QPen(Qt.white, 1))
+            painter.drawLine(QPointF(-line_w, y), QPointF(line_w, y))
+            painter.drawText(QPointF(line_w + 4, y + 4), str(deg))
+
+        painter.restore()
+
+        # Roll scale arc (fixed) + roll pointer (rotates) - drawn before
+        # the heading tape now, so the tape paints on top of it instead of
+        # the arc's line showing through the tape.
+        radius = size * 0.38
+        painter.setPen(QPen(Qt.white, 2))
+        painter.drawArc(
+            QRectF(cx - radius, cy - radius, 2 * radius, 2 * radius),
+            30 * 16, 120 * 16,
+        )
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(-math.degrees(self.roll))
+        tri = QPolygonF(
+            [QPointF(0, -radius + 2), QPointF(-6, -radius + 14), QPointF(6, -radius + 14)]
+        )
+        painter.setBrush(QBrush(Qt.white))
+        painter.setPen(Qt.NoPen)
+        painter.drawPolygon(tri)
+        painter.restore()
+
+        # Heading tape - top center, fixed (doesn't rotate/translate with
+        # roll or pitch, like the airspeed/altitude boxes). Drawn with a
+        # solidly opaque background so it cleanly layers on top of the
+        # roll arc/pitch ladder underneath, same as a real PFD's compass
+        # strip sitting above the attitude ball.
+        heading = self.heading if self.heading is not None else 0.0
+        tape_w = min(size * 0.85, w * 0.50)
+        tape_h = 26
+        tape_rect = QRectF(cx - tape_w / 2, 4, tape_w, tape_h)
+
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
+        painter.drawRect(tape_rect)
+
+        painter.setClipRect(tape_rect)
+        pixels_per_deg = tape_w / 60.0  # shows +/-30 deg around current heading
+        cardinal = {0: "N", 90: "E", 180: "S", 270: "W"}
+        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        for delta in range(-30, 31):
+            deg = round(heading + delta) % 360
+            if deg % 10 != 0:
+                continue
+            x = cx + delta * pixels_per_deg
+            major = deg % 30 == 0
+            tick_h = 9 if major else 5
+            painter.setPen(QPen(Qt.white, 1))
+            painter.drawLine(
+                QPointF(x, tape_rect.bottom() - tick_h), QPointF(x, tape_rect.bottom())
+            )
+            if major:
+                label = cardinal.get(deg, f"{deg:03d}")
+                painter.drawText(QRectF(x - 15, tape_rect.top() + 1, 30, 14), Qt.AlignCenter, label)
+        painter.setClipping(False)
+
+        # Digital heading readout embedded IN the tape itself (standard PFD
+        # layout) rather than as a separate box below it - a floating box
+        # below the tape sits at almost the same height as the roll arc's
+        # top / pitch-ladder labels and collided with them.
+        readout_w = 42
+        readout_rect = QRectF(cx - readout_w / 2, tape_rect.top() + 1, readout_w, tape_h - 2)
+        painter.setPen(QPen(Qt.yellow, 1))
+        painter.setBrush(QBrush(QColor(15, 15, 15, 255)))
+        painter.drawRect(readout_rect)
+        painter.setPen(QPen(Qt.yellow))
+        painter.setFont(QFont("Sans", 10, QFont.Bold))
+        text = f"{int(round(heading)):03d}" if self.heading is not None else "---"
+        painter.drawText(readout_rect, Qt.AlignCenter, text)
+
+        # Small pointer triangle just below the tape, pointing up into it -
+        # stays clear of the roll arc since it's only ~7px tall.
+        pointer = QPolygonF([
+            QPointF(cx, tape_rect.bottom() + 7),
+            QPointF(cx - 6, tape_rect.bottom()),
+            QPointF(cx + 6, tape_rect.bottom()),
+        ])
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(Qt.yellow))
+        painter.drawPolygon(pointer)
+
+        # Wind indicator - top left corner, fixed. Shows direction as a
+        # rotating arrow (pointing toward where the wind is coming FROM,
+        # matching the WIND message's own convention) plus numeric
+        # direction and speed.
+        wind_box_w = 92
+        wind_box_h = 40
+        wind_rect = QRectF(6, 6, wind_box_w, wind_box_h)
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        painter.drawRect(wind_rect)
+
+        arrow_cx = wind_rect.left() + 18
+        arrow_cy = wind_rect.top() + wind_box_h / 2
+        painter.save()
+        painter.translate(arrow_cx, arrow_cy)
+        if self.wind_dir is not None:
+            # Arrow shows the direction the wind is blowing TOWARD, relative
+            # to the nose (up = straight ahead of the aircraft):
+            #   heading-relative "blows toward" bearing = wind source + 180,
+            #   then rotated into the aircraft's frame by subtracting heading.
+            # A headwind (wind source dead ahead) blows toward the tail ->
+            # points down. Wind from the left blows toward the right ->
+            # points right.
+            heading_ref = self.heading if self.heading is not None else 0.0
+            relative_angle = (self.wind_dir - heading_ref + 180) % 360
+            painter.rotate(relative_angle)
+        painter.setPen(QPen(QColor(120, 220, 255), 2))
+        painter.drawLine(QPointF(0, 11), QPointF(0, -11))
+        arrow_tip = QPolygonF([QPointF(0, -11), QPointF(-4, -3), QPointF(4, -3)])
+        painter.setBrush(QBrush(QColor(120, 220, 255)))
+        painter.setPen(Qt.NoPen)
+        painter.drawPolygon(arrow_tip)
+        painter.restore()
+
+        painter.setPen(QPen(Qt.white))
+        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        dir_text = f"{int(round(self.wind_dir)):03d}\u00b0" if self.wind_dir is not None else "---\u00b0"
+        painter.drawText(
+            QRectF(wind_rect.left() + 32, wind_rect.top() + 4, wind_box_w - 36, 16),
+            Qt.AlignVCenter | Qt.AlignLeft, dir_text,
+        )
+        painter.setFont(QFont("Sans", 8))
+        speed_text = f"{self.wind_speed * 3.6:.1f} kph" if self.wind_speed is not None else "-- kph"
+        painter.drawText(
+            QRectF(wind_rect.left() + 32, wind_rect.top() + 20, wind_box_w - 36, 16),
+            Qt.AlignVCenter | Qt.AlignLeft, speed_text,
+        )
+
+        # Battery indicator - top right corner, fixed. Total pack voltage
+        # on top, per-cell voltage below (computed from the S-count
+        # selector, since MAVLink only reports total voltage - it has no
+        # concept of cell count). The selector itself is a real QComboBox
+        # child widget (see _position_battery_widgets), not painted here.
+        batt_rect = self._battery_box_rect()
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        painter.drawRect(batt_rect)
+
+        painter.setPen(QPen(Qt.white))
+        painter.setFont(QFont("Sans", 10, QFont.Bold))
+        total_text = f"{self.battery_voltage:.2f} V" if self.battery_voltage is not None else "-- V"
+        painter.drawText(
+            QRectF(batt_rect.left() + 6, batt_rect.top() + 3, batt_rect.width() - 12, 18),
+            Qt.AlignVCenter | Qt.AlignLeft, total_text,
+        )
+
+        painter.setFont(QFont("Sans", 8))
+        if self.battery_voltage is not None and self.cell_count:
+            cell_text = f"{self.battery_voltage / self.cell_count:.2f} V/c"
+        else:
+            cell_text = "-- V/c"
+        # Leave room on the right for the cell_selector combo box that
+        # sits over this same row.
+        painter.drawText(
+            QRectF(batt_rect.left() + 6, batt_rect.top() + 22, batt_rect.width() - 58, 16),
+            Qt.AlignVCenter | Qt.AlignLeft, cell_text,
+        )
+
+        # Fixed aircraft symbol (always horizontal, always centered)
+        painter.setPen(QPen(Qt.yellow, 3))
+        painter.drawLine(QPointF(cx - size * 0.2, cy), QPointF(cx - size * 0.05, cy))
+        painter.drawLine(QPointF(cx + size * 0.05, cy), QPointF(cx + size * 0.2, cy))
+        painter.setBrush(QBrush(Qt.yellow))
+        painter.drawEllipse(QPointF(cx, cy), 3, 3)
+
+        # Airspeed (left) and altitude (right) readout boxes, PFD-style.
+        # These are drawn un-rotated/un-translated by roll or pitch - they
+        # stay fixed relative to the viewer, like a real HUD tape. Anchored
+        # to the widget's actual edges (not the horizon circle radius) so
+        # they stay on-screen regardless of the widget's aspect ratio.
+        margin = 6
+        box_w = min(size * 0.24, w * 0.32)
+        box_h = size * 0.16
+
+        painter.setFont(QFont("Sans", 11, QFont.Bold))
+
+        # Airspeed box - middle left
+        airspeed_rect = QRectF(margin, cy - box_h / 2, box_w, box_h)
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+        painter.drawRect(airspeed_rect)
+        painter.setPen(QPen(Qt.white))
+        text = f"{self.airspeed:.1f}" if self.airspeed is not None else "--"
+        painter.drawText(airspeed_rect, Qt.AlignCenter, text)
+        painter.setFont(QFont("Sans", 7))
+        painter.drawText(
+            QRectF(airspeed_rect.x(), airspeed_rect.bottom() + 2, box_w, 14),
+            Qt.AlignHCenter, "IAS m/s",
+        )
+        # Pointer tab connecting the box to the horizon centerline
+        tab = QPolygonF([
+            QPointF(airspeed_rect.right(), cy - 8),
+            QPointF(airspeed_rect.right() + 8, cy),
+            QPointF(airspeed_rect.right(), cy + 8),
+        ])
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+        painter.drawPolygon(tab)
+        painter.setPen(QPen(Qt.white, 1))
+        painter.drawLine(tab.at(0), tab.at(1))
+        painter.drawLine(tab.at(1), tab.at(2))
+
+        # Altitude box - middle right
+        painter.setFont(QFont("Sans", 11, QFont.Bold))
+        altitude_rect = QRectF(w - margin - box_w, cy - box_h / 2, box_w, box_h)
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+        painter.drawRect(altitude_rect)
+        painter.setPen(QPen(Qt.white))
+        text = f"{self.altitude:.1f}" if self.altitude is not None else "--"
+        painter.drawText(altitude_rect, Qt.AlignCenter, text)
+        painter.setFont(QFont("Sans", 7))
+        painter.drawText(
+            QRectF(altitude_rect.x(), altitude_rect.bottom() + 2, box_w, 14),
+            Qt.AlignHCenter, "ALT m",
+        )
+        tab = QPolygonF([
+            QPointF(altitude_rect.left(), cy - 8),
+            QPointF(altitude_rect.left() - 8, cy),
+            QPointF(altitude_rect.left(), cy + 8),
+        ])
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+        painter.drawPolygon(tab)
+        painter.setPen(QPen(Qt.white, 1))
+        painter.drawLine(tab.at(0), tab.at(1))
+        painter.drawLine(tab.at(1), tab.at(2))
+
+        # Lat/lon readout - bottom corners, fixed (same style as the wind/
+        # battery boxes). Latitude bottom-left, longitude bottom-right.
+        latlon_box_w = 108
+        latlon_box_h = 18
+        latlon_margin = 6
+
+        lat_rect = QRectF(
+            latlon_margin, h - latlon_margin - latlon_box_h, latlon_box_w, latlon_box_h
+        )
+        lon_rect = QRectF(
+            w - latlon_margin - latlon_box_w, h - latlon_margin - latlon_box_h,
+            latlon_box_w, latlon_box_h,
+        )
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        painter.drawRect(lat_rect)
+        painter.drawRect(lon_rect)
+
+        painter.setPen(QPen(Qt.white))
+        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        lat_text = f"LAT {self.lat:.6f}" if self.lat is not None else "LAT --"
+        lon_text = f"LON {self.lon:.6f}" if self.lon is not None else "LON --"
+        painter.drawText(lat_rect, Qt.AlignCenter, lat_text)
+        painter.drawText(lon_rect, Qt.AlignCenter, lon_text)
+
+        painter.end()
