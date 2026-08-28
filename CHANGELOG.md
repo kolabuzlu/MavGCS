@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.8.0 - ESRI World Imagery + Hybrid map layers
+## V1.8.0 - ESRI World Imagery added.
 
 ## V1.7.0 - Mission clear function added.
 
