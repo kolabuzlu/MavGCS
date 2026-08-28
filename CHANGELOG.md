@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.10.0 - Vehicle state indicator + Messages panel logo watermark.
+## V1.10.0 - Arm status and logo added.
 
 ## V1.9.0 - Terrain radar added.
 
