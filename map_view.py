@@ -86,9 +86,37 @@ var osmStreets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
     attribution: '&copy; OpenStreetMap contributors',
 });
 
+// ESRI World Imagery, unauthenticated (no API key) - satellite-only, no
+// road/label overlay unlike Google Hybrid above.
+var esriWorldImagery = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {
+        maxZoom: 19,
+        attribution: 'Imagery &copy; Esri',
+    }
+);
+
+// ESRI's own "Imagery Hybrid" basemap is actually two stacked services -
+// World_Imagery underneath, with this reference layer (roads/labels/
+// boundaries, transparent PNG tiles) drawn on top. Grouped together so
+// it behaves as a single selectable layer, like Google Hybrid does.
+var esriHybridLabels = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    {
+        maxZoom: 19,
+        attribution: 'Imagery &copy; Esri',
+    }
+);
+var esriWorldImageryHybrid = L.layerGroup([esriWorldImagery, esriHybridLabels]);
+
 googleHybrid.addTo(map);
 L.control.layers(
-    { 'Google Hybrid': googleHybrid, 'OpenStreetMap': osmStreets },
+    {
+        'Google Hybrid': googleHybrid,
+        'OpenStreetMap': osmStreets,
+        'ESRI World Imagery': esriWorldImagery,
+        'ESRI World Imagery Hybrid': esriWorldImageryHybrid,
+    },
     {},
     { position: 'topright' }
 ).addTo(map);

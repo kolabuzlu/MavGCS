@@ -17,9 +17,9 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.7.0 - Clear button now hold-to-confirm for wiping the
-# vehicle's mission, LOITER-safe. See CHANGELOG.md.
-APP_VERSION = "V1.7.0"
+# This is MavGCS V1.8.0 - ESRI World Imagery + Imagery Hybrid map layers
+# added alongside Google Hybrid/OpenStreetMap. See CHANGELOG.md.
+APP_VERSION = "V1.8.0"
 
 import sys
 import math
