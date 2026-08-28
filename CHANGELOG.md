@@ -1,5 +1,31 @@
 # MavGCS Changelog
 
+## V1.6.0 - HUD EKF/Vibe status indicators
+
+Added Mission Planner-style "EKF" and "Vibe" status text to the HUD,
+bottom middle (EKF on the left, Vibe on the right, matching MP's own
+layout), colored white/yellow/red by vehicle health - fed by two new
+requested-at-2Hz messages, `EKF_STATUS_REPORT` and `VIBRATION`.
+
+Thresholds were ported directly from Mission Planner's own source
+(`HUD.cs` / `CurrentState.cs`), not just general ArduPilot guidance,
+after an initial pass using the general guidance numbers didn't quite
+match MP's behavior on real hardware:
+
+- **EKF**: color is driven by the worst of the 5 EKF_STATUS_REPORT
+  variances (velocity, compass, pos horizontal, pos vertical, terrain
+  alt) - white up to 0.5, yellow 0.5-0.8, red above 0.8 - forced red
+  regardless of variance if `EKF_ATTITUDE` is missing, if
+  `EKF_VELOCITY_HORIZ` is missing while we have a GPS fix, or if
+  `EKF_UNINITIALIZED` is set. (`EKF_GPS_GLITCHING`/`EKF_CONST_POS_MODE`
+  looked like they should matter given their names, but MP's HUD
+  doesn't actually check them.)
+- **Vibe**: white up to 30, yellow 30-60, red above 60, on the raw
+  per-axis vibration values only. An earlier version of this also
+  forced red on any accelerometer clipping, which doesn't match MP and
+  was masking the yellow range entirely - clipping starts on plenty of
+  boards well before vibration itself reaches the yellow/red range.
+
 ## V1.5.0 - Real-hardware Serial fixes, HUD lat/lon, custom plane icon
 
 First release tested against a real UAV over a Serial telemetry link

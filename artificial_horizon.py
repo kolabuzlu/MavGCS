@@ -29,6 +29,8 @@ class ArtificialHorizon(QWidget):
         self.cell_count = 4  # default guess: 4S is a common pack size
         self.lat = None  # deg, None until first GLOBAL_POSITION_INT
         self.lon = None  # deg, None until first GLOBAL_POSITION_INT
+        self.ekf_color = "white"   # "white" | "yellow" | "red"
+        self.vibe_color = "white"  # "white" | "yellow" | "red"
         self.setMinimumSize(220, 220)
 
         # A combo box has to be a real interactive widget, not something
@@ -91,6 +93,14 @@ class ArtificialHorizon(QWidget):
     def set_position(self, lat, lon):
         self.lat = lat
         self.lon = lon
+        self.update()
+
+    def set_ekf_status(self, color_name):
+        self.ekf_color = color_name
+        self.update()
+
+    def set_vibe_status(self, color_name):
+        self.vibe_color = color_name
         self.update()
 
     def set_wind(self, direction_deg, speed_mps):
@@ -391,5 +401,31 @@ class ArtificialHorizon(QWidget):
         lon_text = f"LON {self.lon:.6f}" if self.lon is not None else "LON --"
         painter.drawText(lat_rect, Qt.AlignCenter, lat_text)
         painter.drawText(lon_rect, Qt.AlignCenter, lon_text)
+
+        # EKF/Vibe status (Mission Planner HUD convention): bottom middle,
+        # EKF on the left, Vibe on the right - just the colored word itself,
+        # no value, same as MP's own HUD.
+        status_colors = {"white": Qt.white, "yellow": Qt.yellow, "red": QColor(255, 60, 60)}
+        status_box_w = 48
+        status_box_h = latlon_box_h
+        status_gap = 4
+        ekf_rect = QRectF(
+            cx - status_gap / 2 - status_box_w, h - latlon_margin - status_box_h,
+            status_box_w, status_box_h,
+        )
+        vibe_rect = QRectF(
+            cx + status_gap / 2, h - latlon_margin - status_box_h,
+            status_box_w, status_box_h,
+        )
+        painter.setPen(QPen(Qt.white, 1))
+        painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        painter.drawRect(ekf_rect)
+        painter.drawRect(vibe_rect)
+
+        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        painter.setPen(QPen(status_colors.get(self.ekf_color, Qt.white)))
+        painter.drawText(ekf_rect, Qt.AlignCenter, "EKF")
+        painter.setPen(QPen(status_colors.get(self.vibe_color, Qt.white)))
+        painter.drawText(vibe_rect, Qt.AlignCenter, "VIBE")
 
         painter.end()

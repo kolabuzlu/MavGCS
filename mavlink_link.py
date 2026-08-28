@@ -95,6 +95,7 @@ class MavlinkLink(QThread):
         self._home_lat = None
         self._home_lon = None
         self._last_amsl_alt_m = None  # from GLOBAL_POSITION_INT.alt (AMSL)
+        self._gps_fix_type = None  # from GPS_RAW_INT.fix_type, used by the EKF status color
 
         # Multi-waypoint mission upload state machine (see
         # upload_and_start_mission() and the MISSION_* handlers in run()).
@@ -132,14 +133,17 @@ class MavlinkLink(QThread):
                     mavutil.mavlink.MAV_CMD_GET_HOME_POSITION,
                     0, 0, 0, 0, 0, 0, 0, 0,
                 )
-                # SCALED_PRESSURE (for QNH) and TERRAIN_REPORT (for
-                # Terrain Alt) aren't guaranteed to stream by default on
-                # every vehicle/firmware config - request them explicitly
-                # at 2 Hz rather than silently depending on whatever the
-                # vehicle's default stream rates happen to be.
+                # SCALED_PRESSURE (for QNH), TERRAIN_REPORT (for Terrain
+                # Alt), EKF_STATUS_REPORT and VIBRATION (for the HUD's
+                # EKF/Vibe indicators) aren't guaranteed to stream by
+                # default on every vehicle/firmware config - request them
+                # explicitly at 2 Hz rather than silently depending on
+                # whatever the vehicle's default stream rates happen to be.
                 for msg_id in (
                     mavutil.mavlink.MAVLINK_MSG_ID_SCALED_PRESSURE,
                     mavutil.mavlink.MAVLINK_MSG_ID_TERRAIN_REPORT,
+                    mavutil.mavlink.MAVLINK_MSG_ID_EKF_STATUS_REPORT,
+                    mavutil.mavlink.MAVLINK_MSG_ID_VIBRATION,
                 ):
                     self.master.mav.command_long_send(
                         self.master.target_system,
@@ -318,6 +322,58 @@ class MavlinkLink(QThread):
                 sat_count = "--" if msg.satellites_visible == 255 else str(msg.satellites_visible)
                 hdop = "--" if msg.eph == 65535 else f"{msg.eph / 100.0:.2f}"
                 self.status_update.emit({"sat_count": sat_count, "gps_hdop": hdop})
+                self._gps_fix_type = msg.fix_type
+
+            elif mtype == "EKF_STATUS_REPORT":
+                # Ported from Mission Planner's own CurrentState.cs/HUD.cs
+                # (not just the general ArduPilot variance guidance) so the
+                # HUD's EKF indicator matches MP's exactly: > 0.5 -> yellow,
+                # > 0.8 -> red, taken from the worst of all 5 variances
+                # (MP's own code comment: "> 1, between 0-1 typical > 1 =
+                # reject measurement - red / 0.5 > amber"), overridden to
+                # red if EKF_ATTITUDE is missing, if EKF_VELOCITY_HORIZ is
+                # missing while we have a GPS fix, or if EKF_UNINITIALIZED
+                # is set. MP does NOT check EKF_GPS_GLITCHING/
+                # EKF_CONST_POS_MODE here, despite their names suggesting
+                # otherwise.
+                ekfstatus = max(
+                    msg.velocity_variance,
+                    msg.compass_variance,
+                    msg.pos_horiz_variance,
+                    msg.pos_vert_variance,
+                    msg.terrain_alt_variance,
+                )
+                have_gps_fix = (self._gps_fix_type or 0) > 0
+                if not (msg.flags & mavutil.mavlink.EKF_ATTITUDE):
+                    ekfstatus = 1.0
+                elif not (msg.flags & mavutil.mavlink.EKF_VELOCITY_HORIZ) and have_gps_fix:
+                    ekfstatus = 1.0
+                elif msg.flags & mavutil.mavlink.EKF_UNINITIALIZED:
+                    ekfstatus = 1.0
+
+                if ekfstatus > 0.8:
+                    ekf_color = "red"
+                elif ekfstatus > 0.5:
+                    ekf_color = "yellow"
+                else:
+                    ekf_color = "white"
+                self.status_update.emit({"ekf_color": ekf_color})
+
+            elif mtype == "VIBRATION":
+                # Ported from Mission Planner's HUD.cs: > 30 -> yellow,
+                # > 60 -> red, on the raw per-axis vibration values. MP's
+                # HUD does NOT factor in the clipping counters here (that
+                # was our own addition, and was the bug - clipping starts
+                # incrementing well before 30-60 on plenty of boards, which
+                # was forcing red and skipping the yellow range entirely).
+                vibe_max = max(msg.vibration_x, msg.vibration_y, msg.vibration_z)
+                if vibe_max > 60:
+                    vibe_color = "red"
+                elif vibe_max > 30:
+                    vibe_color = "yellow"
+                else:
+                    vibe_color = "white"
+                self.status_update.emit({"vibe_color": vibe_color})
 
             elif mtype == "NAV_CONTROLLER_OUTPUT":
                 self.status_update.emit({"wp_dist": f"{msg.wp_dist:.2f}"})

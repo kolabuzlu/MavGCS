@@ -17,9 +17,9 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.5.0 - real-hardware Serial connection fixes, HUD
-# lat/lon readout, and a custom plane map icon. See CHANGELOG.md.
-APP_VERSION = "V1.5.0"
+# This is MavGCS V1.6.0 - HUD EKF/Vibe status indicators, matched to
+# Mission Planner's own thresholds. See CHANGELOG.md.
+APP_VERSION = "V1.6.0"
 
 import sys
 import math
@@ -763,6 +763,10 @@ class MainWindow(QMainWindow):
             self.mode_panel.set_active_mode(status_dict["mode"])
         if "armed" in status_dict:
             self.arm_panel.set_armed_state(status_dict["armed"] == "YES")
+        if "ekf_color" in status_dict:
+            self.horizon.set_ekf_status(status_dict["ekf_color"])
+        if "vibe_color" in status_dict:
+            self.horizon.set_vibe_status(status_dict["vibe_color"])
         if "battery_voltage" in status_dict:
             self.horizon.set_battery_voltage(float(status_dict["battery_voltage"]))
 
