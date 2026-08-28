@@ -4,7 +4,7 @@
 
 ## V1.8.0 - ESRI World Imagery added.
 
-## V1.7.0 - Mission clear function added.
+## V1.7.0 - Clear Mission function added.
 
 ## V1.6.0 - EKF / Vibe status indicators added.
 
