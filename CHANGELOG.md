@@ -6,6 +6,6 @@
 
 ## V1.7.0 - Mission clear function added.
 
-## V1.6.0 - EKF / Vibe Status Indicators added.
+## V1.6.0 - EKF / Vibe status indicators added.
 
 ## V1.5.0 - First release, tested.
