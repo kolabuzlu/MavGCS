@@ -269,8 +269,11 @@ var TILE_URL = TILE_PROXY + '/t/';
 // for those, so Leaflet records the tile as FAILED (unlike a 200 blank,
 // which it would keep forever as a successful load) and asks again on the
 // next redraw - while this transparent pixel keeps the map looking clean.
+// Genuinely transparent (RGBA 0,0,0,0) and verified as such - an earlier
+// hand-written blob here decoded to semi-transparent BLUE, which painted
+// every failed tile blue instead of leaving the background showing.
 var TILE_ERROR_IMG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' +
-    'CAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    'CAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==';
 
 var googleHybrid = L.tileLayer(
     TILE_URL + 'google/{z}/{x}/{y}',
@@ -334,15 +337,31 @@ var droneIcon = L.divIcon({
     iconAnchor: [DRONE_ICON_W / 2, DRONE_ICON_H / 2]
 });
 
-// Tiles that failed while offline stay failed until something asks for them
-// again, so nudge every layer when the machine comes back online.
-// redraw() on a layer that isn't currently displayed is a harmless no-op.
+// Tiles that failed (offline, or the provider hiccupped) stay failed until
+// something asks for them again. Leaflet tells us via 'tileerror'; we then
+// keep retrying periodically until a pass produces no further errors.
+//
+// Not driven by the browser's 'online' event alone: that depends on
+// Chromium noticing the network state change, which it doesn't always do
+// promptly - so the timer is the dependable path and 'online' just makes it
+// react faster when it does fire.
+var tilesFailed = false;
+var TILE_RETRY_MS = 15000;
+
 function retryFailedTiles() {
+    if (!tilesFailed) return;
+    tilesFailed = false;   // set again by tileerror if they fail once more
     [googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels].forEach(function (l) {
+        // redraw() on a layer that isn't currently displayed is a no-op.
         try { l.redraw(); } catch (e) {}
     });
 }
+
+[googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels].forEach(function (l) {
+    l.on('tileerror', function () { tilesFailed = true; });
+});
 window.addEventListener('online', retryFailedTiles);
+setInterval(retryFailedTiles, TILE_RETRY_MS);
 
 var marker = null;
 var path = L.polyline([], {color: 'red', weight: 2}).addTo(map);

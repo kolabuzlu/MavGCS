@@ -51,16 +51,6 @@ SUBDOMAINS = {"google": ["0", "1", "2", "3"], "osm": ["a", "b", "c"]}
 USER_AGENT = "MavGCS (https://github.com/kolabuzlu/MavGCS)"
 FETCH_TIMEOUT_S = 10
 
-# 1x1 transparent PNG, returned for a tile we have neither cached nor can
-# reach. Leaflet treats a 404 as an error tile and retries; handing back a
-# valid empty image keeps an offline map quiet and clean instead.
-_BLANK_PNG = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
-    b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-)
-
-
 def _content_type(blob: bytes) -> str:
     if blob.startswith(b"\x89PNG"):
         return "image/png"
