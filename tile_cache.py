@@ -51,6 +51,11 @@ SUBDOMAINS = {"google": ["0", "1", "2", "3"], "osm": ["a", "b", "c"]}
 USER_AGENT = "MavGCS (https://github.com/kolabuzlu/MavGCS)"
 FETCH_TIMEOUT_S = 10
 
+# Must match MIN_ZOOM/MAX_ZOOM in the map page (map_view.py). Zoom levels
+# outside this range are refused, so they can never be fetched or cached.
+MIN_ZOOM = 9
+MAX_ZOOM = 18
+
 def _content_type(blob: bytes) -> str:
     if blob.startswith(b"\x89PNG"):
         return "image/png"
@@ -84,6 +89,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         _, layer, z, x, y = parts
         if not (z.isdigit() and x.isdigit() and y.isdigit()):
+            self.send_error(404)
+            return
+        # The map is limited to MIN_ZOOM..MAX_ZOOM; enforce it here as well
+        # so nothing outside that range can be fetched or written to the
+        # cache, whatever asks for it.
+        if not MIN_ZOOM <= int(z) <= MAX_ZOOM:
             self.send_error(404)
             return
 

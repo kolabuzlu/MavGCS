@@ -80,12 +80,25 @@ LEAFLET_HTML = """
   }
   /* Sits to the right of the Follow UAV / ADS-B toggles, spanning the
      same vertical band, rather than stacking underneath them. */
-  #tilecache-control .tc-sep {
-    margin-top: 6px; padding-top: 5px;
-    border-top: 1px solid rgba(255,255,255,0.15);
+  /* Sits directly under Leaflet's own +/- buttons, matching their width so
+     it reads as part of that control. Useful when caching for offline use:
+     the cache is per zoom level, so it tells you which one you're filling. */
+  #zoom-indicator {
+    position: absolute; top: 76px; left: 10px; width: 30px;
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 3px 0; border-radius: 4px;
+    font-family: sans-serif; font-size: 11px; font-weight: 700;
+    text-align: center; z-index: 1000; user-select: none;
+  }
+  /* Map and Terrain side by side rather than stacked. */
+  #tilecache-control .tc-cols { display: flex; gap: 10px; }
+  #tilecache-control .tc-col { flex: 1; min-width: 0; }
+  #tilecache-control .tc-colsep {
+    padding-left: 10px;
+    border-left: 1px solid rgba(255,255,255,0.15);
   }
   #tilecache-control {
-    position: absolute; top: 10px; left: 166px; width: 244px;
+    position: absolute; top: 10px; left: 166px; width: 430px;
     background: rgba(0,0,0,0.6); color: white;
     padding: 5px 8px 6px; border-radius: 4px;
     font-family: sans-serif; font-size: 12px; z-index: 1000;
@@ -149,6 +162,7 @@ LEAFLET_HTML = """
            style="margin: 0; cursor: pointer;">
     <label for="follow-checkbox" style="cursor: pointer; user-select: none;">Follow UAV</label>
 </div>
+<div id="zoom-indicator">Z--</div>
 <div id="adsb-control" style="
     position: absolute; top: 42px; left: 46px;
     background: rgba(0,0,0,0.6); color: white;
@@ -162,45 +176,51 @@ LEAFLET_HTML = """
     <label for="adsb-checkbox" style="cursor: pointer; user-select: none;">ADS-B</label>
 </div>
 <div id="tilecache-control">
-    <div class="tc-row">
-        <span class="tc-title">Map</span>
-        <select id="tc-limit" onchange="setTileCacheLimit(this.value);">
-            <!-- Starts at No Cache to match the server's own default:
-                 saving map tiles to disk is opt-in. -->
-            <option value="0" selected>No Cache</option>
-            <option value="100">100 MB</option>
-            <option value="200">200 MB</option>
-            <option value="500">500 MB</option>
-            <option value="1024">1 GB</option>
-            <option value="2048">2 GB</option>
-            <option value="5120">5 GB</option>
-        </select>
-        <button onclick="clearTileCache();">Clear</button>
+  <div class="tc-cols">
+    <div class="tc-col">
+        <div class="tc-row">
+            <span class="tc-title">Map</span>
+            <select id="tc-limit" onchange="setTileCacheLimit(this.value);">
+                <!-- Starts at No Cache to match the server's own default:
+                     saving map tiles to disk is opt-in. -->
+                <option value="0" selected>No Cache</option>
+                <option value="100">100 MB</option>
+                <option value="200">200 MB</option>
+                <option value="500">500 MB</option>
+                <option value="1024">1 GB</option>
+                <option value="2048">2 GB</option>
+                <option value="5120">5 GB</option>
+            </select>
+        </div>
+        <div class="tc-row">
+            <div class="tc-bar"><div id="tc-fill"></div></div>
+            <button onclick="clearTileCache();">Clear</button>
+        </div>
+        <div id="tc-text" class="tc-text">&nbsp;</div>
     </div>
-    <div class="tc-row">
-        <div class="tc-bar"><div id="tc-fill"></div></div>
-    </div>
-    <div id="tc-text" class="tc-text">&nbsp;</div>
 
-    <div class="tc-row tc-sep">
-        <span class="tc-title">Terrain</span>
-        <!-- Bigger steps than the map: one elevation tile is ~40MB, and it
-             defaults to caching because a terrain radar that re-downloaded
-             40MB per fix would be unusable. -->
-        <select id="tr-limit" onchange="setTerrainCacheLimit(this.value);">
-            <option value="0">No Cache</option>
-            <option value="512">500 MB</option>
-            <option value="1024">1 GB</option>
-            <option value="2048" selected>2 GB</option>
-            <option value="5120">5 GB</option>
-            <option value="10240">10 GB</option>
-        </select>
-        <button onclick="clearTerrainCache();">Clear</button>
+    <div class="tc-col tc-colsep">
+        <div class="tc-row">
+            <span class="tc-title">Terrain</span>
+            <!-- Bigger steps than the map: one elevation tile is ~40MB, and
+                 it defaults to caching because a terrain radar that
+                 re-downloaded 40MB per fix would be unusable. -->
+            <select id="tr-limit" onchange="setTerrainCacheLimit(this.value);">
+                <option value="0">No Cache</option>
+                <option value="512">500 MB</option>
+                <option value="1024">1 GB</option>
+                <option value="2048" selected>2 GB</option>
+                <option value="5120">5 GB</option>
+                <option value="10240">10 GB</option>
+            </select>
+        </div>
+        <div class="tc-row">
+            <div class="tc-bar"><div id="tr-fill"></div></div>
+            <button onclick="clearTerrainCache();">Clear</button>
+        </div>
+        <div id="tr-text" class="tc-text">&nbsp;</div>
     </div>
-    <div class="tc-row">
-        <div class="tc-bar"><div id="tr-fill"></div></div>
-    </div>
-    <div id="tr-text" class="tc-text">&nbsp;</div>
+  </div>
 </div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
@@ -254,7 +274,15 @@ function waypointAdded(lat, lon) {
 
 <script src="%%TILE_PROXY%%/lib/leaflet.js"></script>
 <script>
-var map = L.map('map').setView([0, 0], 2);
+// Zoom is deliberately restricted to Z9-Z18. Levels outside that range
+// can't be reached, so nothing outside it is ever requested or cached
+// either. The proxy enforces the same range independently (see
+// tile_cache.py), so a stray request can't slip tiles into the cache.
+var MIN_ZOOM = 9, MAX_ZOOM = 18;
+var map = L.map('map', {
+    minZoom: MIN_ZOOM,
+    maxZoom: MAX_ZOOM,
+}).setView([0, 0], MIN_ZOOM);
 
 // Google's hybrid (satellite + roads/labels) tiles, unauthenticated -
 // no API key needed, same tile source Mission Planner uses for its
@@ -278,14 +306,14 @@ var TILE_ERROR_IMG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' +
 var googleHybrid = L.tileLayer(
     TILE_URL + 'google/{z}/{x}/{y}',
     {
-        maxZoom: 20,
+        maxZoom: MAX_ZOOM,
         errorTileUrl: TILE_ERROR_IMG,
         attribution: 'Imagery &copy; Google',
     }
 );
 
 var osmStreets = L.tileLayer(TILE_URL + 'osm/{z}/{x}/{y}', {
-    maxZoom: 19,
+    maxZoom: MAX_ZOOM,
     errorTileUrl: TILE_ERROR_IMG,
     attribution: '&copy; OpenStreetMap contributors',
 });
@@ -295,7 +323,7 @@ var osmStreets = L.tileLayer(TILE_URL + 'osm/{z}/{x}/{y}', {
 var esriWorldImagery = L.tileLayer(
     TILE_URL + 'esri/{z}/{x}/{y}',
     {
-        maxZoom: 19,
+        maxZoom: MAX_ZOOM,
         errorTileUrl: TILE_ERROR_IMG,
         attribution: 'Imagery &copy; Esri',
     }
@@ -308,7 +336,7 @@ var esriWorldImagery = L.tileLayer(
 var esriHybridLabels = L.tileLayer(
     TILE_URL + 'esriref/{z}/{x}/{y}',
     {
-        maxZoom: 19,
+        maxZoom: MAX_ZOOM,
         errorTileUrl: TILE_ERROR_IMG,
         attribution: 'Imagery &copy; Esri',
     }
@@ -345,6 +373,13 @@ var droneIcon = L.divIcon({
 // Chromium noticing the network state change, which it doesn't always do
 // promptly - so the timer is the dependable path and 'online' just makes it
 // react faster when it does fire.
+function updateZoomIndicator() {
+    var el = document.getElementById('zoom-indicator');
+    if (el) el.textContent = 'Z' + map.getZoom();
+}
+map.on('zoomend', updateZoomIndicator);
+updateZoomIndicator();
+
 var tilesFailed = false;
 var TILE_RETRY_MS = 15000;
 
