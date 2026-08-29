@@ -9,3 +9,4 @@ dist/
 *.spec.bak
 selftest.log
 map_cache/
+.placeholder_cache_purged
