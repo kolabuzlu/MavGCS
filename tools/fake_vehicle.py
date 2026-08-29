@@ -31,12 +31,33 @@ _status_idx = 0
 
 t0 = time.time()
 print("Fake vehicle streaming to 127.0.0.1:14550 ... Ctrl+C to stop")
+
+# Send before the first read. This is an outgoing ("udpout") socket, which
+# pymavlink leaves unbound, and Windows rejects a read on an unbound UDP
+# socket with WSAEINVAL 10022 rather than just returning nothing - so the
+# recv_match() at the top of the loop below used to kill this tool on its
+# very first iteration. Sending once implicitly binds the socket.
+conn.mav.heartbeat_send(
+    mavutil.mavlink.MAV_TYPE_QUADROTOR,
+    mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
+    mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED,
+    4,
+    mavutil.mavlink.MAV_STATE_ACTIVE,
+)
+
 while True:
     t = time.time() - t0
 
     # Print anything the GCS sends us (heartbeats, and commands like the
     # app's fly-to COMMAND_INT), so we can verify what the app actually sends.
-    incoming = conn.recv_match(blocking=False)
+    # Tolerate WSAECONNRESET (10054): on Windows, sending to a UDP port
+    # with nothing listening (the GCS isn't up yet) bounces an ICMP
+    # "port unreachable" back, and the NEXT read on that socket raises it.
+    # It says nothing about our socket's health - keep streaming.
+    try:
+        incoming = conn.recv_match(blocking=False)
+    except OSError:
+        incoming = None
     if incoming is not None and incoming.get_type() != "BAD_DATA":
         print(f"<< received from GCS: {incoming}")
         if (

@@ -15,6 +15,7 @@ time (a few seconds each), so this must never run on the GUI thread.
 
 import io
 import math
+import os
 import time
 import threading
 import urllib.request
@@ -140,9 +141,14 @@ class TerrainProvider:
         if raw is None:
             url = f"{BASE_URL}/{key}/{key}.tif"
             try:
-                with urllib.request.urlopen(url, timeout=25) as resp:
+                with urllib.request.urlopen(url, timeout=15) as resp:
                     raw = resp.read()
-                path.write_bytes(raw)
+                # Write via a temporary file and rename: a tile is ~40MB, so
+                # a stop (or a crash) part-way through a direct write would
+                # leave a truncated file that then fails to decode forever.
+                tmp = path.with_suffix(".part")
+                tmp.write_bytes(raw)
+                os.replace(tmp, path)
             except (urllib.error.URLError, urllib.error.HTTPError, OSError):
                 self._missing.add(key)
                 return None
@@ -275,6 +281,21 @@ class TerrainRadarWorker(QThread):
 
             time.sleep(self.POLL_INTERVAL_S)
 
+    def clear_telemetry(self):
+        """Forget the last fix so the radar stops re-sampling once the
+        vehicle link is gone - otherwise it keeps refreshing off a stale
+        position and looks live after a disconnect."""
+        with self._lock:
+            self._telem = None
+        self._last_sample = None
+
     def stop(self):
+        # A tile fetch can hold this thread for up to the 15s HTTP timeout,
+        # so give it real time to unwind. terminate() is the last resort: a
+        # QThread still running when Qt destroys it aborts the process, and
+        # tile writes are atomic (see _load_tile), so a killed download
+        # cannot leave a corrupt cache behind.
         self._running = False
-        self.wait(2000)
+        if not self.wait(5000):
+            self.terminate()
+            self.wait(1000)

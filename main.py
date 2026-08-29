@@ -937,7 +937,13 @@ class MainWindow(QMainWindow):
         if "vibe_color" in status_dict:
             self.horizon.set_vibe_status(status_dict["vibe_color"])
         if "battery_voltage" in status_dict:
-            self.horizon.set_battery_voltage(float(status_dict["battery_voltage"]))
+            # "--" when the autopilot doesn't report voltage; the HUD already
+            # renders None as "-- V".
+            raw_voltage = status_dict["battery_voltage"]
+            try:
+                self.horizon.set_battery_voltage(float(raw_voltage))
+            except ValueError:
+                self.horizon.set_battery_voltage(None)
         if "amsl_alt" in status_dict:
             self._last_amsl_alt = float(status_dict["amsl_alt"])
         if "ready_to_arm" in status_dict:
@@ -1117,6 +1123,25 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: orange; font-weight: bold;")
         self.command_label.setText("")
         self.ack_label.setText("")
+        self._reset_vehicle_state()
+
+    def _reset_vehicle_state(self):
+        """
+        Drop everything that describes a live vehicle, so a disconnected
+        session can't keep presenting the last frame as if it were current.
+        The armed indicator matters most here - left alone it still reads
+        ARMED in red after the link is gone.
+        """
+        self._armed = False
+        self._ready_to_arm = False
+        self._update_vehicle_state_label()
+        self.arm_panel.set_armed_state(None)
+        self.mode_panel.set_active_mode(None)
+        self.horizon.set_ekf_status("white")
+        self.horizon.set_vibe_status("white")
+        self.horizon.set_battery_voltage(None)
+        # Stop the terrain radar refreshing off the last known position.
+        self.terrain_worker.clear_telemetry()
 
     def closeEvent(self, event):
         if self.link is not None:

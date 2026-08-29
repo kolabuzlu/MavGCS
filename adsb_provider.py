@@ -171,6 +171,12 @@ class AdsbWorker(QThread):
             self.contacts_ready.emit(list(merged.values()))
 
     def stop(self):
+        # urlopen's timeout doesn't bound DNS/TLS connect retries (a dead
+        # feed was measured taking ~18s against a 6s timeout), so allow
+        # real time to unwind before the last-resort terminate - a QThread
+        # still running when Qt destroys it aborts the process.
         self._running = False
         self._wake.set()
-        self.wait(2000)
+        if not self.wait(5000):
+            self.terminate()
+            self.wait(1000)

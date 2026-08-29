@@ -105,6 +105,21 @@ class MavlinkLink(QThread):
 
     def run(self):
         try:
+            self._run_link()
+        finally:
+            # The thread owns the connection and closes it on its own way
+            # out. Closing it from stop() instead meant the socket could be
+            # pulled out from under this thread while it was still reading,
+            # since stop() only waited a couple of seconds before giving up.
+            master, self.master = self.master, None
+            if master is not None:
+                try:
+                    master.close()
+                except Exception:
+                    pass
+
+    def _run_link(self):
+        try:
             self.master = _open_mavlink_connection(self.connection_string)
 
             # Announce ourselves BEFORE the first read. On an outgoing UDP
@@ -127,7 +142,28 @@ class MavlinkLink(QThread):
                 pass
 
             self.connection_status.emit(False, "Waiting for heartbeat...")
-            hb = self.master.wait_heartbeat(timeout=30)
+            # Deliberately NOT wait_heartbeat(timeout=30): that blocks the
+            # whole 30s with no way to interrupt it, so a Disconnect (or a
+            # reconnect elsewhere) during it left this thread running long
+            # after stop() returned - still wired to the GUI, pushing stale
+            # status into it. Polling in one-second slices lets stop() take
+            # effect almost immediately.
+            hb = None
+            deadline = time.time() + 30
+            while self._running and time.time() < deadline:
+                hb = self.master.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
+                # Skip GCS-type heartbeats when deciding who we're talking
+                # to: our own get echoed back by SITL/MAVProxy, and another
+                # GCS may share the port. Locking target_system onto one of
+                # those would aim every command at it instead of the
+                # vehicle. (The main loop already ignores them for display.)
+                if hb is not None and hb.type == mavutil.mavlink.MAV_TYPE_GCS:
+                    hb = None
+                    continue
+                if hb is not None:
+                    break
+            if not self._running:
+                return
             if hb is None:
                 self.connection_status.emit(False, "Connection failed: no heartbeat received")
                 return
@@ -219,6 +255,17 @@ class MavlinkLink(QThread):
 
             try:
                 msg = self.master.recv_match(blocking=True, timeout=1)
+            except OSError as e:
+                # WSAECONNRESET (10054) is routine on Windows UDP, not a
+                # broken link: sending to a peer that isn't listening yet
+                # bounces an ICMP "port unreachable" back, and the next read
+                # reports it. With "UDP (connect to)" against a bridge that
+                # hasn't booted, surfacing it would flood the status line
+                # with alarming errors while we wait perfectly normally.
+                if getattr(e, "winerror", None) == 10054:
+                    continue
+                self.connection_status.emit(False, f"Link error: {e}")
+                continue
             except Exception as e:
                 self.connection_status.emit(False, f"Link error: {e}")
                 continue
@@ -473,8 +520,18 @@ class MavlinkLink(QThread):
                 )
                 self.status_update.emit(
                     {
-                        "battery_voltage": f"{msg.voltage_battery / 1000.0:.2f}",
-                        "battery_remaining": f"{msg.battery_remaining}",
+                        # SYS_STATUS uses sentinels for "the autopilot isn't
+                        # reporting this": UINT16_MAX for voltage and -1 for
+                        # remaining. Taken literally those render as a
+                        # plausible-looking 65.54 V / 16.38 V per cell.
+                        "battery_voltage": (
+                            "--" if msg.voltage_battery == 65535
+                            else f"{msg.voltage_battery / 1000.0:.2f}"
+                        ),
+                        "battery_remaining": (
+                            "--" if msg.battery_remaining == -1
+                            else f"{msg.battery_remaining}"
+                        ),
                         "ready_to_arm": "YES" if ready_to_arm else "NO",
                     }
                 )
@@ -833,17 +890,18 @@ class MavlinkLink(QThread):
         return 2 * r * math.asin(math.sqrt(a))
 
     def stop(self):
+        """
+        Ask the thread to finish and wait for it. The socket is closed by
+        run()'s own finally block, not here - see the note there.
+
+        Every blocking read in this thread uses a one-second timeout, so it
+        notices _running within about a second; the generous wait is only
+        so a reconnect can't race a still-live thread that is still wired to
+        the GUI's slots. terminate() is a last resort for a thread wedged
+        somewhere uninterruptible, which is better than letting Qt destroy
+        it while it runs (that aborts the process).
+        """
         self._running = False
-        self.wait(2000)
-        # The thread loop exiting does NOT close the underlying socket by
-        # itself - without this, a TCP connection in particular can stay
-        # technically open at the OS level even after we're done with it,
-        # which is exactly the kind of thing that makes a server (like
-        # SITL/MAVProxy) refuse a second connection attempt on the same
-        # port afterward.
-        if self.master is not None:
-            try:
-                self.master.close()
-            except Exception:
-                pass
-            self.master = None
+        if not self.wait(5000):
+            self.terminate()
+            self.wait(1000)
