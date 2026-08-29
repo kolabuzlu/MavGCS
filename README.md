@@ -16,14 +16,4 @@ Created by Derin Hakan Karakurt
 
 Grab `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
-and run **MavGCS.exe**. No Python or setup needed.
-
-See [INSTALL.md](INSTALL.md) for details, including the "Windows protected
-your PC" prompt that appears for unsigned software.
-
-## Running from source
-
-```bash
-pip install -r requirements.txt
-python main.py
-```
+and run **MavGCS.exe**. No setup needed.
