@@ -43,19 +43,23 @@ def check_free_space():
 
 def main():
     os.chdir(HERE)
-    check_free_space()
 
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
         sys.exit("PyInstaller is not installed. Run:  pip install pyinstaller")
 
-    # A stale build/ silently reuses old analysis results, which is a
+    # Clear the previous build BEFORE checking free space - those two
+    # directories are most of a gigabyte, and counting them as "used" made
+    # the space check reject a build that would have fitted comfortably.
+    # A stale build/ also silently reuses old analysis results, which is a
     # classic source of "I fixed that but the exe still misbehaves".
     for stale in ("build", "dist"):
         if Path(stale).exists():
             print(f"Removing stale {stale}/ ...")
             shutil.rmtree(stale, ignore_errors=True)
+
+    check_free_space()
 
     print("Running PyInstaller (this takes several minutes) ...")
     subprocess.run(

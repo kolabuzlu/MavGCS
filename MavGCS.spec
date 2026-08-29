@@ -12,13 +12,24 @@ directory on every launch, which is both slow and a common source of
 gets zipped for release anyway.
 """
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # imagecodecs loads its per-codec extension modules dynamically, so static
 # analysis misses them. Without these the terrain radar fails at runtime
 # with "requires the 'imagecodecs' package" - the Copernicus DEM tiles are
 # Deflate-compressed with a floating-point predictor.
 hiddenimports = collect_submodules("imagecodecs")
+
+# pymavlink picks its dialect with a runtime __import__ (mavutil.set_dialect),
+# so nothing here is reachable by static analysis either. Miss them and
+# pymavlink falls back to GENERATING the dialect from its XML definitions at
+# startup, which failed in the packaged app with:
+#   [Errno 2] No such file or directory:
+#   '_internal\\message_definitions\\v1.0\\ardupilotmega.xml'
+# and no connection - serial, TCP or UDP - could be opened. Both the
+# pre-generated dialect modules and the XML they'd be generated from are
+# bundled, so the fast path works and the fallback is intact.
+hiddenimports += collect_submodules("pymavlink.dialects")
 
 a = Analysis(
     ["main.py"],
@@ -27,7 +38,7 @@ a = Analysis(
     datas=[
         ("mavgcs_icon.png", "."),
         ("mavgcs_logo_watermark.png", "."),
-    ],
+    ] + collect_data_files("pymavlink"),   # message_definitions/*.xml
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

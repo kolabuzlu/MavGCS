@@ -41,7 +41,7 @@ from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 from terrain_provider import TerrainRadarWorker
 from adsb_provider import AdsbWorker
-from app_paths import resource_path
+from app_paths import data_dir, resource_path
 
 
 class TelemetryPanel(QFrame):
@@ -1151,8 +1151,54 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def _selftest(connection_string):
+    """
+    Headless check that this build can actually open a MAVLink connection,
+    run as:  MavGCS.exe --selftest [connection-string]
+
+    Exists because a packaged build can start, draw its whole UI, and still
+    be unable to connect at all - pymavlink resolves its dialect through a
+    runtime import that a bundler can silently drop. Launching the GUI
+    proves nothing about that; this does.
+
+    Results go to a file as well as stdout: the shipped executable is built
+    windowed, so it has no console to print to.
+    """
+    lines = [f"MavGCS {APP_VERSION} self-test", f"connection: {connection_string}"]
+    ok = False
+    try:
+        from pymavlink import mavutil
+        from mavlink_link import _open_mavlink_connection
+
+        lines.append(f"pymavlink dialect module: {mavutil.mavlink.__name__}")
+        master = _open_mavlink_connection(connection_string)
+        lines.append("connection opened OK")
+        hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=10)
+        if hb is None:
+            lines.append("no heartbeat within 10s (link opened, nothing transmitting)")
+        else:
+            lines.append(f"heartbeat received from sysid={hb.get_srcSystem()}")
+        master.close()
+        ok = True
+    except Exception as e:
+        lines.append(f"FAILED: {type(e).__name__}: {e}")
+
+    lines.append("RESULT: " + ("PASS" if ok else "FAIL"))
+    report = "\n".join(lines)
+    print(report)
+    try:
+        (data_dir() / "selftest.log").write_text(report, encoding="utf-8")
+    except OSError:
+        pass
+    return 0 if ok else 1
+
+
 def main():
-    connection_string = sys.argv[1] if len(sys.argv) > 1 else "udpin:0.0.0.0:14550"
+    args = sys.argv[1:]
+    if args and args[0] == "--selftest":
+        sys.exit(_selftest(args[1] if len(args) > 1 else "udpin:0.0.0.0:14550"))
+
+    connection_string = args[0] if args else "udpin:0.0.0.0:14550"
     app = QApplication(sys.argv)
     window = MainWindow(connection_string)
     window.showMaximized()

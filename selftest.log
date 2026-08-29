@@ -1,0 +1,6 @@
+MavGCS V1.12.0 self-test
+connection: udpin:0.0.0.0:14550
+pymavlink dialect module: pymavlink.dialects.v10.ardupilotmega
+connection opened OK
+heartbeat received from sysid=1
+RESULT: PASS
