@@ -41,6 +41,7 @@ from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 from terrain_provider import TerrainRadarWorker
 from adsb_provider import AdsbWorker
+from tile_cache import TileCacheServer
 from app_paths import data_dir, resource_path
 
 
@@ -695,7 +696,10 @@ class MainWindow(QMainWindow):
         self.arm_panel = ArmDisarmPanel()
         self.preflight_cal_panel = PreflightCalPanel()
         self.guided_panel = GuidedControlPanel()
-        self.map_view = MapView()
+        # Must be listening before the map page loads, since its tile URLs
+        # point at this proxy's port. See tile_cache.py.
+        self.tile_server = TileCacheServer()
+        self.map_view = MapView(self.tile_server.start())
         self.waypoint_panel = WaypointMissionPanel()
         self.messages_panel = MessagesPanel()
         self.connection_panel = ConnectionPanel(*self._split_connection_string(connection_string))
@@ -807,6 +811,14 @@ class MainWindow(QMainWindow):
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
+        self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
+        self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
+        # Keep the map's cache readout current: the size changes as tiles
+        # stream in, not just when the user touches the control.
+        self._tile_stats_timer = QTimer(self)
+        self._tile_stats_timer.setInterval(2000)
+        self._tile_stats_timer.timeout.connect(self._push_tile_cache_stats)
+        self._tile_stats_timer.start()
         self.waypoint_panel.mode_toggled.connect(self.on_waypoint_mode_toggled)
         self.waypoint_panel.start_requested.connect(self.on_start_mission)
         self.waypoint_panel.clear_requested.connect(self.on_clear_waypoints)
@@ -1125,6 +1137,20 @@ class MainWindow(QMainWindow):
         self.ack_label.setText("")
         self._reset_vehicle_state()
 
+    def on_tile_cache_limit(self, megabytes):
+        self.tile_server.set_size_limit(int(megabytes) * 1024 * 1024)
+        self._push_tile_cache_stats()
+
+    def on_tile_cache_clear(self):
+        self.tile_server.clear()
+        self._push_tile_cache_stats()
+
+    def _push_tile_cache_stats(self):
+        tiles, used = self.tile_server.stats()
+        self.map_view.update_tile_cache_stats(
+            tiles, used, self.tile_server.size_limit_bytes
+        )
+
     def _reset_vehicle_state(self):
         """
         Drop everything that describes a live vehicle, so a disconnected
@@ -1148,6 +1174,7 @@ class MainWindow(QMainWindow):
             self.link.stop()
         self.terrain_worker.stop()
         self.adsb_worker.stop()
+        self.tile_server.stop()
         event.accept()
 
 

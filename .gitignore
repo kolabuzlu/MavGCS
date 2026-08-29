@@ -8,3 +8,4 @@ build/
 dist/
 *.spec.bak
 selftest.log
+map_cache/

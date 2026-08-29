@@ -38,6 +38,9 @@ a = Analysis(
     datas=[
         ("mavgcs_icon.png", "."),
         ("mavgcs_logo_watermark.png", "."),
+        # Leaflet, served locally by the tile proxy. Without it the map page
+        # needs a CDN, so with no internet nothing renders at all.
+        ("vendor/leaflet", "vendor/leaflet"),
     ] + collect_data_files("pymavlink"),   # message_definitions/*.xml
     hiddenimports=hiddenimports,
     hookspath=[],

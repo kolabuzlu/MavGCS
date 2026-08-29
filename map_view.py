@@ -15,7 +15,7 @@ LEAFLET_HTML = """
 <html>
 <head>
 <meta charset="utf-8" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="%%TILE_PROXY%%/lib/leaflet.css" />
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <style>
   html, body, #map { height: 100%; margin: 0; padding: 0; background:#222; }
@@ -55,6 +55,38 @@ LEAFLET_HTML = """
   }
   #terrain-radar input.tr-mode:focus {
     background: rgba(0,0,0,0.75); border-color: #37a8db; color: #ffffff;
+  }
+  /* Sits to the right of the Follow UAV / ADS-B toggles, spanning the
+     same vertical band, rather than stacking underneath them. */
+  #tilecache-control {
+    position: absolute; top: 10px; left: 166px; width: 232px;
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 5px 8px 6px; border-radius: 4px;
+    font-family: sans-serif; font-size: 12px; z-index: 1000;
+  }
+  #tilecache-control .tc-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+  }
+  #tilecache-control .tc-title { flex: 1; user-select: none; }
+  #tilecache-control select {
+    background: #1e1e1e; color: #fff; border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 3px; font-size: 11px; padding: 1px 2px; cursor: pointer;
+  }
+  #tilecache-control .tc-bar {
+    flex: 1; height: 6px; background: rgba(255,255,255,0.15);
+    border-radius: 3px; overflow: hidden;
+  }
+  #tilecache-control .tc-bar > div {
+    height: 100%; width: 0%; background: #37a8db; border-radius: 3px;
+  }
+  #tilecache-control button {
+    background: rgba(255,255,255,0.12); color: #fff;
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+    font-size: 10px; padding: 1px 7px; cursor: pointer; font-family: sans-serif;
+  }
+  #tilecache-control button:hover { background: rgba(255,255,255,0.22); }
+  #tilecache-control .tc-text {
+    font-size: 10px; color: #b8c0c6; white-space: nowrap;
   }
   .adsb-icon { background: none; border: none; }
   .adsb-icon .adsb-label {
@@ -103,6 +135,27 @@ LEAFLET_HTML = """
            style="margin: 0; cursor: pointer;">
     <label for="adsb-checkbox" style="cursor: pointer; user-select: none;">ADS-B</label>
 </div>
+<div id="tilecache-control">
+    <div class="tc-row">
+        <span class="tc-title">Offline Map Cache</span>
+        <select id="tc-limit" onchange="setTileCacheLimit(this.value);">
+            <!-- Starts at No Cache to match the server's own default:
+                 saving map tiles to disk is opt-in. -->
+            <option value="0" selected>No Cache</option>
+            <option value="100">100 MB</option>
+            <option value="200">200 MB</option>
+            <option value="500">500 MB</option>
+            <option value="1024">1 GB</option>
+            <option value="2048">2 GB</option>
+            <option value="5120">5 GB</option>
+        </select>
+    </div>
+    <div class="tc-row">
+        <div class="tc-bar"><div id="tc-fill"></div></div>
+        <button id="tc-clear" onclick="clearTileCache();">Clear</button>
+    </div>
+    <div id="tc-text" class="tc-text">&nbsp;</div>
+</div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
     background: rgba(0,0,0,0.6); color: white;
@@ -129,6 +182,10 @@ LEAFLET_HTML = """
     <button class="tr-mode right" onclick="toggleTerrainMode()" id="tr-mode-btn">REL</button>
 </div>
 <script>
+// Substituted by MapView with the local tile proxy's address (see
+// tile_cache.py) - the map's layers are all served through it.
+var TILE_PROXY = '%%TILE_PROXY%%';
+
 // Set up before Leaflet loads and stays independent of it, so a map/tile
 // failure can't also take down the fly-to bridge.
 var bridge = null;
@@ -149,23 +206,29 @@ function waypointAdded(lat, lon) {
 }
 </script>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="%%TILE_PROXY%%/lib/leaflet.js"></script>
 <script>
 var map = L.map('map').setView([0, 0], 2);
 
 // Google's hybrid (satellite + roads/labels) tiles, unauthenticated -
 // no API key needed, same tile source Mission Planner uses for its
 // satellite view. lyrs=y is hybrid; lyrs=s is satellite-only.
+// Every layer is fetched through MavGCS's own local tile proxy (see
+// tile_cache.py) rather than straight from the provider. The proxy serves
+// any tile it has already saved from disk, which is what makes a
+// previously-viewed area work with no internet at all; TILE_PROXY is
+// substituted with its port when this page is loaded.
+var TILE_URL = TILE_PROXY + '/t/';
+
 var googleHybrid = L.tileLayer(
-    'https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    TILE_URL + 'google/{z}/{x}/{y}',
     {
         maxZoom: 20,
-        subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
         attribution: 'Imagery &copy; Google',
     }
 );
 
-var osmStreets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+var osmStreets = L.tileLayer(TILE_URL + 'osm/{z}/{x}/{y}', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors',
 });
@@ -173,7 +236,7 @@ var osmStreets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
 // ESRI World Imagery, unauthenticated (no API key) - satellite-only, no
 // road/label overlay unlike Google Hybrid above.
 var esriWorldImagery = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    TILE_URL + 'esri/{z}/{x}/{y}',
     {
         maxZoom: 19,
         attribution: 'Imagery &copy; Esri',
@@ -185,7 +248,7 @@ var esriWorldImagery = L.tileLayer(
 // boundaries, transparent PNG tiles) drawn on top. Grouped together so
 // it behaves as a single selectable layer, like Google Hybrid does.
 var esriHybridLabels = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    TILE_URL + 'esriref/{z}/{x}/{y}',
     {
         maxZoom: 19,
         attribution: 'Imagery &copy; Esri',
@@ -393,6 +456,43 @@ function clearWaypoints() {
     waypointMarkers = [];
     waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
     allWaypointLayers.push(waypointLine);
+}
+
+// How much map to keep for offline use. "No Cache" (0) stops saving new
+// tiles; whatever is already saved is still served from disk, so choosing
+// it never loses what you've collected - only Clear does that.
+function setTileCacheLimit(megabytes) {
+    if (bridge) {
+        bridge.tileCacheLimitChanged(parseInt(megabytes, 10));
+    }
+}
+
+function clearTileCache() {
+    if (bridge) {
+        bridge.tileCacheClearRequested();
+    }
+}
+
+function fmtSize(bytes) {
+    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+    if (bytes >= 1048576) return Math.round(bytes / 1048576) + ' MB';
+    if (bytes >= 1024) return Math.round(bytes / 1024) + ' KB';
+    return bytes + ' B';
+}
+
+// Pushed from Python (see MapView.update_tile_cache_stats).
+function setTileCacheStats(tiles, usedBytes, limitBytes) {
+    var fill = document.getElementById('tc-fill');
+    var text = document.getElementById('tc-text');
+    if (!fill || !text) return;
+    var pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
+    fill.style.width = pct.toFixed(1) + '%';
+    // Over ~90% full the oldest tiles start being dropped - worth seeing.
+    fill.style.background = pct >= 90 ? '#e0a030' : '#37a8db';
+    var t = tiles + (tiles === 1 ? ' tile' : ' tiles');
+    text.textContent = limitBytes > 0
+        ? fmtSize(usedBytes) + ' / ' + fmtSize(limitBytes) + '  ' + t
+        : fmtSize(usedBytes) + ' stored  ' + t + '  (not saving)';
 }
 
 function clearTarget() {
@@ -794,6 +894,8 @@ class Bridge(QObject):
     waypoint_added = Signal(float, float)
     adsb_toggled = Signal(bool)
     adsb_center_changed = Signal(float, float)
+    tile_cache_limit_changed = Signal(int)
+    tile_cache_clear_requested = Signal()
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
@@ -811,14 +913,24 @@ class Bridge(QObject):
     def adsbCenter(self, lat, lon):
         self.adsb_center_changed.emit(lat, lon)
 
+    @Slot(int)
+    def tileCacheLimitChanged(self, megabytes):
+        self.tile_cache_limit_changed.emit(megabytes)
+
+    @Slot()
+    def tileCacheClearRequested(self):
+        self.tile_cache_clear_requested.emit()
+
 
 class MapView(QWebEngineView):
     fly_to_here = Signal(float, float)
     waypoint_added = Signal(float, float)
     adsb_toggled = Signal(bool)
     adsb_center_changed = Signal(float, float)
+    tile_cache_limit_changed = Signal(int)
+    tile_cache_clear_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
 
         self._bridge = Bridge()
@@ -826,13 +938,20 @@ class MapView(QWebEngineView):
         self._bridge.waypoint_added.connect(self.waypoint_added)
         self._bridge.adsb_toggled.connect(self.adsb_toggled)
         self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
+        self._bridge.tile_cache_limit_changed.connect(self.tile_cache_limit_changed)
+        self._bridge.tile_cache_clear_requested.connect(self.tile_cache_clear_requested)
 
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
         self.page().setWebChannel(self._channel)
 
+        # The tile proxy's port is only known once it's listening, so it's
+        # substituted into the page here rather than hardcoded.
+        html = LEAFLET_HTML.replace(
+            "%%TILE_PROXY%%", f"http://127.0.0.1:{tile_proxy_port}"
+        )
         # base URL lets the relative CDN references resolve sanely
-        self.setHtml(LEAFLET_HTML, QUrl("https://localhost/"))
+        self.setHtml(html, QUrl("https://localhost/"))
 
     def update_position(self, lat: float, lon: float, heading: float = 0.0):
         self.page().runJavaScript(f"updatePosition({lat}, {lon}, {heading});")
@@ -872,4 +991,10 @@ class MapView(QWebEngineView):
         """Push a freshly-fetched ADS-B contact list (see AdsbWorker) for the
         map to render as markers - replaces whatever was shown before."""
         self.page().runJavaScript(f"renderAdsbContacts({json.dumps(contacts)});")
+
+    def update_tile_cache_stats(self, tiles: int, used_bytes: int, limit_bytes: int):
+        """Refresh the offline-cache readout (bar and figures) on the map."""
+        self.page().runJavaScript(
+            f"setTileCacheStats({tiles}, {used_bytes}, {limit_bytes});"
+        )
 
