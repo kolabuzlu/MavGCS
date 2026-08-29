@@ -282,7 +282,14 @@ var MIN_ZOOM = 9, MAX_ZOOM = 18;
 var map = L.map('map', {
     minZoom: MIN_ZOOM,
     maxZoom: MAX_ZOOM,
-}).setView([0, 0], MIN_ZOOM);
+});
+
+// Where the map opens before any telemetry arrives. Once the vehicle
+// reports its first fix, updatePosition() recentres on it (see
+// haveCentered), so this is purely the starting view.
+var HOME_LAT = 39.925386148184316, HOME_LON = 32.83652351127223;
+var HOME_ZOOM = 16;
+map.setView([HOME_LAT, HOME_LON], HOME_ZOOM);
 
 // Google's hybrid (satellite + roads/labels) tiles, unauthenticated -
 // no API key needed, same tile source Mission Planner uses for its
@@ -343,7 +350,9 @@ var esriHybridLabels = L.tileLayer(
 );
 var esriWorldImageryHybrid = L.layerGroup([esriWorldImagery, esriHybridLabels]);
 
-googleHybrid.addTo(map);
+// ESRI World Imagery is the layer shown on startup (satellite only - the
+// hybrid variant adds the roads/labels overlay).
+esriWorldImagery.addTo(map);
 L.control.layers(
     {
         'Google Hybrid': googleHybrid,
