@@ -98,26 +98,27 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         blob = self.server.tile_cache.get_tile(layer, int(z), int(x), int(y))
-        placeholder = blob is None
-        if placeholder:
-            blob = _BLANK_PNG
+        if blob is None:
+            # A tile we can neither read from disk nor fetch is an ERROR,
+            # and has to be reported as one. Answering 200 with a blank
+            # image told Leaflet the tile had loaded fine, so it kept that
+            # blank in its own tile cache and never asked again - the area
+            # stayed empty after the internet came back no matter what
+            # cache headers we sent. As a 404 the tile is marked failed,
+            # displayed via the layer's transparent errorTileUrl (so the
+            # map still looks clean), and re-requested on the next redraw.
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.end_headers()
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", _content_type(blob))
         self.send_header("Content-Length", str(len(blob)))
-        if placeholder:
-            # A placeholder must NEVER be cached by the browser. It means
-            # "couldn't get this tile right now", not "this tile is blank" -
-            # and the two are indistinguishable once cached. Letting the
-            # browser keep it meant an area first seen offline stayed blank
-            # after the internet came back, because the browser answered
-            # from its own copy and never asked this server again.
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Expires", "0")
-        else:
-            # Real tiles are immutable enough to keep, so panning back and
-            # forth doesn't even reach this server.
-            self.send_header("Cache-Control", "max-age=86400")
+        # Real tiles are immutable enough to keep, so panning back and
+        # forth doesn't even reach this server.
+        self.send_header("Cache-Control", "max-age=86400")
         self.end_headers()
         try:
             self.wfile.write(blob)

@@ -11,26 +11,24 @@ from PySide6.QtWebEngineCore import QWebEngineProfile
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtCore import QUrl, QObject, Signal, Slot
 
-from app_paths import data_dir
 
 
-def _purge_stale_placeholder_cache():
+def _clear_browser_cache():
     """
-    One-off cleanup for caches poisoned by an earlier build.
+    Drop the browser's HTTP cache at startup.
 
-    Until the fix in tile_cache.py, the "tile unavailable" placeholder was
-    sent with the same 24h Cache-Control as a real tile, so the browser
-    kept the blank and an area first viewed offline stayed blank even after
-    the internet came back. New placeholders are no-store, but blanks
-    already cached would sit there for a day - so drop the HTTP cache once.
-    The marker file keeps this from running on every launch.
+    Everything this page loads - Leaflet and every map tile - now comes
+    from our own local proxy, which answers from disk in about a
+    millisecond, so the browser cache buys very little here and can cost
+    correctness: one stale entry keeps an area blank long after the tile
+    is available again.
+
+    Done unconditionally rather than once behind a marker file. A one-shot
+    cleanup can be silently used up - a test run consumed it on this
+    machine already - leaving the real users it was meant for uncleaned.
     """
-    marker = data_dir() / ".placeholder_cache_purged"
-    if marker.exists():
-        return
     try:
         QWebEngineProfile.defaultProfile().clearHttpCache()
-        marker.write_text("done", encoding="utf-8")
     except Exception:
         pass
 
@@ -267,17 +265,25 @@ var map = L.map('map').setView([0, 0], 2);
 // previously-viewed area work with no internet at all; TILE_PROXY is
 // substituted with its port when this page is loaded.
 var TILE_URL = TILE_PROXY + '/t/';
+// Shown in place of a tile that couldn't be fetched. The proxy answers 404
+// for those, so Leaflet records the tile as FAILED (unlike a 200 blank,
+// which it would keep forever as a successful load) and asks again on the
+// next redraw - while this transparent pixel keeps the map looking clean.
+var TILE_ERROR_IMG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' +
+    'CAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 var googleHybrid = L.tileLayer(
     TILE_URL + 'google/{z}/{x}/{y}',
     {
         maxZoom: 20,
+        errorTileUrl: TILE_ERROR_IMG,
         attribution: 'Imagery &copy; Google',
     }
 );
 
 var osmStreets = L.tileLayer(TILE_URL + 'osm/{z}/{x}/{y}', {
     maxZoom: 19,
+    errorTileUrl: TILE_ERROR_IMG,
     attribution: '&copy; OpenStreetMap contributors',
 });
 
@@ -287,6 +293,7 @@ var esriWorldImagery = L.tileLayer(
     TILE_URL + 'esri/{z}/{x}/{y}',
     {
         maxZoom: 19,
+        errorTileUrl: TILE_ERROR_IMG,
         attribution: 'Imagery &copy; Esri',
     }
 );
@@ -299,6 +306,7 @@ var esriHybridLabels = L.tileLayer(
     TILE_URL + 'esriref/{z}/{x}/{y}',
     {
         maxZoom: 19,
+        errorTileUrl: TILE_ERROR_IMG,
         attribution: 'Imagery &copy; Esri',
     }
 );
@@ -325,6 +333,16 @@ var droneIcon = L.divIcon({
     iconSize: [DRONE_ICON_W, DRONE_ICON_H],
     iconAnchor: [DRONE_ICON_W / 2, DRONE_ICON_H / 2]
 });
+
+// Tiles that failed while offline stay failed until something asks for them
+// again, so nudge every layer when the machine comes back online.
+// redraw() on a layer that isn't currently displayed is a harmless no-op.
+function retryFailedTiles() {
+    [googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels].forEach(function (l) {
+        try { l.redraw(); } catch (e) {}
+    });
+}
+window.addEventListener('online', retryFailedTiles);
 
 var marker = null;
 var path = L.polyline([], {color: 'red', weight: 2}).addTo(map);
@@ -1012,7 +1030,7 @@ class MapView(QWebEngineView):
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
-        _purge_stale_placeholder_cache()
+        _clear_browser_cache()
 
         self._bridge = Bridge()
         self._bridge.fly_to_here.connect(self.fly_to_here)
