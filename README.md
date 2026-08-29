@@ -12,7 +12,7 @@ Created by Derin Hakan Karakurt
 
 ![MavGCS screenshot](screenshot.png)
 
-## Download (Windows)
+## How to run (Windows)
 
 Grab `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
