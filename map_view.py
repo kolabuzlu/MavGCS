@@ -58,8 +58,12 @@ LEAFLET_HTML = """
   }
   /* Sits to the right of the Follow UAV / ADS-B toggles, spanning the
      same vertical band, rather than stacking underneath them. */
+  #tilecache-control .tc-sep {
+    margin-top: 6px; padding-top: 5px;
+    border-top: 1px solid rgba(255,255,255,0.15);
+  }
   #tilecache-control {
-    position: absolute; top: 10px; left: 166px; width: 232px;
+    position: absolute; top: 10px; left: 166px; width: 244px;
     background: rgba(0,0,0,0.6); color: white;
     padding: 5px 8px 6px; border-radius: 4px;
     font-family: sans-serif; font-size: 12px; z-index: 1000;
@@ -137,7 +141,7 @@ LEAFLET_HTML = """
 </div>
 <div id="tilecache-control">
     <div class="tc-row">
-        <span class="tc-title">Offline Map Cache</span>
+        <span class="tc-title">Map</span>
         <select id="tc-limit" onchange="setTileCacheLimit(this.value);">
             <!-- Starts at No Cache to match the server's own default:
                  saving map tiles to disk is opt-in. -->
@@ -149,12 +153,32 @@ LEAFLET_HTML = """
             <option value="2048">2 GB</option>
             <option value="5120">5 GB</option>
         </select>
+        <button onclick="clearTileCache();">Clear</button>
     </div>
     <div class="tc-row">
         <div class="tc-bar"><div id="tc-fill"></div></div>
-        <button id="tc-clear" onclick="clearTileCache();">Clear</button>
     </div>
     <div id="tc-text" class="tc-text">&nbsp;</div>
+
+    <div class="tc-row tc-sep">
+        <span class="tc-title">Terrain</span>
+        <!-- Bigger steps than the map: one elevation tile is ~40MB, and it
+             defaults to caching because a terrain radar that re-downloaded
+             40MB per fix would be unusable. -->
+        <select id="tr-limit" onchange="setTerrainCacheLimit(this.value);">
+            <option value="0">No Cache</option>
+            <option value="512">500 MB</option>
+            <option value="1024">1 GB</option>
+            <option value="2048" selected>2 GB</option>
+            <option value="5120">5 GB</option>
+            <option value="10240">10 GB</option>
+        </select>
+        <button onclick="clearTerrainCache();">Clear</button>
+    </div>
+    <div class="tc-row">
+        <div class="tc-bar"><div id="tr-fill"></div></div>
+    </div>
+    <div id="tr-text" class="tc-text">&nbsp;</div>
 </div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
@@ -480,10 +504,21 @@ function fmtSize(bytes) {
     return bytes + ' B';
 }
 
-// Pushed from Python (see MapView.update_tile_cache_stats).
-function setTileCacheStats(tiles, usedBytes, limitBytes) {
-    var fill = document.getElementById('tc-fill');
-    var text = document.getElementById('tc-text');
+function setTerrainCacheLimit(megabytes) {
+    if (bridge) {
+        bridge.terrainCacheLimitChanged(parseInt(megabytes, 10));
+    }
+}
+
+function clearTerrainCache() {
+    if (bridge) {
+        bridge.terrainCacheClearRequested();
+    }
+}
+
+function _renderCacheRow(fillId, textId, tiles, usedBytes, limitBytes) {
+    var fill = document.getElementById(fillId);
+    var text = document.getElementById(textId);
     if (!fill || !text) return;
     var pct = limitBytes > 0 ? Math.min(100, (usedBytes / limitBytes) * 100) : 0;
     fill.style.width = pct.toFixed(1) + '%';
@@ -493,6 +528,15 @@ function setTileCacheStats(tiles, usedBytes, limitBytes) {
     text.textContent = limitBytes > 0
         ? fmtSize(usedBytes) + ' / ' + fmtSize(limitBytes) + '  ' + t
         : fmtSize(usedBytes) + ' stored  ' + t + '  (not saving)';
+}
+
+// Both pushed from Python (see MapView.update_cache_stats).
+function setTileCacheStats(tiles, usedBytes, limitBytes) {
+    _renderCacheRow('tc-fill', 'tc-text', tiles, usedBytes, limitBytes);
+}
+
+function setTerrainCacheStats(tiles, usedBytes, limitBytes) {
+    _renderCacheRow('tr-fill', 'tr-text', tiles, usedBytes, limitBytes);
 }
 
 function clearTarget() {
@@ -896,6 +940,8 @@ class Bridge(QObject):
     adsb_center_changed = Signal(float, float)
     tile_cache_limit_changed = Signal(int)
     tile_cache_clear_requested = Signal()
+    terrain_cache_limit_changed = Signal(int)
+    terrain_cache_clear_requested = Signal()
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
@@ -921,6 +967,14 @@ class Bridge(QObject):
     def tileCacheClearRequested(self):
         self.tile_cache_clear_requested.emit()
 
+    @Slot(int)
+    def terrainCacheLimitChanged(self, megabytes):
+        self.terrain_cache_limit_changed.emit(megabytes)
+
+    @Slot()
+    def terrainCacheClearRequested(self):
+        self.terrain_cache_clear_requested.emit()
+
 
 class MapView(QWebEngineView):
     fly_to_here = Signal(float, float)
@@ -929,6 +983,8 @@ class MapView(QWebEngineView):
     adsb_center_changed = Signal(float, float)
     tile_cache_limit_changed = Signal(int)
     tile_cache_clear_requested = Signal()
+    terrain_cache_limit_changed = Signal(int)
+    terrain_cache_clear_requested = Signal()
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
@@ -940,6 +996,8 @@ class MapView(QWebEngineView):
         self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
         self._bridge.tile_cache_limit_changed.connect(self.tile_cache_limit_changed)
         self._bridge.tile_cache_clear_requested.connect(self.tile_cache_clear_requested)
+        self._bridge.terrain_cache_limit_changed.connect(self.terrain_cache_limit_changed)
+        self._bridge.terrain_cache_clear_requested.connect(self.terrain_cache_clear_requested)
 
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
@@ -993,8 +1051,14 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(f"renderAdsbContacts({json.dumps(contacts)});")
 
     def update_tile_cache_stats(self, tiles: int, used_bytes: int, limit_bytes: int):
-        """Refresh the offline-cache readout (bar and figures) on the map."""
+        """Refresh the map-cache readout (bar and figures)."""
         self.page().runJavaScript(
             f"setTileCacheStats({tiles}, {used_bytes}, {limit_bytes});"
+        )
+
+    def update_terrain_cache_stats(self, tiles: int, used_bytes: int, limit_bytes: int):
+        """Refresh the terrain-cache readout (bar and figures)."""
+        self.page().runJavaScript(
+            f"setTerrainCacheStats({tiles}, {used_bytes}, {limit_bytes});"
         )
 

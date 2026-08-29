@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
+import terrain_provider
 from terrain_provider import TerrainRadarWorker
 from adsb_provider import AdsbWorker
 from tile_cache import TileCacheServer
@@ -813,6 +814,8 @@ class MainWindow(QMainWindow):
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
         self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
+        self.map_view.terrain_cache_limit_changed.connect(self.on_terrain_cache_limit)
+        self.map_view.terrain_cache_clear_requested.connect(self.on_terrain_cache_clear)
         # Keep the map's cache readout current: the size changes as tiles
         # stream in, not just when the user touches the control.
         self._tile_stats_timer = QTimer(self)
@@ -1145,10 +1148,22 @@ class MainWindow(QMainWindow):
         self.tile_server.clear()
         self._push_tile_cache_stats()
 
+    def on_terrain_cache_limit(self, megabytes):
+        terrain_provider.set_cache_limit(int(megabytes) * 1024 * 1024)
+        self._push_tile_cache_stats()
+
+    def on_terrain_cache_clear(self):
+        terrain_provider.clear_cache()
+        self._push_tile_cache_stats()
+
     def _push_tile_cache_stats(self):
         tiles, used = self.tile_server.stats()
         self.map_view.update_tile_cache_stats(
             tiles, used, self.tile_server.size_limit_bytes
+        )
+        t_tiles, t_used = terrain_provider.cache_stats()
+        self.map_view.update_terrain_cache_stats(
+            t_tiles, t_used, terrain_provider.cache_limit_bytes()
         )
 
     def _reset_vehicle_state(self):

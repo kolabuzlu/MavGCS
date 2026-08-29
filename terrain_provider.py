@@ -39,6 +39,84 @@ MAX_CACHED_TILES = 4  # each decoded tile is ~50MB (3600x3600 float32)
 
 EARTH_R = 6371000.0
 
+# Terrain tiles are ~40MB each, so this cache grows far faster per tile than
+# the map's. It used to be unbounded; a limit keeps it in check while still
+# defaulting to caching, since a terrain radar that re-downloads 40MB for
+# every fix would be unusable. 0 means "No Cache": use what's already saved,
+# save nothing new.
+_DEFAULT_CACHE_LIMIT = 2 * 1024 ** 3   # 2 GB
+_cache_lock = threading.Lock()
+_cache_limit_bytes = _DEFAULT_CACHE_LIMIT
+
+
+def cache_limit_bytes() -> int:
+    with _cache_lock:
+        return _cache_limit_bytes
+
+
+def set_cache_limit(limit_bytes: int):
+    global _cache_limit_bytes
+    with _cache_lock:
+        _cache_limit_bytes = max(0, int(limit_bytes))
+    if cache_limit_bytes() > 0:
+        enforce_cache_limit()
+
+
+def cache_stats():
+    """(tile count, bytes on disk). Cheap to scan directly - even a large
+    terrain cache is only tens of files, unlike the map's thousands."""
+    count = size = 0
+    if CACHE_DIR.exists():
+        for p in CACHE_DIR.glob("*.tif"):
+            try:
+                size += p.stat().st_size
+                count += 1
+            except OSError:
+                pass
+    return count, size
+
+
+def clear_cache():
+    """Delete every cached elevation tile."""
+    if not CACHE_DIR.exists():
+        return
+    for p in CACHE_DIR.glob("*.tif"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def enforce_cache_limit():
+    """Trim back under the limit, oldest tile first (to 90%, so a cache
+    sitting on the boundary doesn't re-scan after every single tile)."""
+    limit = cache_limit_bytes()
+    if limit <= 0:
+        return
+    entries = []
+    try:
+        for p in CACHE_DIR.glob("*.tif"):
+            try:
+                st = p.stat()
+                entries.append((st.st_mtime, st.st_size, p))
+            except OSError:
+                pass
+    except OSError:
+        return
+    total = sum(e[1] for e in entries)
+    if total <= limit:
+        return
+    entries.sort()  # oldest first
+    target = int(limit * 0.9)
+    for _, size, path in entries:
+        if total <= target:
+            break
+        try:
+            path.unlink()
+            total -= size
+        except OSError:
+            pass
+
 
 def tile_name(lat: float, lon: float) -> str:
     """Copernicus GLO-30 tile name for the 1-degree cell containing lat/lon,
@@ -143,12 +221,15 @@ class TerrainProvider:
             try:
                 with urllib.request.urlopen(url, timeout=15) as resp:
                     raw = resp.read()
-                # Write via a temporary file and rename: a tile is ~40MB, so
-                # a stop (or a crash) part-way through a direct write would
-                # leave a truncated file that then fails to decode forever.
-                tmp = path.with_suffix(".part")
-                tmp.write_bytes(raw)
-                os.replace(tmp, path)
+                if cache_limit_bytes() > 0:
+                    # Write via a temporary file and rename: a tile is ~40MB,
+                    # so a stop (or a crash) part-way through a direct write
+                    # would leave a truncated file that then fails to decode
+                    # forever.
+                    tmp = path.with_suffix(".part")
+                    tmp.write_bytes(raw)
+                    os.replace(tmp, path)
+                    enforce_cache_limit()
             except (urllib.error.URLError, urllib.error.HTTPError, OSError):
                 self._missing.add(key)
                 return None
