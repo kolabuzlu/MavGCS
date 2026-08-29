@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.12.0 - Typeable terrain radar scale, watermark and ADS-B fixes.
+## V1.12.0 - Minor fixes and improvements.
 
 ## V1.11.0 - ADS-B traffic and Change Loiter Radius added.
 
