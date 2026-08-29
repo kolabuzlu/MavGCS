@@ -7,8 +7,32 @@ QWebChannel bridge so a map click can call back into Python (used for the
 import json
 
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWebEngineCore import QWebEngineProfile
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtCore import QUrl, QObject, Signal, Slot
+
+from app_paths import data_dir
+
+
+def _purge_stale_placeholder_cache():
+    """
+    One-off cleanup for caches poisoned by an earlier build.
+
+    Until the fix in tile_cache.py, the "tile unavailable" placeholder was
+    sent with the same 24h Cache-Control as a real tile, so the browser
+    kept the blank and an area first viewed offline stayed blank even after
+    the internet came back. New placeholders are no-store, but blanks
+    already cached would sit there for a day - so drop the HTTP cache once.
+    The marker file keeps this from running on every launch.
+    """
+    marker = data_dir() / ".placeholder_cache_purged"
+    if marker.exists():
+        return
+    try:
+        QWebEngineProfile.defaultProfile().clearHttpCache()
+        marker.write_text("done", encoding="utf-8")
+    except Exception:
+        pass
 
 LEAFLET_HTML = """
 <!DOCTYPE html>
@@ -988,6 +1012,7 @@ class MapView(QWebEngineView):
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
+        _purge_stale_placeholder_cache()
 
         self._bridge = Bridge()
         self._bridge.fly_to_here.connect(self.fly_to_here)

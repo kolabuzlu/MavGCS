@@ -98,14 +98,26 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         blob = self.server.tile_cache.get_tile(layer, int(z), int(x), int(y))
-        if blob is None:
+        placeholder = blob is None
+        if placeholder:
             blob = _BLANK_PNG
         self.send_response(200)
         self.send_header("Content-Type", _content_type(blob))
         self.send_header("Content-Length", str(len(blob)))
-        # Let the browser keep its own short-term copy too, so panning back
-        # and forth doesn't even reach this server.
-        self.send_header("Cache-Control", "max-age=86400")
+        if placeholder:
+            # A placeholder must NEVER be cached by the browser. It means
+            # "couldn't get this tile right now", not "this tile is blank" -
+            # and the two are indistinguishable once cached. Letting the
+            # browser keep it meant an area first seen offline stayed blank
+            # after the internet came back, because the browser answered
+            # from its own copy and never asked this server again.
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        else:
+            # Real tiles are immutable enough to keep, so panning back and
+            # forth doesn't even reach this server.
+            self.send_header("Cache-Control", "max-age=86400")
         self.end_headers()
         try:
             self.wfile.write(blob)
