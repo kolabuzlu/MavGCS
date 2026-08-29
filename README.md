@@ -1,5 +1,7 @@
 <img src="logo.png" alt="MavGCS" width="320">
 
+![MavGCS screenshot](screenshot.png)
+
 A ground control station software for MAVLink protocol.
 
 It works with Ardupilot, PX4 (Bi-directional) or iNav (Uni-directional).
@@ -10,10 +12,8 @@ You can monitor HUD and vital information about flight, see the vehicle and ADS-
 
 Created by Derin Hakan Karakurt
 
-![MavGCS screenshot](screenshot.png)
-
 ## Running MavGCS (Windows)
 
-Grab `MavGCS-<version>-windows.zip` from the
+Download `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
 and run **MavGCS.exe**. No setup needed.
