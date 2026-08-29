@@ -17,9 +17,10 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.11.0 - ADS-B traffic overlay on the map, Change Loiter
-# Radius control, and the window now opens maximized. See CHANGELOG.md.
-APP_VERSION = "V1.11.0"
+# This is MavGCS V1.12.0 - the terrain radar's clearance scale is now typed
+# rather than cycled, plus Messages watermark and ADS-B fixes.
+# See CHANGELOG.md.
+APP_VERSION = "V1.12.0"
 
 import sys
 import os
@@ -556,18 +557,21 @@ class MessagesPanel(QGroupBox):
         # sheets have no background-size, so mavgcs_logo_watermark.png is
         # pre-scaled/faded to sit right-aligned behind the scrolling text -
         # see the chroma-key + alpha-fade preprocessing that produced it).
-        # The right-side gap comes from padding-right + background-origin:
-        # content (Qt's default background-origin ignores padding - without
-        # the explicit "content" it sits flush against the edge regardless
-        # of padding-right) rather than baking a transparent margin into the
-        # image itself, which visibly muted the logo's opacity.
+        # Its right-hand gap is a transparent margin baked into the image,
+        # NOT padding-right: on a scroll area Qt clips the background at the
+        # viewport edge, so once enough messages arrive to raise the
+        # scrollbar, padding-based positioning left the logo clipped mid-word
+        # underneath it.
         logo_path = os.path.join(os.path.dirname(__file__), "mavgcs_logo_watermark.png").replace("\\", "/")
         self.text_edit.setStyleSheet(
             "background-color: #16171a; color: white; "
             "font-family: Consolas, monospace; font-size: 10px; border: none; "
             f"background-image: url({logo_path}); "
             "background-repeat: no-repeat; background-position: right; "
-            "background-origin: content; padding-right: 20px;"
+            # Without this the background belongs to the scrolled content and
+            # slides up and down with the messages; "fixed" pins it to the
+            # viewport so it stays put while text scrolls past it.
+            "background-attachment: fixed;"
         )
         layout.addWidget(self.text_edit)
 

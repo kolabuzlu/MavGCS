@@ -48,6 +48,14 @@ LEAFLET_HTML = """
   }
   #terrain-radar .tr-mode.left { left: 4px; }
   #terrain-radar .tr-mode.right { right: 4px; }
+  /* The scale control is a real text input so the value can be typed, but
+     it should read as the same chip the mode button on the right is. */
+  #terrain-radar input.tr-mode {
+    width: 46px; text-align: center; cursor: text; outline: none;
+  }
+  #terrain-radar input.tr-mode:focus {
+    background: rgba(0,0,0,0.75); border-color: #37a8db; color: #ffffff;
+  }
   .adsb-icon { background: none; border: none; }
   .adsb-icon .adsb-label {
     position: absolute; top: 34px; left: 50%; transform: translateX(-50%);
@@ -89,7 +97,7 @@ LEAFLET_HTML = """
     padding: 4px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 12px;
     z-index: 1000; display: flex; align-items: center; gap: 4px;
-" title="Nearby manned air traffic from the free adsb.lol public feed - centered on the UAV, ~50nm radius">
+">
     <input type="checkbox" id="adsb-checkbox"
            onchange="setAdsbEnabled(this.checked);"
            style="margin: 0; cursor: pointer;">
@@ -116,7 +124,8 @@ LEAFLET_HTML = """
         <circle id="tr-uav-dot" class="tr-uav-dot" cx="100" cy="191" r="3" />
     </svg>
     <div id="tr-placeholder" class="tr-placeholder">Terrain Radar - no data</div>
-    <button class="tr-mode left" onclick="cycleTerrainScale()" id="tr-scale-btn">120m</button>
+    <input class="tr-mode left" id="tr-scale-input" type="text" value="120m"
+           title="Clearance colour scale - type a value in metres and press Enter">
     <button class="tr-mode right" onclick="toggleTerrainMode()" id="tr-mode-btn">REL</button>
 </div>
 <script>
@@ -577,8 +586,12 @@ function renderAdsbContacts(contacts) {
 var TR_SIZE = 200;
 var TR_HALF_ANGLE = 60 * Math.PI / 180;  // must match TerrainRadarWorker.HALF_ANGLE_DEG
 var TR_RING_R = 6, TR_APEX_Y = TR_SIZE - TR_RING_R - 3, TR_R = TR_APEX_Y - 6;
-var TR_SCALES = [60, 120, 250];  // total clearance colour scale, metres
-var trScaleIdx = 1;
+// Total clearance colour scale in metres - how much terrain clearance the
+// red->green ramp spans. Freely typeable (60/120/250 were just KiteGCS's
+// presets, not anything the maths depends on); clamped only to keep the
+// ramp meaningful.
+var TR_SCALE_MIN = 5, TR_SCALE_MAX = 2000;
+var trScaleM = 120;
 var trPredictive = false;
 var trFan = null;  // {elev, rangeM, angCells, radCells, cellEls}
 var trAltMsl = 0, trSpeed = 0;
@@ -608,7 +621,7 @@ function trSlope() {
 // terrain more than `scale` below the reference is unpainted/transparent).
 function trColorFor(elev, dist) {
     if (elev === null || elev === undefined) return null;
-    var scale = TR_SCALES[trScaleIdx];
+    var scale = trScaleM;
     var ref = trPredictive ? (trAltMsl + trSlope() * dist) : trAltMsl;
     var clear = ref - elev;
     if (clear >= scale) return null;
@@ -706,7 +719,7 @@ function trBuildTerrainGeometry() {
     hdgLine.setAttribute('x1', TR_SIZE / 2); hdgLine.setAttribute('y1', TR_APEX_Y);
     hdgLine.setAttribute('x2', top[0].toFixed(1)); hdgLine.setAttribute('y2', top[1].toFixed(1));
 
-    document.getElementById('tr-scale-btn').textContent = TR_SCALES[trScaleIdx] + 'm';
+    trShowScale();
     document.getElementById('tr-mode-btn').textContent = trPredictive ? 'PRED' : 'REL';
 }
 
@@ -729,11 +742,43 @@ function toggleTerrainMode() {
     document.getElementById('tr-mode-btn').textContent = trPredictive ? 'PRED' : 'REL';
     trRenderTerrainRadar();
 }
-function cycleTerrainScale() {
-    trScaleIdx = (trScaleIdx + 1) % TR_SCALES.length;
-    document.getElementById('tr-scale-btn').textContent = TR_SCALES[trScaleIdx] + 'm';
-    trRenderTerrainRadar();
+function trShowScale() {
+    var el = document.getElementById('tr-scale-input');
+    // Don't fight the user while they're mid-edit.
+    if (el && document.activeElement !== el) el.value = trScaleM + 'm';
 }
+
+function trApplyScale() {
+    var el = document.getElementById('tr-scale-input');
+    if (!el) return;
+    // Tolerate "120", "120m", " 120 m" alike.
+    var v = parseFloat(String(el.value).replace(/[^0-9.]/g, ''));
+    if (isFinite(v) && v > 0) {
+        trScaleM = Math.min(TR_SCALE_MAX, Math.max(TR_SCALE_MIN, v));
+        trRenderTerrainRadar();
+    }
+    el.value = trScaleM + 'm';   // echo back what was actually applied
+}
+
+(function () {
+    var el = document.getElementById('tr-scale-input');
+    if (!el) return;
+    el.addEventListener('keydown', function (e) {
+        // The map binds its own keys (+/- zoom, arrows pan) - keep typing
+        // here from also driving the map underneath.
+        e.stopPropagation();
+        if (e.key === 'Enter') { trApplyScale(); el.blur(); }
+        else if (e.key === 'Escape') { el.value = trScaleM + 'm'; el.blur(); }
+    });
+    el.addEventListener('blur', trApplyScale);
+    el.addEventListener('focus', function () {
+        el.value = String(trScaleM);   // drop the 'm' so it's ready to overtype
+        el.select();
+    });
+    // Clicking the field shouldn't also register as a map click.
+    el.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    el.addEventListener('dblclick', function (e) { e.stopPropagation(); });
+})();
 </script>
 </body>
 </html>
