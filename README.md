@@ -1,4 +1,4 @@
-# MavGCS
+<img src="logo.png" alt="MavGCS" width="320">
 
 A ground control station software for MAVLink protocol.
 
