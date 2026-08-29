@@ -41,6 +41,7 @@ from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 from terrain_provider import TerrainRadarWorker
 from adsb_provider import AdsbWorker
+from app_paths import resource_path
 
 
 class TelemetryPanel(QFrame):
@@ -383,7 +384,13 @@ class ConnectionPanel(QGroupBox):
     user clicks Connect.
     """
 
-    PROTOCOLS = ["Serial", "TCP", "UDP"]
+    # The same split Mission Planner draws between UDP and UDPCl, but
+    # spelled out: "UDP (listen)" binds a port and waits for the vehicle to
+    # stream to us, "UDP (connect to)" dials out to a specific host.
+    # Previously a single "UDP" entry guessed between the two from whether
+    # the host box was filled in, which silently produced an outgoing
+    # connection for the common SITL case, where listening is what's needed.
+    PROTOCOLS = ["Serial", "TCP", "UDP (listen)", "UDP (connect to)"]
     BAUD_RATES = ["4800", "9600", "19200", "38400", "57600", "115200", "230400"]
 
     connect_requested = Signal(str)
@@ -416,13 +423,17 @@ class ConnectionPanel(QGroupBox):
             default_protocol if default_protocol in self.PROTOCOLS else "TCP"
         )
         self.protocol_combo.setFixedHeight(self.FIELD_HEIGHT)
-        self.protocol_combo.setFixedWidth(68)
+        # Deliberately NOT a fixed width: it has to fit the longest entry
+        # ("UDP (connect to)") or the label runs underneath the drop-down
+        # arrow. Its size hint already accounts for that.
         self.protocol_combo.currentTextChanged.connect(self._on_protocol_changed)
 
         # Field 1: host (TCP/UDP) vs a real serial-port dropdown (Serial)
         self.field1_stack = QStackedWidget()
         self.field1_stack.setFixedHeight(self.FIELD_HEIGHT)
-        self.field1_stack.setFixedWidth(90)
+        # Minimum rather than fixed: this field absorbs the row's spare
+        # width so the port box ends flush with the Disconnect button below.
+        self.field1_stack.setMinimumWidth(90)
         self.host_edit = QLineEdit(default_host)
         self.serial_port_combo = QComboBox()
         self.field1_stack.addWidget(self.host_edit)          # index 0
@@ -456,13 +467,16 @@ class ConnectionPanel(QGroupBox):
         self.disconnect_btn.setStyleSheet("color: #f66; font-weight: bold; font-size: 9px; padding: 2px 3px;")
         self.disconnect_btn.clicked.connect(self.disconnect_requested)
 
+        # Fields on the first row, actions on the second. Keeping all five
+        # on one row needed more width than the panel gets, so the
+        # fixed-width widgets overflowed into each other.
         row.addWidget(self.protocol_combo)
-        row.addWidget(self.field1_stack)
-        row.addWidget(self.field2_stack)
-        row.addWidget(self.connect_btn)
-        row.addWidget(self.disconnect_btn)
+        row.addWidget(self.field1_stack, 1)   # takes the slack (no trailing
+        row.addWidget(self.field2_stack)      # stretch, so the row ends flush)
         refresh_row.addWidget(self.refresh_btn)
         refresh_row.addStretch(1)
+        refresh_row.addWidget(self.connect_btn)
+        refresh_row.addWidget(self.disconnect_btn)
 
         self._refresh_serial_ports()
         self._on_protocol_changed(self.protocol_combo.currentText())
@@ -493,6 +507,12 @@ class ConnectionPanel(QGroupBox):
         if is_serial:
             self._refresh_serial_ports()
 
+        # Plain "UDP" always binds every interface, so there's no host to
+        # enter - grey the box out rather than letting it look meaningful.
+        listening_udp = protocol == "UDP (listen)"
+        self.host_edit.setEnabled(not listening_udp)
+        self.host_edit.setPlaceholderText("(listening)" if listening_udp else "")
+
     def _on_connect_clicked(self):
         protocol = self.protocol_combo.currentText()
 
@@ -510,19 +530,25 @@ class ConnectionPanel(QGroupBox):
                 self.connect_requested.emit("")
                 return
             connection_string = f"tcp:{host}:{port}"
-        elif protocol == "UDP":
-            host = self.host_edit.text().strip()
+        elif protocol == "UDP (listen)":
+            # Listen on every interface. This is what ArduPilot SITL and
+            # most telemetry setups need: they stream TO a port rather than
+            # accepting a connection, so we have to be bound to that port
+            # to receive anything.
             port = self.port_edit.text().strip()
             if not port:
                 self.connect_requested.emit("")
                 return
-            if not host or host == "0.0.0.0":
-                # No specific peer given - listen for incoming telemetry,
-                # matching this app's default (e.g. ArduPilot SITL streams
-                # to a UDP port rather than being connected to directly).
-                connection_string = f"udpin:0.0.0.0:{port}"
-            else:
-                connection_string = f"udpout:{host}:{port}"
+            connection_string = f"udpin:0.0.0.0:{port}"
+        elif protocol == "UDP (connect to)":
+            # Dial out to a specific peer - e.g. an ESP32/ELRS WiFi bridge
+            # that waits to hear from us before it starts streaming.
+            host = self.host_edit.text().strip()
+            port = self.port_edit.text().strip()
+            if not host or not port:
+                self.connect_requested.emit("")
+                return
+            connection_string = f"udpout:{host}:{port}"
         else:
             connection_string = ""
 
@@ -562,7 +588,7 @@ class MessagesPanel(QGroupBox):
         # viewport edge, so once enough messages arrive to raise the
         # scrollbar, padding-based positioning left the logo clipped mid-word
         # underneath it.
-        logo_path = os.path.join(os.path.dirname(__file__), "mavgcs_logo_watermark.png").replace("\\", "/")
+        logo_path = resource_path("mavgcs_logo_watermark.png").replace("\\", "/")
         self.text_edit.setStyleSheet(
             "background-color: #16171a; color: white; "
             "font-family: Consolas, monospace; font-size: 10px; border: none; "
@@ -659,7 +685,7 @@ class MainWindow(QMainWindow):
     def __init__(self, connection_string):
         super().__init__()
         self.setWindowTitle(f"MavGCS {APP_VERSION}")
-        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "mavgcs_icon.png")))
+        self.setWindowIcon(QIcon(resource_path("mavgcs_icon.png")))
         self.resize(1300, 920)
 
         self.horizon = ArtificialHorizon()
@@ -1042,8 +1068,10 @@ class MainWindow(QMainWindow):
         parts = connection_string.split(":")
         if connection_string.startswith("tcp:") and len(parts) == 3:
             return ("TCP", parts[1], parts[2])
-        if connection_string.startswith(("udpin:", "udpout:", "udp:")) and len(parts) == 3:
-            return ("UDP", parts[1], parts[2])
+        if connection_string.startswith("udpout:") and len(parts) == 3:
+            return ("UDP (connect to)", parts[1], parts[2])
+        if connection_string.startswith(("udpin:", "udp:")) and len(parts) == 3:
+            return ("UDP (listen)", parts[1], parts[2])
         if len(parts) == 2:
             # Anything else with a single colon is treated as Serial
             # (device:baud), e.g. "com3:57600" or "/dev/ttyUSB0:57600".

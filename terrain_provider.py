@@ -27,8 +27,13 @@ import tifffile
 
 from PySide6.QtCore import QThread, Signal
 
+from app_paths import data_dir
+
 BASE_URL = "https://copernicus-dem-30m.s3.amazonaws.com"
-CACHE_DIR = Path(__file__).resolve().parent / "terrain_cache"
+# Not next to the code: in a packaged build that's inside the unpacked
+# bundle, which is replaced wholesale on upgrade (and may not be writable).
+# See app_paths.data_dir().
+CACHE_DIR = data_dir() / "terrain_cache"
 MAX_CACHED_TILES = 4  # each decoded tile is ~50MB (3600x3600 float32)
 
 EARTH_R = 6371000.0

@@ -106,6 +106,26 @@ class MavlinkLink(QThread):
     def run(self):
         try:
             self.master = _open_mavlink_connection(self.connection_string)
+
+            # Announce ourselves BEFORE the first read. On an outgoing UDP
+            # connection ("udpout:") pymavlink never binds the socket, and
+            # Windows fails a recv on an unbound UDP socket outright with
+            # WSAEINVAL 10022 ("an invalid argument was supplied") instead
+            # of just blocking as POSIX does - so the very first read threw
+            # before any telemetry could arrive. Sending first implicitly
+            # binds the socket and clears that. It's also what a WiFi
+            # telemetry bridge needs anyway: those only start streaming back
+            # once they've heard from us (see the heartbeat loop below).
+            try:
+                with self._send_lock:
+                    self.master.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                        0, 0, 0,
+                    )
+            except Exception:
+                pass
+
             self.connection_status.emit(False, "Waiting for heartbeat...")
             hb = self.master.wait_heartbeat(timeout=30)
             if hb is None:
