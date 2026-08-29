@@ -7,3 +7,4 @@ terrain_cache/
 build/
 dist/
 *.spec.bak
+selftest.log
