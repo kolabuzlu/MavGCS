@@ -1212,11 +1212,26 @@ def _selftest(connection_string):
 
     lines.append("RESULT: " + ("PASS" if ok else "FAIL"))
     report = "\n".join(lines)
-    print(report)
+
+    # Write the log FIRST: it's the part that has to survive, and it's UTF-8
+    # so it copes with anything.
     try:
         (data_dir() / "selftest.log").write_text(report, encoding="utf-8")
     except OSError:
         pass
+
+    # Printing is the fragile step. Windows consoles are typically not UTF-8
+    # (cp1252 here), and OS error messages arrive in the system language -
+    # a Turkish socket error was enough to kill the whole self-test on the
+    # print alone, losing the diagnosis it existed to produce.
+    try:
+        print(report)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(report.encode(enc, errors="replace").decode(enc, errors="replace"))
+    except OSError:
+        pass  # windowed build with no console attached at all
+
     return 0 if ok else 1
 
 
