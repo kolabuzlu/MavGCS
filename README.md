@@ -1,4 +1,4 @@
-<img src="logo.png" alt="MavGCS" width="320">
+# MavGCS
 
 ![MavGCS screenshot](screenshot.png)
 
