@@ -168,6 +168,21 @@ class AdsbWorker(QThread):
             # so a fast feed paints immediately instead of waiting on a slow
             # one; a later provider just adds whatever it saw that this one
             # didn't.
+            #
+            # Unless the overlay has been switched off in the meantime. A
+            # fetch takes up to six seconds, so switching ADS-B off mid-poll
+            # used to let the reply land afterwards and re-draw every
+            # contact - with the box unticked, and with no further polls
+            # coming to move or remove them, so they sat frozen on the map
+            # looking like live traffic until ADS-B was toggled again.
+            #
+            # Only this emit is guarded: set_enabled() sends an empty list
+            # through the same signal to clear the markers, and that one
+            # has to get through precisely when we are disabled.
+            with self._lock:
+                still_wanted = self._enabled
+            if not still_wanted:
+                return
             self.contacts_ready.emit(list(merged.values()))
 
     def stop(self):
