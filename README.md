@@ -14,7 +14,7 @@ You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to acti
 
 Created by Derin Hakan Karakurt
 
-## Running MavGCS (Windows)
+## Installing & Running MavGCS (Windows)
 
 Download `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
