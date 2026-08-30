@@ -101,6 +101,10 @@ class MavlinkLink(QThread):
     connection_status = Signal(bool, str)
     # human-readable feedback after sending a command (success or failure)
     command_feedback = Signal(str)
+    # Raised when the vehicle has ACCEPTED a mission, so the map can stop
+    # showing edited altitudes as pending. Deliberately driven by the
+    # vehicle's acknowledgement rather than by us pressing send.
+    mission_uploaded = Signal()
     # STATUSTEXT from the vehicle: message text, MAV_SEVERITY (0-7)
     status_text_update = Signal(str, int)
 
@@ -364,6 +368,7 @@ class MavlinkLink(QThread):
                 elif self._mission_state == "uploading":
                     if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
                         n_real_waypoints = len(self._mission_pending) - 1  # exclude home placeholder
+                        self.mission_uploaded.emit()
                         if self._mission_restart:
                             self.command_feedback.emit(
                                 f"Mission uploaded ({n_real_waypoints} waypoints) - starting AUTO"

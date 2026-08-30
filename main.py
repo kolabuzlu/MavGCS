@@ -1521,6 +1521,12 @@ class MainWindow(QMainWindow):
         self.map_view.commit_waypoints()
         self.waypoint_panel.set_count(0)
 
+    def on_mission_uploaded(self):
+        """The vehicle accepted the mission, so the map can stop flagging
+        edited altitudes as unsent. Driven by the acknowledgement rather
+        than by pressing send, so a failed upload stays flagged."""
+        self.map_view.mark_mission_sent()
+
     def on_update_mission(self):
         """Re-send the mission that is already on the vehicle, with whatever
         altitudes have been edited since. Deliberately does NOT restart it -
@@ -1569,6 +1575,7 @@ class MainWindow(QMainWindow):
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
         self.link.status_update.connect(self.on_status)
+        self.link.mission_uploaded.connect(self.on_mission_uploaded)
         self.link.connection_status.connect(self.on_connection_status)
         self.link.command_feedback.connect(self.on_command_feedback)
         self.link.status_text_update.connect(self.messages_panel.add_message)

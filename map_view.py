@@ -304,14 +304,33 @@ function setWaypointDefaultAlt(alt) {
 function wpAltText(m) {
     var a = (m._wpAlt !== null && m._wpAlt !== undefined) ? m._wpAlt : wpDefaultAlt;
     if (a === null || a === undefined) return '';
-    return Math.round(a) + 'm';
+    return Math.round(a) + 'm' + (wpIsDirty(m) ? ' *' : '');
+}
+
+// An altitude edited since the vehicle last accepted this mission. Until
+// Update is pressed the aircraft will still fly the old figure, so the map
+// must not show the new one as though it were live.
+function wpIsDirty(m) {
+    return !!m._wpSent
+        && m._wpSentAlt !== undefined
+        && m._wpAlt !== m._wpSentAlt;
+}
+
+// Called once the VEHICLE has acknowledged the mission - not when we press
+// send, so a failed or lost upload keeps showing as pending.
+function markMissionSent() {
+    for (var i = 0; i < sentLayers.length; i++) {
+        var m = sentLayers[i];
+        if (m && m._wpId) { m._wpSentAlt = m._wpAlt; }
+    }
+    refreshWaypointIcons();
 }
 
 function refreshWaypointIcons() {
     for (var i = 0; i < allWaypointLayers.length; i++) {
         var m = allWaypointLayers[i];
         if (m && m._wpId) {
-            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m)));
+            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m), wpIsDirty(m)));
         }
     }
 }
@@ -321,6 +340,10 @@ function wpPopupHtml(m) {
     var shown = own ? m._wpAlt : (wpDefaultAlt !== null ? wpDefaultAlt : '');
     var hint = own ? '' :
         '<div style="font-size:10px;color:#aaa">mission default</div>';
+    if (wpIsDirty(m)) {
+        hint = '<div style="font-size:10px;color:#ffc107">not sent yet - ' +
+               'press Update</div>';
+    }
     return '<div style="text-align:center;min-width:130px">' +
            '<b>Waypoint ' + m._wpNum + '</b>' +
            '<div style="margin:4px 0">Altitude (m)</div>' +
@@ -344,7 +367,7 @@ function applyWaypointAlt(id) {
         var m = allWaypointLayers[i];
         if (m && m._wpId === id) {
             m._wpAlt = v;
-            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m)));
+            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m), wpIsDirty(m)));
             if (bridge) { bridge.waypointAltChanged(id, v); }
             map.closePopup();
             break;
@@ -518,11 +541,14 @@ var sentLayers = [];
 // Numbering restarts at 1 for each mission because that is what the
 // vehicle receives - so without a visual difference a map holding two
 // batches shows two markers labelled "1" and no way to tell them apart.
-function waypointIcon(number, sent, altText) {
+function waypointIcon(number, sent, altText, dirty) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
-    var label  = altText ? '<div class="wp-alt-label">' + altText + '</div>' : '';
+    var label  = altText
+        ? '<div class="wp-alt-label"' +
+          (dirty ? ' style="color:#ffc107"' : '') + '>' + altText + '</div>'
+        : '';
     return L.divIcon({
         className: 'waypoint-icon',
         html: label +
@@ -633,7 +659,7 @@ map.on('click', function(e) {
         m._wpNum = waypointMarkers.length + 1;
         m._wpAlt = null;                 // null = fly the mission default
         m._wpSent = false;
-        m.setIcon(waypointIcon(m._wpNum, false, wpAltText(m)));
+        m.setIcon(waypointIcon(m._wpNum, false, wpAltText(m), false));
         // A function, not a fixed string: the popup is rebuilt each time it
         // opens, so it shows the current altitude and picks up the mission
         // default once one has been set.
@@ -706,7 +732,7 @@ function commitWaypoints() {
         // vehicle was never given.
         if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
         m._wpSent = true;
-        m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m)));
+        m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m), wpIsDirty(m)));
     }
     // The next batch has no altitude decided yet, so it shows none rather
     // than borrowing this mission's.
@@ -1434,6 +1460,10 @@ class MapView(QWebEngineView):
         """Push current altitude/speed/climb for the terrain radar's live
         (no new sampling) colour recompute - called on every telemetry tick."""
         self.page().runJavaScript(f"setTerrainRef({alt_msl}, {ground_speed}, {climb_mps});")
+
+    def mark_mission_sent(self):
+        """The vehicle has accepted the mission: edited altitudes are live."""
+        self.page().runJavaScript("markMissionSent();")
 
     def set_waypoint_default_alt(self, alt: float):
         """So a waypoint with no altitude of its own shows what it will fly."""
