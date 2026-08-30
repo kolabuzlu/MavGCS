@@ -128,6 +128,15 @@ LEAFLET_HTML = """
     font-size: 10px; color: #b8c0c6; white-space: nowrap;
   }
   .adsb-icon { background: none; border: none; }
+  /* Altitude above each waypoint. Absolutely positioned so the icon box
+     stays 22x22 and the circle keeps sitting on the exact coordinate. */
+  .waypoint-icon .wp-alt-label {
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    white-space: nowrap; font-family: sans-serif; font-size: 10px;
+    font-weight: 700; color: #ffffff;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
+    pointer-events: none;
+  }
   .adsb-icon .adsb-label {
     position: absolute; top: 34px; left: 50%; transform: translateX(-50%);
     white-space: nowrap; font-family: sans-serif; font-size: 10px;
@@ -277,9 +286,75 @@ function flyToHere(lat, lon) {
     }
 }
 
-function waypointAdded(lat, lon) {
+// Each waypoint gets a stable id so an altitude edit can name exactly
+// which point it applies to, whichever batch it belongs to.
+var wpSeq = 0;
+// Mission default, echoed back from Python once a mission has been sent,
+// so a point with no altitude of its own shows the value it will actually fly.
+var wpDefaultAlt = null;
+
+function setWaypointDefaultAlt(alt) {
+    wpDefaultAlt = alt;
+    // Points with no altitude of their own now have a number to show.
+    refreshWaypointIcons();
+}
+
+// The altitude a waypoint will actually be flown at: its own if it has
+// one, otherwise the mission default. Blank until either is known.
+function wpAltText(m) {
+    var a = (m._wpAlt !== null && m._wpAlt !== undefined) ? m._wpAlt : wpDefaultAlt;
+    if (a === null || a === undefined) return '';
+    return Math.round(a) + 'm';
+}
+
+function refreshWaypointIcons() {
+    for (var i = 0; i < allWaypointLayers.length; i++) {
+        var m = allWaypointLayers[i];
+        if (m && m._wpId) {
+            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m)));
+        }
+    }
+}
+
+function wpPopupHtml(m) {
+    var own = (m._wpAlt !== null && m._wpAlt !== undefined);
+    var shown = own ? m._wpAlt : (wpDefaultAlt !== null ? wpDefaultAlt : '');
+    var hint = own ? '' :
+        '<div style="font-size:10px;color:#aaa">mission default</div>';
+    return '<div style="text-align:center;min-width:130px">' +
+           '<b>Waypoint ' + m._wpNum + '</b>' +
+           '<div style="margin:4px 0">Altitude (m)</div>' +
+           '<input id="wp-alt-input" type="text" value="' + shown + '" ' +
+           'style="width:70px;text-align:center" ' +
+           'onkeydown="if(event.key===&quot;Enter&quot;){applyWaypointAlt(' +
+           m._wpId + ');}">' + hint +
+           '<div style="margin-top:6px">' +
+           '<button class="fly-to-btn" onclick="applyWaypointAlt(' + m._wpId +
+           ')">Apply</button></div></div>';
+}
+
+// Applied to the marker and reported to Python, which owns the mission.
+// Nothing reaches the vehicle until Update Mission is pressed.
+function applyWaypointAlt(id) {
+    var el = document.getElementById('wp-alt-input');
+    if (!el) return;
+    var v = parseFloat(String(el.value).replace(/[^0-9.]/g, ''));
+    if (!isFinite(v)) return;
+    for (var i = 0; i < allWaypointLayers.length; i++) {
+        var m = allWaypointLayers[i];
+        if (m && m._wpId === id) {
+            m._wpAlt = v;
+            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m)));
+            if (bridge) { bridge.waypointAltChanged(id, v); }
+            map.closePopup();
+            break;
+        }
+    }
+}
+
+function waypointAdded(lat, lon, id) {
     if (bridge) {
-        bridge.waypointAdded(lat, lon);
+        bridge.waypointAdded(lat, lon, id);
     }
 }
 </script>
@@ -435,18 +510,23 @@ var waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).
 // (see commitWaypoints) keeps items here but out of waypointMarkers, so
 // a new queue can start fresh without touching what was already sent.
 var allWaypointLayers = [waypointLine];
+// The batch currently sitting on the vehicle. Sending a new mission
+// replaces it, on the map as well as on the aircraft.
+var sentLayers = [];
 
 // `sent` draws the muted version used for a mission already uploaded.
 // Numbering restarts at 1 for each mission because that is what the
 // vehicle receives - so without a visual difference a map holding two
 // batches shows two markers labelled "1" and no way to tell them apart.
-function waypointIcon(number, sent) {
+function waypointIcon(number, sent, altText) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
+    var label  = altText ? '<div class="wp-alt-label">' + altText + '</div>' : '';
     return L.divIcon({
         className: 'waypoint-icon',
-        html: '<div style="width:22px;height:22px;border-radius:50%;' +
+        html: label +
+              '<div style="width:22px;height:22px;border-radius:50%;' +
               'background:' + fill + ';color:' + text + ';font-family:sans-serif;' +
               'font-size:12px;font-weight:bold;display:flex;' +
               'align-items:center;justify-content:center;' +
@@ -549,10 +629,19 @@ map.on('click', function(e) {
 
     if (waypointMode) {
         var m = L.marker([lat, lon], {icon: waypointIcon(waypointMarkers.length + 1)}).addTo(map);
+        m._wpId = ++wpSeq;
+        m._wpNum = waypointMarkers.length + 1;
+        m._wpAlt = null;                 // null = fly the mission default
+        m._wpSent = false;
+        m.setIcon(waypointIcon(m._wpNum, false, wpAltText(m)));
+        // A function, not a fixed string: the popup is rebuilt each time it
+        // opens, so it shows the current altitude and picks up the mission
+        // default once one has been set.
+        m.bindPopup(function () { return wpPopupHtml(m); });
         waypointMarkers.push(m);
         allWaypointLayers.push(m);
         waypointLine.addLatLng([lat, lon]);
-        waypointAdded(lat, lon);
+        waypointAdded(lat, lon, m._wpId);
         return;
     }
 
@@ -597,9 +686,31 @@ function commitWaypoints() {
     // at 1 again - matching the mission the vehicle actually gets. Left
     // in the same blue, the map would show two "1"s with nothing to say
     // which had been flown and which was still being planned.
-    for (var i = 0; i < waypointMarkers.length; i++) {
-        waypointMarkers[i].setIcon(waypointIcon(i + 1, true));
+    // A new mission REPLACES the old one on the vehicle, so the old one
+    // stops being drawn here too. Left up, the map showed two batches that
+    // both looked live - two markers numbered "1", only one of which the
+    // aircraft actually had.
+    for (var i = 0; i < sentLayers.length; i++) {
+        map.removeLayer(sentLayers[i]);
+        var at = allWaypointLayers.indexOf(sentLayers[i]);
+        if (at >= 0) { allWaypointLayers.splice(at, 1); }
     }
+    sentLayers = waypointMarkers.slice();
+    sentLayers.push(waypointLine);
+
+    for (var i = 0; i < waypointMarkers.length; i++) {
+        var m = waypointMarkers[i];
+        // Freeze the altitude this point was actually sent with. Left
+        // following the shared default, a later mission at a different
+        // altitude would silently relabel this batch with a figure the
+        // vehicle was never given.
+        if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
+        m._wpSent = true;
+        m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m)));
+    }
+    // The next batch has no altitude decided yet, so it shows none rather
+    // than borrowing this mission's.
+    wpDefaultAlt = null;
     waypointLine.setStyle({color: '#5b6b78', opacity: 0.7});
     waypointMarkers = [];
     waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
@@ -612,6 +723,7 @@ function clearWaypoints() {
     }
     allWaypointLayers = [];
     waypointMarkers = [];
+    sentLayers = [];
     waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
     allWaypointLayers.push(waypointLine);
 }
@@ -671,6 +783,19 @@ function setTileCacheStats(tiles, usedBytes, limitBytes) {
 
 function setTerrainCacheStats(tiles, usedBytes, limitBytes) {
     _renderCacheRow('tr-fill', 'tr-text', tiles, usedBytes, limitBytes);
+}
+
+// Drop a marker on a coordinate that was typed rather than clicked, and
+// bring it into view - the whole point of typing one is that it may be
+// somewhere you are not currently looking.
+function showTarget(lat, lon) {
+    clearTarget();
+    targetMarker = L.marker([lat, lon], {opacity: 0.85}).addTo(map);
+    targetMarker.bindTooltip('Fly to ' + lat.toFixed(6) + ', ' + lon.toFixed(6),
+                             {direction: 'top', offset: [0, -12]});
+    if (!map.getBounds().contains([lat, lon])) {
+        map.panTo([lat, lon]);
+    }
 }
 
 function clearTarget() {
@@ -1188,7 +1313,8 @@ class Bridge(QObject):
     actual supported mechanism for JS-to-Python calls in QWebEngine.
     """
     fly_to_here = Signal(float, float)
-    waypoint_added = Signal(float, float)
+    waypoint_added = Signal(float, float, int)
+    waypoint_alt_changed = Signal(int, float)
     adsb_toggled = Signal(bool)
     adsb_center_changed = Signal(float, float)
     tile_cache_limit_changed = Signal(int)
@@ -1200,9 +1326,13 @@ class Bridge(QObject):
     def flyToHere(self, lat, lon):
         self.fly_to_here.emit(lat, lon)
 
-    @Slot(float, float)
-    def waypointAdded(self, lat, lon):
-        self.waypoint_added.emit(lat, lon)
+    @Slot(float, float, int)
+    def waypointAdded(self, lat, lon, wp_id):
+        self.waypoint_added.emit(lat, lon, wp_id)
+
+    @Slot(int, float)
+    def waypointAltChanged(self, wp_id, alt):
+        self.waypoint_alt_changed.emit(wp_id, alt)
 
     @Slot(bool)
     def adsbToggled(self, enabled):
@@ -1231,7 +1361,8 @@ class Bridge(QObject):
 
 class MapView(QWebEngineView):
     fly_to_here = Signal(float, float)
-    waypoint_added = Signal(float, float)
+    waypoint_added = Signal(float, float, int)
+    waypoint_alt_changed = Signal(int, float)
     adsb_toggled = Signal(bool)
     adsb_center_changed = Signal(float, float)
     tile_cache_limit_changed = Signal(int)
@@ -1246,6 +1377,7 @@ class MapView(QWebEngineView):
         self._bridge = Bridge()
         self._bridge.fly_to_here.connect(self.fly_to_here)
         self._bridge.waypoint_added.connect(self.waypoint_added)
+        self._bridge.waypoint_alt_changed.connect(self.waypoint_alt_changed)
         self._bridge.adsb_toggled.connect(self.adsb_toggled)
         self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
         self._bridge.tile_cache_limit_changed.connect(self.tile_cache_limit_changed)
@@ -1274,6 +1406,10 @@ class MapView(QWebEngineView):
     def clear_trail(self):
         self.page().runJavaScript("clearTrail();")
 
+    def show_target(self, lat: float, lon: float):
+        """Mark a typed fly-to coordinate, panning to it if it's off screen."""
+        self.page().runJavaScript(f"showTarget({float(lat)}, {float(lon)});")
+
     def clear_target(self):
         self.page().runJavaScript("clearTarget();")
 
@@ -1298,6 +1434,10 @@ class MapView(QWebEngineView):
         """Push current altitude/speed/climb for the terrain radar's live
         (no new sampling) colour recompute - called on every telemetry tick."""
         self.page().runJavaScript(f"setTerrainRef({alt_msl}, {ground_speed}, {climb_mps});")
+
+    def set_waypoint_default_alt(self, alt: float):
+        """So a waypoint with no altitude of its own shows what it will fly."""
+        self.page().runJavaScript(f"setWaypointDefaultAlt({float(alt)});")
 
     def update_adsb_contacts(self, contacts: list):
         """Push a freshly-fetched ADS-B contact list (see AdsbWorker) for the

@@ -75,6 +75,17 @@ def _is_vehicle_heartbeat(msg):
             and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID)
 
 
+# How long a mission upload may go without progress before it is abandoned.
+# The upload is a request/response conversation with the vehicle, and every
+# step of it can be lost on a radio link. Without a deadline a single
+# dropped packet left the upload half-finished forever, and because a
+# half-finished upload blocks the next one, Start Mission stopped working
+# for the rest of the session. Refreshed on every step, so a long mission
+# over a slow link is never cut short - this is "no progress at all", not
+# "total time".
+MISSION_STEP_TIMEOUT_S = 10.0
+
+
 class MavlinkLink(QThread):
     # roll, pitch, yaw in radians
     attitude_update = Signal(float, float, float)
@@ -122,6 +133,8 @@ class MavlinkLink(QThread):
         # Multi-waypoint mission upload state machine (see
         # upload_and_start_mission() and the MISSION_* handlers in run()).
         self._mission_pending = None   # list of (lat, lon, alt) once upload starts
+        self._mission_deadline = None  # give up if the vehicle stops responding
+        self._mission_restart = True   # False when updating a mission in flight
         self._mission_state = None     # None | 'awaiting_clear_ack' | 'uploading'
 
     def run(self):
@@ -259,6 +272,22 @@ class MavlinkLink(QThread):
                     pass
                 last_heartbeat_sent = now
 
+            # A mission upload that has stopped making progress is dead:
+            # release it so the next Start Mission isn't refused as "already
+            # in progress" for the rest of the session.
+            if (
+                self._mission_state is not None
+                and self._mission_deadline is not None
+                and now >= self._mission_deadline
+            ):
+                self._mission_state = None
+                self._mission_pending = None
+                self._mission_deadline = None
+                self.command_feedback.emit(
+                    "Mission upload timed out - no reply from the vehicle. "
+                    "Try Start Mission again."
+                )
+
             # Deferred half of clear_mission() (see there for why) - fires
             # once the LOITER mode switch it requested has had time to take
             # effect. Checked here in the background thread's own loop
@@ -325,6 +354,7 @@ class MavlinkLink(QThread):
                     # an already-empty mission can ACK oddly on some
                     # firmware and shouldn't block a fresh upload.
                     self._mission_state = "uploading"
+                    self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
                     with self._send_lock:
                         self.master.mav.mission_count_send(
                             self.master.target_system,
@@ -334,23 +364,31 @@ class MavlinkLink(QThread):
                 elif self._mission_state == "uploading":
                     if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
                         n_real_waypoints = len(self._mission_pending) - 1  # exclude home placeholder
-                        self.command_feedback.emit(
-                            f"Mission uploaded ({n_real_waypoints} waypoints) - starting AUTO"
-                        )
-                        with self._send_lock:
-                            self.master.mav.mission_set_current_send(
-                                self.master.target_system,
-                                self.master.target_component,
-                                1,  # index 1: the first REAL waypoint, index 0 is the home placeholder
+                        if self._mission_restart:
+                            self.command_feedback.emit(
+                                f"Mission uploaded ({n_real_waypoints} waypoints) - starting AUTO"
                             )
-                            self.master.mav.command_long_send(
-                                self.master.target_system,
-                                self.master.target_component,
-                                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                                0,
-                                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                                PLANE_MODES["AUTO"],
-                                0, 0, 0, 0, 0,
+                            with self._send_lock:
+                                self.master.mav.mission_set_current_send(
+                                    self.master.target_system,
+                                    self.master.target_component,
+                                    1,  # index 1: the first REAL waypoint, index 0 is the home placeholder
+                                )
+                                self.master.mav.command_long_send(
+                                    self.master.target_system,
+                                    self.master.target_component,
+                                    mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                                    0,
+                                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                                    PLANE_MODES["AUTO"],
+                                    0, 0, 0, 0, 0,
+                                )
+                        else:
+                            # Deliberately no set_current and no mode change:
+                            # the aircraft keeps flying the leg it is on.
+                            self.command_feedback.emit(
+                                f"Mission updated ({n_real_waypoints} waypoints) - "
+                                "continuing on the current leg"
                             )
                     else:
                         try:
@@ -360,6 +398,7 @@ class MavlinkLink(QThread):
                         self.command_feedback.emit(f"Mission upload failed: {result_name}")
                     self._mission_state = None
                     self._mission_pending = None
+                    self._mission_deadline = None
 
             elif mtype in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
                 # ArduPilot may use either depending on version - handle both.
@@ -369,6 +408,9 @@ class MavlinkLink(QThread):
                     and msg.seq < len(self._mission_pending)
                 ):
                     lat, lon, alt = self._mission_pending[msg.seq]
+                    # The vehicle is still asking for items, so the upload is
+                    # alive however long the whole mission takes.
+                    self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
                     with self._send_lock:
                         self.master.mav.mission_item_int_send(
                             self.master.target_system,
@@ -652,7 +694,8 @@ class MavlinkLink(QThread):
         except Exception as e:
             self.command_feedback.emit(f"Failed to run preflight calibration: {e}")
 
-    def upload_and_start_mission(self, waypoints, alt_relative_m: float):
+    def upload_and_start_mission(self, waypoints, alt_relative_m: float,
+                                 restart: bool = True):
         """
         Upload a sequence of (lat, lon) points as a real onboard AUTO
         mission, then switch to AUTO to fly it. Unlike fly_to(), this
@@ -689,11 +732,25 @@ class MavlinkLink(QThread):
         else:
             placeholder = (waypoints[0][0], waypoints[0][1], 0.0)
 
-        self._mission_pending = [placeholder] + [
-            (lat, lon, alt_relative_m) for lat, lon in waypoints
-        ]
+        # Each point may carry its own altitude; those that don't take the
+        # mission default. Written as (lat, lon) or (lat, lon, alt).
+        resolved = []
+        for wp in waypoints:
+            if len(wp) >= 3 and wp[2] is not None:
+                resolved.append((wp[0], wp[1], float(wp[2])))
+            else:
+                resolved.append((wp[0], wp[1], float(alt_relative_m)))
+        self._mission_pending = [placeholder] + resolved
+        # An update to a mission already flying must not send the aircraft
+        # back to waypoint 1 - it carries on from wherever it is and picks
+        # up the new altitudes on the legs it hasn't flown yet.
+        self._mission_restart = restart
         self._mission_state = "awaiting_clear_ack"
-        self.command_feedback.emit(f"Uploading {len(waypoints)}-waypoint mission...")
+        self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
+        self.command_feedback.emit(
+            f"{'Uploading' if restart else 'Updating'} "
+            f"{len(waypoints)}-waypoint mission..."
+        )
         try:
             with self._send_lock:
                 self.master.mav.mission_clear_all_send(
@@ -703,6 +760,7 @@ class MavlinkLink(QThread):
         except Exception as e:
             self._mission_state = None
             self._mission_pending = None
+            self._mission_deadline = None
             self.command_feedback.emit(f"Failed to start mission upload: {e}")
 
     def clear_mission(self):
@@ -728,6 +786,7 @@ class MavlinkLink(QThread):
             return
         self._mission_state = None
         self._mission_pending = None
+        self._mission_deadline = None
         self.set_mode("LOITER")
         self._clear_mission_deadline = time.time() + 0.5
         self.command_feedback.emit("Switching to LOITER, then clearing mission...")

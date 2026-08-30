@@ -17,10 +17,10 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.13.0 - adds the 3D FPV view, a Cesium-rendered camera
-# from the aircraft with the HUD laid over it.
+# This is MavGCS V1.14.0 - per-waypoint altitudes you can edit on the map
+# and send with Update, and a Fly To Lat/Lon button.
 # See CHANGELOG.md.
-APP_VERSION = "V1.13.0"
+APP_VERSION = "V1.14.0"
 
 import sys
 import os
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QLabel, QGridLayout, QFrame, QInputDialog,
     QPushButton, QGroupBox, QCheckBox, QMessageBox, QProgressBar,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QStackedWidget,
+    QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
 )
 
 from mavlink_link import MavlinkLink, PLANE_MODES
@@ -101,6 +102,70 @@ class TelemetryPanel(QFrame):
             self.labels[key].setText(str(value))
 
 
+class FlyToDialog(QDialog):
+    """Type a coordinate and send the vehicle there.
+
+    The map already offers this by clicking, but a typed coordinate is what
+    you want when someone reads you a position over the radio, or when the
+    point is off the visible map.
+    """
+
+    def __init__(self, default_alt: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fly to Lat / Lon")
+        form = QFormLayout(self)
+
+        self.lat_edit = QLineEdit()
+        self.lat_edit.setPlaceholderText("41.269549")
+        self.lon_edit = QLineEdit()
+        self.lon_edit.setPlaceholderText("36.364060")
+        self.alt_spin = QDoubleSpinBox()
+        self.alt_spin.setRange(0.0, 1000.0)
+        self.alt_spin.setDecimals(0)
+        self.alt_spin.setValue(default_alt)
+        self.alt_spin.setSuffix(" m")
+
+        form.addRow("Latitude", self.lat_edit)
+        form.addRow("Longitude", self.lon_edit)
+        form.addRow("Relative altitude", self.alt_spin)
+
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #e74c3c; font-size: 10px;")
+        self.error_label.setWordWrap(True)
+        form.addRow(self.error_label)
+
+        buttons = QDialogButtonBox()
+        self.fly_btn = buttons.addButton("Fly", QDialogButtonBox.AcceptRole)
+        buttons.addButton(QDialogButtonBox.Cancel)
+        # Validate here rather than on the accepted signal: a bad number
+        # should keep the dialog open with the reason showing, not close it.
+        self.fly_btn.clicked.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+        self._values = None
+
+    def _validate_and_accept(self):
+        try:
+            lat = float(self.lat_edit.text().strip().replace(",", "."))
+            lon = float(self.lon_edit.text().strip().replace(",", "."))
+        except ValueError:
+            self.error_label.setText("Latitude and longitude must be decimal degrees.")
+            return
+        if not -90.0 <= lat <= 90.0:
+            self.error_label.setText("Latitude must be between -90 and 90.")
+            return
+        if not -180.0 <= lon <= 180.0:
+            self.error_label.setText("Longitude must be between -180 and 180.")
+            return
+        self._values = (lat, lon, float(self.alt_spin.value()))
+        self.accept()
+
+    def values(self):
+        """(lat, lon, alt) once accepted, else None."""
+        return self._values
+
+
 class ModePanel(QGroupBox):
     """Row of flight-mode buttons; highlights whichever mode is currently
     active based on telemetry, so it also works as a mode indicator."""
@@ -111,10 +176,14 @@ class ModePanel(QGroupBox):
     MODE_ORDER = ["MANUAL", "FBWA", "CRUISE", "LOITER", "AUTO", "RTL", "TAKEOFF", "AUTOLAND", "AUTOTUNE", "GUIDED"]
 
     mode_requested = Signal(str)
+    fly_to_requested = Signal()
 
     NORMAL_STYLE = "font-size: 10px; padding: 3px 4px;"
     ACTIVE_STYLE = "background-color: #2a6; color: white; font-weight: bold; font-size: 10px; padding: 3px 4px;"
     RTL_STYLE = "background-color: #a33; color: white; font-size: 10px; padding: 3px 4px;"
+    # Same weight of colour as RTL's red and the active-mode green, so it
+    # reads as one of the panel's coloured controls rather than a sore thumb.
+    FLY_TO_STYLE = "background-color: #36a; color: white; font-size: 10px; padding: 3px 4px;"
 
     def __init__(self, parent=None):
         super().__init__("Flight Mode", parent)
@@ -128,6 +197,20 @@ class ModePanel(QGroupBox):
             btn.clicked.connect(lambda checked=False, n=name: self.mode_requested.emit(n))
             grid.addWidget(btn, i // 3, i % 3)
             self.buttons[name] = btn
+
+        # Not a flight mode but the same kind of "go and do this" control,
+        # and this is where the eye already is. Kept out of self.buttons so
+        # set_active_mode never restyles it as though it were a mode.
+        self.fly_to_btn = QPushButton("FLY TO LAT / LON")
+        self.fly_to_btn.setStyleSheet(self.FLY_TO_STYLE)
+        self.fly_to_btn.setToolTip(
+            "Type a coordinate and send the vehicle there in GUIDED mode."
+        )
+        self.fly_to_btn.clicked.connect(self.fly_to_requested)
+        # Row 3 already holds GUIDED in column 0; this spans the remaining
+        # two so it sits directly under AUTOTUNE without an empty gap.
+        last_row = (len(self.MODE_ORDER) - 1) // 3
+        grid.addWidget(self.fly_to_btn, last_row, 1, 1, 2)
 
     def set_active_mode(self, mode_name):
         for name, btn in self.buttons.items():
@@ -301,6 +384,7 @@ class WaypointMissionPanel(QGroupBox):
 
     mode_toggled = Signal(bool)
     start_requested = Signal()
+    update_requested = Signal()
     clear_requested = Signal()
     # Fired once, only after a completed hold on Clear (HOLD_DURATION_MS) -
     # separate from clear_requested (a plain click, which still fires
@@ -323,14 +407,22 @@ class WaypointMissionPanel(QGroupBox):
         self.count_label = QLabel("0 waypoints queued")
         self.start_btn = QPushButton("Start Mission")
         self.start_btn.setEnabled(False)
+        self.update_btn = QPushButton("Update")
+        self.update_btn.setEnabled(False)
+        self.update_btn.setToolTip(
+            "Re-send the mission with your edited waypoint altitudes. "
+            "The aircraft keeps flying the leg it is on - it does not restart."
+        )
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.setToolTip(
             "Click: clear the map.\nHold 3s: also erase the mission stored on the vehicle."
         )
         self.start_btn.clicked.connect(self.start_requested)
+        self.update_btn.clicked.connect(self.update_requested)
         self.clear_btn.clicked.connect(self.clear_requested)
         row.addWidget(self.count_label, stretch=1)
         row.addWidget(self.start_btn)
+        row.addWidget(self.update_btn)
         row.addWidget(self.clear_btn)
         layout.addLayout(row)
 
@@ -365,6 +457,9 @@ class WaypointMissionPanel(QGroupBox):
             self._clear_hold_timer.stop()
             self.clear_hold_progress.setValue(0)
             self.clear_mission_requested.emit()
+
+    def set_can_update(self, can_update: bool):
+        self.update_btn.setEnabled(can_update)
 
     def set_count(self, count):
         self.count_label.setText(f"{count} waypoint{'s' if count != 1 else ''} queued")
@@ -828,7 +923,12 @@ class MainWindow(QMainWindow):
         self._last_alt = 30.0  # default guess used to pre-fill the fly-to dialog
         self._last_lat = None
         self._last_lon = None
-        self._waypoint_queue = []  # list of (lat, lon) tuples, in click order
+        # One dict per waypoint: {"id", "lat", "lon", "alt"} with alt None
+        # meaning "fly the mission default". _sent_mission holds references
+        # to the very same dicts, so editing an altitude reaches both.
+        self._waypoint_queue = []
+        self._sent_mission = []
+        self._mission_default_alt = None
         self._last_amsl_alt = 0.0
         # True height above the terrain below, from TERRAIN_REPORT. None
         # until the vehicle sends one (it needs terrain data loaded), in
@@ -950,6 +1050,7 @@ class MainWindow(QMainWindow):
 
         self.map_view.fly_to_here.connect(self.on_fly_to_here)
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
+        self.map_view.waypoint_alt_changed.connect(self.on_waypoint_alt_changed)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
@@ -964,6 +1065,7 @@ class MainWindow(QMainWindow):
         self._tile_stats_timer.start()
         self.waypoint_panel.mode_toggled.connect(self.on_waypoint_mode_toggled)
         self.waypoint_panel.start_requested.connect(self.on_start_mission)
+        self.waypoint_panel.update_requested.connect(self.on_update_mission)
         self.waypoint_panel.clear_requested.connect(self.on_clear_waypoints)
         self.waypoint_panel.clear_mission_requested.connect(self.on_clear_vehicle_mission)
         # These two go through wrapper methods rather than binding
@@ -973,6 +1075,7 @@ class MainWindow(QMainWindow):
         # after any reconnect (self.link gets replaced with a new
         # instance, but the old binding doesn't follow it).
         self.mode_panel.mode_requested.connect(self.on_mode_requested)
+        self.mode_panel.fly_to_requested.connect(self.on_fly_to_latlon)
         self.arm_panel.arm_requested.connect(self.on_arm_requested)
         self.arm_panel.force_disarm_requested.connect(self.on_force_disarm)
         self.preflight_cal_panel.calibration_requested.connect(self.on_calibration_requested)
@@ -1321,17 +1424,53 @@ class MainWindow(QMainWindow):
 
         link.fly_to(lat, lon, alt)
 
+    def on_fly_to_latlon(self):
+        """The FLY TO LAT / LON button: same command as clicking the map,
+        but for a coordinate you have been given rather than one you can see.
+        Deliberately leaves any planned waypoints alone - typing a coordinate
+        shouldn't silently wipe a mission you have drawn."""
+        link = self._require_link()
+        if not link:
+            return
+        dialog = FlyToDialog(self._last_alt if self._last_alt else 30.0, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        lat, lon, alt = dialog.values()
+        self.map_view.show_target(lat, lon)
+        link.fly_to(lat, lon, alt)
+
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
 
-    def on_waypoint_added(self, lat, lon):
-        self._waypoint_queue.append((lat, lon))
+    def on_waypoint_added(self, lat, lon, wp_id):
+        self._waypoint_queue.append(
+            {"id": int(wp_id), "lat": lat, "lon": lon, "alt": None}
+        )
         self.waypoint_panel.set_count(len(self._waypoint_queue))
+
+    def on_waypoint_alt_changed(self, wp_id, alt):
+        """An altitude typed into a waypoint's popup on the map.
+
+        Searches both the pending queue and the mission already sent - a
+        point stays editable after it has been flown to the vehicle, which
+        is the whole point of the Update button.
+        """
+        for wp in self._waypoint_queue + self._sent_mission:
+            if wp["id"] == int(wp_id):
+                wp["alt"] = float(alt)
+                which = "queued" if wp in self._waypoint_queue else "sent"
+                self.on_command_feedback(
+                    f"Waypoint altitude set to {float(alt):.0f} m"
+                    + (" - press Update to send it" if which == "sent" else "")
+                )
+                break
 
     def on_clear_waypoints(self):
         self._waypoint_queue = []
+        self._sent_mission = []
         self.map_view.clear_waypoints()
         self.waypoint_panel.set_count(0)
+        self.waypoint_panel.set_can_update(False)
 
     def on_clear_vehicle_mission(self):
         """Fired only after a completed 3s hold on the Clear button (see
@@ -1359,7 +1498,19 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return
-        link.upload_and_start_mission(self._waypoint_queue, alt)
+        link.upload_and_start_mission(
+            [(w["lat"], w["lon"], w["alt"]) for w in self._waypoint_queue], alt
+        )
+        # Pin down what each point was actually sent with, so the record on
+        # the map can't drift when a later mission uses a different default.
+        for wp in self._waypoint_queue:
+            if wp["alt"] is None:
+                wp["alt"] = float(alt)
+        # Keep the batch: its altitudes stay editable, and Update re-sends it.
+        self._sent_mission = list(self._waypoint_queue)
+        self._mission_default_alt = alt
+        self.map_view.set_waypoint_default_alt(alt)
+        self.waypoint_panel.set_can_update(True)
         # A leftover Fly-to-Here target marker is a separate thing from
         # the waypoint queue - clear it too, since starting a mission
         # supersedes any pending single-point target.
@@ -1369,6 +1520,22 @@ class MainWindow(QMainWindow):
         self._waypoint_queue = []
         self.map_view.commit_waypoints()
         self.waypoint_panel.set_count(0)
+
+    def on_update_mission(self):
+        """Re-send the mission that is already on the vehicle, with whatever
+        altitudes have been edited since. Deliberately does NOT restart it -
+        the aircraft carries on from the leg it is flying."""
+        if not self._sent_mission:
+            return
+        link = self._require_link()
+        if not link:
+            return
+        default = self._mission_default_alt if self._mission_default_alt else self._last_alt
+        link.upload_and_start_mission(
+            [(w["lat"], w["lon"], w["alt"]) for w in self._sent_mission],
+            default,
+            restart=False,
+        )
 
     @staticmethod
     def _split_connection_string(connection_string):
