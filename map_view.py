@@ -37,7 +37,7 @@ LEAFLET_HTML = """
 <html>
 <head>
 <meta charset="utf-8" />
-<link rel="stylesheet" href="%%TILE_PROXY%%/lib/leaflet.css" />
+<link rel="stylesheet" href="%%TILE_PROXY%%/lib/leaflet/leaflet.css" />
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <style>
   html, body, #map { height: 100%; margin: 0; padding: 0; background:#222; }
@@ -272,7 +272,7 @@ function waypointAdded(lat, lon) {
 }
 </script>
 
-<script src="%%TILE_PROXY%%/lib/leaflet.js"></script>
+<script src="%%TILE_PROXY%%/lib/leaflet/leaflet.js"></script>
 <script>
 // Zoom is deliberately restricted to Z9-Z18. Levels outside that range
 // can't be reached, so nothing outside it is ever requested or cached

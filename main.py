@@ -17,10 +17,10 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.12.0 - the terrain radar's clearance scale is now typed
-# rather than cycled, plus Messages watermark and ADS-B fixes.
+# This is MavGCS V1.13.0 - adds the 3D FPV view, a Cesium-rendered camera
+# from the aircraft with the HUD laid over it.
 # See CHANGELOG.md.
-APP_VERSION = "V1.12.0"
+APP_VERSION = "V1.13.0"
 
 import sys
 import os
@@ -28,7 +28,9 @@ import math
 import html
 from datetime import datetime
 from PySide6.QtCore import Signal, QTimer, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QImage, QPainter
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint
+from PySide6.QtGui import QRegion
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QGridLayout, QFrame, QInputDialog,
@@ -43,7 +45,8 @@ import terrain_provider
 from terrain_provider import TerrainRadarWorker
 from adsb_provider import AdsbWorker
 from tile_cache import TileCacheServer
-from app_paths import data_dir, resource_path
+from fpv_view import FpvView
+from app_paths import data_dir, load_settings, resource_path, save_setting
 
 
 class TelemetryPanel(QFrame):
@@ -683,6 +686,86 @@ class GuidedControlPanel(QGroupBox):
         self._last_alt = alt
 
 
+class _OverlayButtonArea(QWidget):
+    """
+    Holds the HUD/FPV stack with a small button floating along its top edge,
+    centred in the gap between the heading tape and the battery box. The
+    button is a plain child rather than a layout item, so it costs no height
+    in the column it sits in - putting it in its own row was enough to make
+    the whole left panel scroll on a shorter window.
+    """
+
+    MARGIN = 6
+
+    def __init__(self, content: QWidget, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(content)
+
+        # A live widget borrowed from the HUD for as long as the FPV view
+        # is showing: (widget, callable giving its geometry).
+        self._adopted = None
+
+        self.button = QPushButton("FPV", self)
+        self.button.setStyleSheet(
+            "QPushButton { background: rgba(0,0,0,0.55); color: #fff; "
+            "border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; "
+            "font-size: 10px; font-weight: bold; padding: 2px 10px; }"
+            "QPushButton:hover { background: rgba(55,168,219,0.55); }"
+        )
+        self.button.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_button()
+        if self._adopted is not None:
+            widget, geometry_fn = self._adopted
+            widget.setGeometry(geometry_fn())
+            widget.raise_()
+
+    def adopt(self, widget, geometry_fn):
+        """Float one of the HUD's real child widgets over the view.
+
+        The FPV scene carries the HUD as a flat image, so anything meant to
+        be clicked has to be a live widget sitting on top of it - drawn into
+        the image it would look right and do nothing.
+        """
+        self._adopted = (widget, geometry_fn)
+        widget.setParent(self)      # reparenting hides it
+        widget.setGeometry(geometry_fn())
+        widget.show()
+        widget.raise_()
+
+    def release(self, back_to):
+        """Hand the borrowed widget back to its owner."""
+        if self._adopted is None:
+            return
+        widget, geometry_fn = self._adopted
+        self._adopted = None
+        widget.setParent(back_to)
+        widget.setGeometry(geometry_fn())
+        widget.show()
+
+    def set_label(self, text: str):
+        """Change the caption and re-centre: a different word is a different
+        width, and off-centre by half a letter is visible."""
+        self.button.setText(text)
+        self._place_button()
+
+    def _place_button(self):
+        b = self.button
+        b.adjustSize()
+        # The HUD fills this widget, so its geometry is ours.
+        center = ArtificialHorizon.top_gap_center_x(self.width(), self.height())
+        x = int(round(center - b.width() / 2.0))
+        # Narrow window: the gap can close up entirely, so keep the button
+        # on screen rather than letting it slide off the edge.
+        x = max(self.MARGIN, min(x, self.width() - b.width() - self.MARGIN))
+        b.move(x, self.MARGIN)
+        b.raise_()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, connection_string):
         super().__init__()
@@ -700,7 +783,9 @@ class MainWindow(QMainWindow):
         # Must be listening before the map page loads, since its tile URLs
         # point at this proxy's port. See tile_cache.py.
         self.tile_server = TileCacheServer()
-        self.map_view = MapView(self.tile_server.start())
+        _tile_port = self.tile_server.start()
+        self.map_view = MapView(_tile_port)
+        self.fpv_view = FpvView(_tile_port, load_settings().get("cesium_ion_token", ""))
         self.waypoint_panel = WaypointMissionPanel()
         self.messages_panel = MessagesPanel()
         self.connection_panel = ConnectionPanel(*self._split_connection_string(connection_string))
@@ -722,6 +807,9 @@ class MainWindow(QMainWindow):
         self._last_lon = None
         self._waypoint_queue = []  # list of (lat, lon) tuples, in click order
         self._last_amsl_alt = 0.0
+        # Attitude in degrees, kept for the 3D camera: the horizon
+        # widget stores roll/pitch in radians and drops yaw entirely.
+        self._last_att_deg = (0.0, 0.0, 0.0)   # yaw, pitch, roll
         self._last_groundspeed = 0.0
         self._last_climb = 0.0
 
@@ -735,6 +823,10 @@ class MainWindow(QMainWindow):
 
         # Same idea for ADS-B - starts disabled, only fetches while the
         # map's "ADS-B" checkbox is on (see map_view.py's adsb_toggled).
+        # Anything pushed before the page finishes loading is dropped, so
+        # redraw the overlay once it's ready.
+        self.fpv_view.loadFinished.connect(lambda ok: self._push_hud_overlay())
+
         self.adsb_worker = AdsbWorker(self)
         self.adsb_worker.contacts_ready.connect(self.map_view.update_adsb_contacts)
         self.adsb_worker.start()
@@ -765,7 +857,21 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.preflight_cal_panel)
         left_layout.addWidget(self.mode_panel)
         left_layout.addWidget(self.guided_panel)
-        left_layout.addWidget(self.horizon, stretch=1)
+        # HUD and 3D FPV occupy the same slot; the button swaps between them.
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.horizon)   # index 0
+        self.view_stack.addWidget(self.fpv_view)  # index 1
+
+        # The toggle floats over the view rather than sitting in its own
+        # row: an extra row costs vertical space in this column, which on a
+        # shorter window is enough to push the whole panel into scrolling.
+        # It centres itself in the gap between the heading tape and the
+        # battery box, so it covers neither.
+        self.view_area = _OverlayButtonArea(self.view_stack)
+        view_area = self.view_area
+        self.view_toggle_btn = view_area.button
+        self.view_toggle_btn.clicked.connect(self.on_toggle_view)
+        left_layout.addWidget(view_area, stretch=1)
         left_layout.addWidget(self.telemetry)
 
         # Everything above is stacked with its natural size, not squeezed to
@@ -848,6 +954,14 @@ class MainWindow(QMainWindow):
         # raw degrees() conversion goes negative past 180 instead of
         # continuing to 360 - wrap it, same fix as the wind direction bug.
         self.telemetry.set_value("yaw_deg", f"{math.degrees(yaw) % 360:.2f}")
+        # Drive the 3D camera from the same attitude. Only while the FPV
+        # view is showing - each call crosses into the web page, and there's
+        # no point paying that for a hidden widget.
+        self._last_att_deg = (math.degrees(yaw) % 360,
+                              math.degrees(pitch), math.degrees(roll))
+        if self.view_stack.currentIndex() == 1:
+            self._update_fpv_camera()
+            self._push_hud_overlay()
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
@@ -879,6 +993,101 @@ class MainWindow(QMainWindow):
             f"background-color: black; color: {color}; font-weight: bold; "
             "padding: 3px 12px; border-radius: 4px;"
         )
+
+    def _update_fpv_camera(self):
+        """Point the 3D camera where the aircraft is, facing where it faces."""
+        if self._last_lat is None or self._last_lon is None:
+            self.fpv_view.set_status("Waiting for position...")
+            return
+        self.fpv_view.set_status("")
+        yaw_deg, pitch_deg, roll_deg = self._last_att_deg
+        self.fpv_view.set_aircraft(self._last_lat, self._last_lon,
+                                   self._last_amsl_alt,
+                                   yaw_deg, pitch_deg, roll_deg)
+
+    def _push_hud_overlay(self):
+        """
+        Render the HUD widget transparently and hand it to the FPV view.
+
+        Drawing the very same widget - rather than reimplementing its
+        instruments in the 3D page - is what keeps the two views identical;
+        there's only ever one HUD to change. It's pushed as an image rather
+        than layered as a sibling widget because stacking a normal widget
+        over a web view isn't reliable.
+        """
+        if self.view_stack.currentIndex() != 1:
+            return
+        size = self.view_stack.size()
+        if size.width() <= 0 or size.height() <= 0:
+            return
+        if self.horizon.size() != size:
+            # A QStackedWidget doesn't resize the page it isn't showing, so
+            # after the window is resized in FPV mode the HUD is still at its
+            # old size - and the image gets stretched to fill the 3D view,
+            # distorting every instrument on it. Keep the two in step.
+            self.horizon.resize(size)
+        image = QImage(size, QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        self.horizon.overlay_mode = True
+        try:
+            # DrawChildren only: without excluding DrawWindowBackground the
+            # widget's own palette background is painted in too, and the
+            # whole overlay comes out opaque grey, hiding the 3D entirely.
+            self.horizon.render(image, QPoint(), QRegion(),
+                                QWidget.RenderFlag.DrawChildren)
+        finally:
+            self.horizon.overlay_mode = False
+
+        buf = QBuffer()
+        buf.open(QIODevice.WriteOnly)
+        image.save(buf, "PNG")
+        data = bytes(buf.data().toBase64()).decode("ascii")
+        self.fpv_view.set_hud_image("data:image/png;base64," + data)
+
+    def _ensure_ion_token(self) -> bool:
+        """
+        Ask for a Cesium Ion token the first time the 3D view is opened.
+
+        The token is per-user on purpose: shipping one inside the app would
+        bill everybody's streaming to a single account, and it would be
+        readable straight out of the download anyway.
+        """
+        if self.fpv_view.has_token:
+            return True
+        token, ok = QInputDialog.getText(
+            self, "Cesium Ion token",
+            "The 3D view streams terrain and imagery from Cesium Ion.\n"
+            "Create a free account at cesium.com/ion, then paste your\n"
+            "access token here:",
+        )
+        token = (token or "").strip()
+        if not ok or not token:
+            return False
+        save_setting("cesium_ion_token", token)
+        self.fpv_view.set_token(token)
+        return True
+
+    def on_toggle_view(self):
+        showing_fpv = self.view_stack.currentIndex() == 1
+        if not showing_fpv and not self._ensure_ion_token():
+            return          # no token: stay on the HUD rather than a blank view
+        self.view_stack.setCurrentIndex(0 if showing_fpv else 1)
+        if showing_fpv:
+            self.view_area.release(self.horizon)
+        else:
+            area = self.view_area
+            self.view_area.adopt(
+                self.horizon.cell_selector,
+                lambda: ArtificialHorizon.cell_selector_rect_for(
+                    area.width(), area.height()))
+        # Label names the view you'll get, not the one you're on.
+        self.view_area.set_label("FPV" if showing_fpv else "HUD")
+        if not showing_fpv:
+            # Place the camera and HUD straight away. Otherwise the view sits
+            # at Cesium's default whole-globe shot until the next ATTITUDE
+            # message arrives - which, disconnected, is never.
+            self._update_fpv_camera()
+            self._push_hud_overlay()
 
     def on_terrain_fan_ready(self, elevations, range_m, ang_cells, rad_cells):
         self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)

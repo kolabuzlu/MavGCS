@@ -33,7 +33,10 @@ from app_paths import data_dir, resource_path
 CACHE_ROOT = data_dir() / "map_cache"
 # Leaflet, shipped with the app rather than fetched from a CDN, so the map
 # works with no internet at all.
-LIB_ROOT = Path(resource_path("vendor")) / "leaflet"
+# Third-party front-end libraries shipped with the app (Leaflet for
+# the map, Cesium for the 3D FPV view), served from /lib/... so the
+# pages never need a CDN.
+LIB_ROOT = Path(resource_path("vendor"))
 
 # Upstream templates, keyed by the short name used in the map's tile URLs.
 # {s} is a subdomain slot, filled from SUBDOMAINS below.
@@ -117,6 +120,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", _content_type(blob))
         self.send_header("Content-Length", str(len(blob)))
+        # The FPV view draws these tiles into a canvas to build its terrain
+        # texture, which taints the canvas - and breaks the WebGL upload -
+        # unless the image was fetched with CORS. Its <img> tags therefore
+        # set crossOrigin, and that only works if we say so here. Without
+        # this header every FPV tile silently failed to load while the 2D
+        # map, which never touches a canvas, was perfectly happy.
+        self.send_header("Access-Control-Allow-Origin", "*")
         # Real tiles are immutable enough to keep, so panning back and
         # forth doesn't even reach this server.
         self.send_header("Cache-Control", "max-age=86400")
@@ -140,8 +150,17 @@ class _Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             self.send_error(404)
             return
-        types = {".js": "application/javascript", ".css": "text/css",
-                 ".png": "image/png", ".svg": "image/svg+xml"}
+        # Cesium pulls js, wasm, json, images and fonts out of here at
+        # runtime. WebAssembly in particular is refused by the browser
+        # unless it arrives as application/wasm.
+        types = {
+            ".js": "application/javascript", ".cjs": "application/javascript",
+            ".css": "text/css", ".json": "application/json",
+            ".wasm": "application/wasm", ".xml": "application/xml",
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".svg": "image/svg+xml",
+            ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+        }
         self.send_response(200)
         self.send_header("Content-Type", types.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(blob)))

@@ -41,6 +41,10 @@ a = Analysis(
         # Leaflet, served locally by the tile proxy. Without it the map page
         # needs a CDN, so with no internet nothing renders at all.
         ("vendor/leaflet", "vendor/leaflet"),
+        # CesiumJS, likewise served locally, for the 3D FPV view. It
+        # streams its terrain and imagery from Cesium Ion, but the
+        # library, workers and shaders themselves ship with the app.
+        ("vendor/cesium", "vendor/cesium"),
     ] + collect_data_files("pymavlink"),   # message_definitions/*.xml
     hiddenimports=hiddenimports,
     hookspath=[],

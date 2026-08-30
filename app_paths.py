@@ -16,6 +16,7 @@ apart deliberately:
       "Program Files" style install it may not even be writable.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -45,3 +46,25 @@ def data_dir() -> Path:
         path = Path(__file__).resolve().parent
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _settings_file() -> Path:
+    return data_dir() / "settings.json"
+
+
+def load_settings() -> dict:
+    """User settings that persist between runs (kept beside the caches, not
+    inside the app bundle, so an upgrade doesn't wipe them)."""
+    try:
+        return json.loads(_settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_setting(key: str, value):
+    settings = load_settings()
+    settings[key] = value
+    try:
+        _settings_file().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    except OSError:
+        pass

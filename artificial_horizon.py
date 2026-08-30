@@ -12,7 +12,7 @@ The trick behind every AI (attitude indicator) widget:
 import math
 from PySide6.QtWidgets import QWidget, QComboBox
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QFont
-from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtCore import Qt, QPointF, QRect, QRectF
 
 
 class ArtificialHorizon(QWidget):
@@ -27,6 +27,9 @@ class ArtificialHorizon(QWidget):
         self.wind_speed = None  # m/s, None until first update
         self.battery_voltage = None  # total pack voltage (V), None until first update
         self.cell_count = 4  # default guess: 4S is a common pack size
+        # When True the sky/ground fill is skipped so this widget can be
+        # rendered as a transparent overlay on the 3D FPV view.
+        self.overlay_mode = False
         self.lat = None  # deg, None until first GLOBAL_POSITION_INT
         self.lon = None  # deg, None until first GLOBAL_POSITION_INT
         self.ekf_color = "white"   # "white" | "yellow" | "red"
@@ -54,16 +57,63 @@ class ArtificialHorizon(QWidget):
             self.cell_count = 4
         self.update()
 
+    # Exposed so anything overlaid on the HUD can keep clear of the battery
+    # box rather than guessing at where it sits.
+    BATTERY_BOX_W = 104
+    BATTERY_BOX_H = 44
+    BATTERY_MARGIN = 6
+
+    TAPE_TOP = 4
+    TAPE_H = 26
+
+    @classmethod
+    def heading_tape_rect_for(cls, w, h):
+        """Where the heading tape lands in a widget of this size.
+
+        Taken as w/h rather than read off the instance so a sibling widget
+        can work out the layout before its own children have been resized.
+        """
+        tape_w = min(min(w, h) * 0.85, w * 0.50)
+        return QRectF(w / 2.0 - tape_w / 2, cls.TAPE_TOP, tape_w, cls.TAPE_H)
+
+    @classmethod
+    def top_gap_center_x(cls, w, h):
+        """Midpoint of the empty strip along the top of the HUD, between the
+        heading tape and the battery box - the one place up there where an
+        overlay can sit without covering an instrument."""
+        tape_right = cls.heading_tape_rect_for(w, h).right()
+        battery_left = w - cls.BATTERY_MARGIN - cls.BATTERY_BOX_W
+        return (tape_right + battery_left) / 2.0
+
+    @classmethod
+    def battery_box_rect_for(cls, w, h):
+        return QRectF(w - cls.BATTERY_MARGIN - cls.BATTERY_BOX_W,
+                      cls.BATTERY_MARGIN, cls.BATTERY_BOX_W, cls.BATTERY_BOX_H)
+
+    @classmethod
+    def cell_selector_rect_for(cls, w, h):
+        """Where the cell-count combo belongs, inside the battery box.
+
+        Public, and taken as a size rather than read off the instance,
+        because the FPV view floats the real combo over its scene: there the
+        HUD is a flat image, so a combo drawn into it would look right and
+        click through to nothing.
+        """
+        rect = cls.battery_box_rect_for(w, h)
+        combo_w, combo_h = 44, 16
+        return QRect(int(rect.right() - 6 - combo_w),
+                     int(rect.bottom() - 6 - combo_h), combo_w, combo_h)
+
     def _battery_box_rect(self):
-        box_w, box_h, margin = 104, 44, 6
-        return QRectF(self.width() - margin - box_w, margin, box_w, box_h)
+        return self.battery_box_rect_for(self.width(), self.height())
 
     def _position_battery_widgets(self):
-        rect = self._battery_box_rect()
-        combo_w, combo_h = 44, 16
-        x = int(rect.right() - 6 - combo_w)
-        y = int(rect.bottom() - 6 - combo_h)
-        self.cell_selector.setGeometry(x, y, combo_w, combo_h)
+        # While the FPV view has borrowed the combo it owns its geometry;
+        # the coordinates happen to be identical, but moving another
+        # widget's child from here would be wrong the moment they aren't.
+        if self.cell_selector.parent() is self:
+            self.cell_selector.setGeometry(
+                self.cell_selector_rect_for(self.width(), self.height()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -124,14 +174,18 @@ class ArtificialHorizon(QWidget):
         offset = math.degrees(self.pitch) * pixels_per_deg
         big = size * 2
 
-        # Sky
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(70, 130, 220)))
-        painter.drawRect(QRectF(-big, -big + offset, 2 * big, big))
+        # Sky and ground. Skipped in overlay mode, where this same widget is
+        # drawn on top of the 3D FPV scene - there the terrain itself is the
+        # sky and ground, and filling them would simply hide it. Every other
+        # element is painted exactly as usual, so the two views carry an
+        # identical HUD rather than two drifting copies of one.
+        if not self.overlay_mode:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(70, 130, 220)))
+            painter.drawRect(QRectF(-big, -big + offset, 2 * big, big))
 
-        # Ground
-        painter.setBrush(QBrush(QColor(120, 80, 40)))
-        painter.drawRect(QRectF(-big, offset, 2 * big, big))
+            painter.setBrush(QBrush(QColor(120, 80, 40)))
+            painter.drawRect(QRectF(-big, offset, 2 * big, big))
 
         # Horizon line
         painter.setPen(QPen(Qt.white, 2))
@@ -176,9 +230,8 @@ class ArtificialHorizon(QWidget):
         # roll arc/pitch ladder underneath, same as a real PFD's compass
         # strip sitting above the attitude ball.
         heading = self.heading if self.heading is not None else 0.0
-        tape_w = min(size * 0.85, w * 0.50)
-        tape_h = 26
-        tape_rect = QRectF(cx - tape_w / 2, 4, tape_w, tape_h)
+        tape_rect = self.heading_tape_rect_for(w, h)
+        tape_w, tape_h = tape_rect.width(), tape_rect.height()
 
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(15, 15, 15, 220)))
