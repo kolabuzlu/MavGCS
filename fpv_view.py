@@ -163,11 +163,28 @@ function init() {
         Cesium.Ion.defaultAccessToken = '%%TOKEN%%';
         viewer = new Cesium.Viewer('view', {
             terrain: Cesium.Terrain.fromWorldTerrain(),
+            // Cesium defaults msaaSamples to 1 - antialiasing off - which
+            // is what turns ridge lines and the horizon into a staircase,
+            // and it shows all the more in a panel this small. 4 samples
+            // is the usual sweet spot for cost against smoothness.
+            msaaSamples: 4,
+            contextOptions: { webgl: { antialias: true } },
             animation: false, timeline: false, baseLayerPicker: false,
             geocoder: false, homeButton: false, sceneModePicker: false,
             navigationHelpButton: false, fullscreenButton: false,
             infoBox: false, selectionIndicator: false,
         });
+        // Draw at the display's real pixel density. Cesium defaults to the
+        // "browser recommended" resolution, which ignores devicePixelRatio
+        // to save GPU - on a high-DPI screen that alone renders the view at
+        // two thirds scale and then stretches it.
+        viewer.useBrowserRecommendedResolution = false;
+        // Catches the edges MSAA doesn't, notably where terrain meets sky.
+        var fxaa = viewer.scene.postProcessStages.fxaa;
+        if (fxaa) { fxaa.enabled = true; }
+        // Move the camera once per rendered frame, not once per telemetry
+        // sample - this is what turns 4Hz of data into smooth motion.
+        viewer.scene.preUpdate.addEventListener(onPreUpdate);
         // This is a camera view from the aircraft, not something to drag.
         viewer.scene.screenSpaceCameraController.enableInputs = false;
         viewer.scene.globe.depthTestAgainstTerrain = true;
@@ -186,18 +203,79 @@ function init() {
     }
 }
 
+// Telemetry arrives far slower than the scene renders - ATTITUDE comes in
+// at about 4Hz on a serial telemetry link, against 60fps of rendering - so
+// applying each sample directly makes the view jump in visible steps. The
+// samples are kept as a target and the camera glides towards it every
+// frame instead, which costs no bandwidth at all.
+var pose = null;        // where the camera is now
+var target = null;      // newest telemetry
+var lastFrameMs = 0;
+
+// Time constant of the glide. Long enough to smooth 250ms-apart samples,
+// short enough that the view isn't noticeably behind the aircraft.
+var SMOOTH_TAU_MS = 120;
+// Beyond this the aircraft didn't fly there - it's a reposition, or the
+// first fix after connecting - so snap rather than sail across the map.
+var SNAP_DEG = 0.01;    // roughly a kilometre
+
+function shortestAngleDelta(from, to) {
+    // Via the short way round, so 359 -> 1 turns 2 degrees, not -358.
+    return ((to - from + 540) % 360) - 180;
+}
+
 // Position and attitude straight from telemetry. Cesium takes
 // heading/pitch/roll natively, so no rotation maths is needed here.
 function setAircraft(lat, lon, altMsl, yawDeg, pitchDeg, rollDeg) {
     if (!ready || !viewer) return;
+    target = {lat: lat, lon: lon, alt: altMsl,
+              yaw: yawDeg, pitch: pitchDeg, roll: rollDeg};
+    if (pose === null) {
+        pose = {lat: lat, lon: lon, alt: altMsl,
+                yaw: yawDeg, pitch: pitchDeg, roll: rollDeg};
+        applyPose();
+    }
+}
+
+function applyPose() {
     viewer.camera.setView({
-        destination: Cesium.Cartesian3.fromDegrees(lon, lat, altMsl),
+        destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, pose.alt),
         orientation: {
-            heading: Cesium.Math.toRadians(yawDeg),
-            pitch: Cesium.Math.toRadians(pitchDeg),
-            roll: Cesium.Math.toRadians(rollDeg),
+            heading: Cesium.Math.toRadians(pose.yaw),
+            pitch: Cesium.Math.toRadians(pose.pitch),
+            roll: Cesium.Math.toRadians(pose.roll),
         },
     });
+}
+
+// One frame of easing towards the latest telemetry. Exponential, driven by
+// elapsed time rather than a fixed step, so the speed of the glide doesn't
+// change with the frame rate.
+function stepCamera(dtMs) {
+    if (pose === null || target === null) return;
+    if (Math.abs(target.lat - pose.lat) > SNAP_DEG ||
+        Math.abs(target.lon - pose.lon) > SNAP_DEG) {
+        pose.lat = target.lat; pose.lon = target.lon; pose.alt = target.alt;
+        pose.yaw = target.yaw; pose.pitch = target.pitch; pose.roll = target.roll;
+    } else {
+        var k = 1 - Math.exp(-dtMs / SMOOTH_TAU_MS);
+        pose.lat += (target.lat - pose.lat) * k;
+        pose.lon += (target.lon - pose.lon) * k;
+        pose.alt += (target.alt - pose.alt) * k;
+        pose.pitch += (target.pitch - pose.pitch) * k;
+        pose.yaw += shortestAngleDelta(pose.yaw, target.yaw) * k;
+        pose.roll += shortestAngleDelta(pose.roll, target.roll) * k;
+    }
+    applyPose();
+}
+
+function onPreUpdate() {
+    var now = (window.performance && performance.now) ? performance.now() : Date.now();
+    // First frame has no previous timestamp; a long stall (tab hidden,
+    // scene paused) shouldn't cash in as one enormous step either.
+    var dt = lastFrameMs ? Math.min(now - lastFrameMs, 250) : 16;
+    lastFrameMs = now;
+    stepCamera(dt);
 }
 
 function setHud(dataUri) {

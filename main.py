@@ -26,6 +26,7 @@ import sys
 import os
 import math
 import html
+import time
 from datetime import datetime
 from PySide6.QtCore import Signal, QTimer, Qt
 from PySide6.QtGui import QIcon, QImage, QPainter
@@ -799,6 +800,28 @@ class MainWindow(QMainWindow):
         self.ack_label.setWordWrap(True)
         self.vehicle_state_label = QLabel()
         self.vehicle_state_label.setAlignment(Qt.AlignCenter)
+        self.flight_time_label = QLabel()
+        self.flight_time_label.setAlignment(Qt.AlignCenter)
+        self.flight_time_label.setStyleSheet(
+            "background-color: black; color: #ccc; font-size: 11px; "
+            "font-weight: bold; padding: 3px 12px; border-radius: 4px;"
+        )
+        # Counts up while armed, back to zero on disarm. Monotonic rather
+        # than wall-clock so it can't jump if the system clock is corrected.
+        self._flight_start = None
+        # Whether this link has ever reported the vehicle DISARMED. If it
+        # hasn't by the time we first see it armed, we joined an aircraft
+        # that was already flying and the clock can only be a lower bound.
+        self._seen_disarmed = False
+        self._flight_partial = False
+        self._flight_timer = QTimer(self)
+        # 250ms and a precise timer: the seconds digit is truncated, so a
+        # coarse half-second tick can leave the display a whole second
+        # behind what the clock actually says.
+        self._flight_timer.setInterval(250)
+        self._flight_timer.setTimerType(Qt.PreciseTimer)
+        self._flight_timer.timeout.connect(self._update_flight_time)
+        self._update_flight_time()
         self._armed = False
         self._ready_to_arm = False
         self._update_vehicle_state_label()
@@ -851,8 +874,15 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self.status_label, stretch=1)
         status_row.addWidget(self.vehicle_state_label)
         left_layout.addLayout(status_row)
-        left_layout.addWidget(self.command_label)
-        left_layout.addWidget(self.ack_label)
+        # Command/ACK text on the left, flight time in the space beside it.
+        info_row = QHBoxLayout()
+        info_col = QVBoxLayout()
+        info_col.setSpacing(4)
+        info_col.addWidget(self.command_label)
+        info_col.addWidget(self.ack_label)
+        info_row.addLayout(info_col, stretch=1)
+        info_row.addWidget(self.flight_time_label, alignment=Qt.AlignTop)
+        left_layout.addLayout(info_row)
         left_layout.addWidget(self.arm_panel)
         left_layout.addWidget(self.preflight_cal_panel)
         left_layout.addWidget(self.mode_panel)
@@ -977,6 +1007,43 @@ class MainWindow(QMainWindow):
         self.map_view.update_terrain_reference(
             self._last_amsl_alt, self._last_groundspeed, self._last_climb
         )
+
+    def _set_flight_timer_running(self, running: bool):
+        """Start on arming, back to zero on disarming.
+
+        Starting is guarded on _flight_start, so the 'armed' that arrives
+        with every heartbeat restarts nothing - only the transition counts.
+        """
+        if running:
+            if self._flight_start is None:
+                # No MAVLink message carries time-since-arming - every
+                # timestamp in the protocol is since-boot or epoch - so
+                # joining an already-armed aircraft means the real flight
+                # is older than anything we can measure. Say so rather
+                # than showing a confidently wrong number.
+                self._flight_partial = not self._seen_disarmed
+                self._flight_start = time.monotonic()
+                self._flight_timer.start()
+        else:
+            self._seen_disarmed = True
+            self._flight_start = None
+            self._flight_partial = False
+            self._flight_timer.stop()
+        self._update_flight_time()
+
+    def _update_flight_time(self):
+        elapsed = 0 if self._flight_start is None else int(
+            time.monotonic() - self._flight_start)
+        hours, rem = divmod(elapsed, 3600)
+        minutes, seconds = divmod(rem, 60)
+        # A trailing + means "at least this long": we connected mid-flight.
+        mark = "+" if self._flight_partial else ""
+        self.flight_time_label.setText(
+            f"GCS Flight Time : {hours:02d}:{minutes:02d}:{seconds:02d}{mark}")
+        self.flight_time_label.setToolTip(
+            "The aircraft was already armed when this GCS connected, so it "
+            "has been flying at least this long - the autopilot doesn't "
+            "report when it armed." if self._flight_partial else "")
 
     def _update_vehicle_state_label(self):
         """Single box: ARMED (red) while armed; otherwise READY TO ARM
@@ -1156,6 +1223,7 @@ class MainWindow(QMainWindow):
             self._armed = armed
             self.arm_panel.set_armed_state(armed)
             self._update_vehicle_state_label()
+            self._set_flight_timer_running(armed)
         if "ekf_color" in status_dict:
             self.horizon.set_ekf_status(status_dict["ekf_color"])
         if "vibe_color" in status_dict:
@@ -1385,6 +1453,8 @@ class MainWindow(QMainWindow):
         self._armed = False
         self._ready_to_arm = False
         self._update_vehicle_state_label()
+        self._set_flight_timer_running(False)
+        self._seen_disarmed = False   # nothing known about a link not yet up
         self.arm_panel.set_armed_state(None)
         self.mode_panel.set_active_mode(None)
         self.horizon.set_ekf_status("white")

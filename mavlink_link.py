@@ -54,6 +54,27 @@ PLANE_MODES = {
 }
 
 
+def _is_vehicle_heartbeat(msg):
+    """True only for a heartbeat from an actual flight controller.
+
+    Everything else that shares a MAVLink link - telemetry radios,
+    companion computers, gimbals, ADS-B receivers, other GCSs, our own
+    heartbeat echoed back by SITL/MAVProxy - reports its autopilot field
+    as MAV_AUTOPILOT_INVALID. Their custom_mode and armed bit mean nothing
+    for this vehicle.
+
+    This is what distinguishes the vehicle, not "whoever heartbeat first".
+    SITL has only the one heartbeat so anything works there, but a real
+    airframe usually has several components talking, and locking onto the
+    wrong one leaves the mode and armed state stuck forever - the GCS then
+    reads READY TO ARM through an entire flight, because ready_to_arm
+    comes from SYS_STATUS and isn't filtered, while armed comes from the
+    heartbeats being thrown away.
+    """
+    return (msg.type != mavutil.mavlink.MAV_TYPE_GCS
+            and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID)
+
+
 class MavlinkLink(QThread):
     # roll, pitch, yaw in radians
     attitude_update = Signal(float, float, float)
@@ -152,12 +173,13 @@ class MavlinkLink(QThread):
             deadline = time.time() + 30
             while self._running and time.time() < deadline:
                 hb = self.master.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
-                # Skip GCS-type heartbeats when deciding who we're talking
-                # to: our own get echoed back by SITL/MAVProxy, and another
-                # GCS may share the port. Locking target_system onto one of
-                # those would aim every command at it instead of the
-                # vehicle. (The main loop already ignores them for display.)
-                if hb is not None and hb.type == mavutil.mavlink.MAV_TYPE_GCS:
+                # Only a real flight controller can be the vehicle. Our own
+                # heartbeat comes back off SITL/MAVProxy, another GCS may
+                # share the port, and a real airframe has companions,
+                # gimbals and radios heartbeating too - locking onto any of
+                # those aims every command at it and, worse, makes the
+                # filter below discard the vehicle's own heartbeats.
+                if hb is not None and not _is_vehicle_heartbeat(hb):
                     hb = None
                     continue
                 if hb is not None:
@@ -537,22 +559,19 @@ class MavlinkLink(QThread):
                 )
 
             elif mtype == "HEARTBEAT":
-                # Only trust heartbeats from the autopilot component we
-                # actually connected to (target_system/target_component,
-                # captured from the first heartbeat in run()). Real links
-                # can carry heartbeats from other onboard MAVLink
-                # components too - companion computers, GPS/CAN nodes,
-                # our own GCS heartbeat echoed back by SITL/MAVProxy -
-                # whose custom_mode is meaningless for this vehicle.
-                # Without this filter the mode display flickers between
-                # the real mode and whatever (usually 0/no match) those
-                # other components report.
-                if (
-                    msg.get_srcSystem() != self.master.target_system
-                    or msg.get_srcComponent() != self.master.target_component
-                ):
+                # Only the vehicle's own heartbeats carry a mode and armed
+                # bit that mean anything. Without this the mode display
+                # flickers between the real mode and whatever the other
+                # components on the link report (usually 0/no match).
+                #
+                # Matched on system id plus "is a flight controller" rather
+                # than on an exact component id: the component id is only a
+                # guess at connect time, and if that guess is wrong every
+                # real heartbeat gets dropped and the mode and armed state
+                # never update again.
+                if not _is_vehicle_heartbeat(msg):
                     continue
-                if msg.type == mavutil.mavlink.MAV_TYPE_GCS:
+                if msg.get_srcSystem() != self.master.target_system:
                     continue
 
                 try:
