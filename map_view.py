@@ -436,14 +436,21 @@ var waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).
 // a new queue can start fresh without touching what was already sent.
 var allWaypointLayers = [waypointLine];
 
-function waypointIcon(number) {
+// `sent` draws the muted version used for a mission already uploaded.
+// Numbering restarts at 1 for each mission because that is what the
+// vehicle receives - so without a visual difference a map holding two
+// batches shows two markers labelled "1" and no way to tell them apart.
+function waypointIcon(number, sent) {
+    var fill   = sent ? '#5b6b78' : '#3af';
+    var text   = sent ? '#cfd8e0' : 'white';
+    var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
     return L.divIcon({
         className: 'waypoint-icon',
         html: '<div style="width:22px;height:22px;border-radius:50%;' +
-              'background:#3af;color:white;font-family:sans-serif;' +
+              'background:' + fill + ';color:' + text + ';font-family:sans-serif;' +
               'font-size:12px;font-weight:bold;display:flex;' +
               'align-items:center;justify-content:center;' +
-              'border:2px solid white;">' + number + '</div>',
+              'border:2px solid ' + border + ';">' + number + '</div>',
         iconSize: [22, 22],
         iconAnchor: [11, 11],
     });
@@ -585,6 +592,15 @@ function commitWaypoints() {
     // visible on the map (don't remove anything), just stop tracking
     // them as the "current queue" so the next batch of clicks starts
     // fresh without extending this route.
+    //
+    // Grey the batch as it goes, because the next queue starts numbering
+    // at 1 again - matching the mission the vehicle actually gets. Left
+    // in the same blue, the map would show two "1"s with nothing to say
+    // which had been flown and which was still being planned.
+    for (var i = 0; i < waypointMarkers.length; i++) {
+        waypointMarkers[i].setIcon(waypointIcon(i + 1, true));
+    }
+    waypointLine.setStyle({color: '#5b6b78', opacity: 0.7});
     waypointMarkers = [];
     waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
     allWaypointLayers.push(waypointLine);
