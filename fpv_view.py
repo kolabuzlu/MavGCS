@@ -114,7 +114,12 @@ var viewer = null, ready = false, failed = false;
 // rather than by moving the camera. Pulling the camera backwards is what
 // Cesium's own wheel handler does, and in a view that is supposed to be
 // FROM the aircraft that would just slide it off the nose.
-var DEFAULT_FOV = 60, MIN_FOV = 8, MAX_FOV = 90;
+// Opens at the widest the view goes, so there is nothing left to zoom out
+// to - you start with the most situational awareness and zoom in on what
+// you want a closer look at. That also makes the widest view 1.0x, which
+// is what double-click returns to.
+var MIN_FOV = 8, MAX_FOV = 90;
+var DEFAULT_FOV = MAX_FOV;
 var fovDeg = DEFAULT_FOV, zoomTimer = null;
 
 function applyFov() {
@@ -212,6 +217,10 @@ var pose = null;        // where the camera is now
 var target = null;      // newest telemetry
 var lastFrameMs = 0;
 
+// Never sit exactly on the surface: on the ground AGL is 0, and a camera
+// level with the terrain clips through it.
+var MIN_EYE_M = 1.5;
+
 // Time constant of the glide. Long enough to smooth 250ms-apart samples,
 // short enough that the view isn't noticeably behind the aircraft.
 var SMOOTH_TAU_MS = 120;
@@ -226,20 +235,47 @@ function shortestAngleDelta(from, to) {
 
 // Position and attitude straight from telemetry. Cesium takes
 // heading/pitch/roll natively, so no rotation maths is needed here.
-function setAircraft(lat, lon, altMsl, yawDeg, pitchDeg, rollDeg) {
+function setAircraft(lat, lon, altMsl, agl, yawDeg, pitchDeg, rollDeg) {
     if (!ready || !viewer) return;
-    target = {lat: lat, lon: lon, alt: altMsl,
+    target = {lat: lat, lon: lon, alt: altMsl, agl: agl,
               yaw: yawDeg, pitch: pitchDeg, roll: rollDeg};
     if (pose === null) {
-        pose = {lat: lat, lon: lon, alt: altMsl,
+        pose = {lat: lat, lon: lon, alt: altMsl, agl: agl,
                 yaw: yawDeg, pitch: pitchDeg, roll: rollDeg};
         applyPose();
     }
 }
 
+// The height to hand Cesium, in Cesium's own datum.
+//
+// The obvious value - the vehicle's altitude AMSL - is the wrong one.
+// Cesium measures height from the WGS84 ellipsoid, MAVLink reports it from
+// mean sea level, and the two differ by the geoid separation: about 28m at
+// Samsun, 37m at Ankara, and something else again elsewhere. Feeding AMSL
+// straight in buried the camera that far underground, so sitting on the
+// runway you looked up at the underside of the terrain.
+//
+// Measuring up from Cesium's own terrain keeps everything in one datum and
+// is right anywhere in the world, with no geoid model to ship.
+function cameraHeight() {
+    var ground;
+    try {
+        ground = viewer.scene.globe.getHeight(
+            Cesium.Cartographic.fromDegrees(pose.lon, pose.lat));
+    } catch (e) {
+        ground = undefined;
+    }
+    if (typeof ground === 'number' && isFinite(ground)) {
+        return ground + Math.max(pose.agl, MIN_EYE_M);
+    }
+    // Terrain for this spot hasn't streamed in yet. AMSL is off by the
+    // geoid separation, but it is the only height we have until it does.
+    return pose.alt;
+}
+
 function applyPose() {
     viewer.camera.setView({
-        destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, pose.alt),
+        destination: Cesium.Cartesian3.fromDegrees(pose.lon, pose.lat, cameraHeight()),
         orientation: {
             heading: Cesium.Math.toRadians(pose.yaw),
             pitch: Cesium.Math.toRadians(pose.pitch),
@@ -256,12 +292,14 @@ function stepCamera(dtMs) {
     if (Math.abs(target.lat - pose.lat) > SNAP_DEG ||
         Math.abs(target.lon - pose.lon) > SNAP_DEG) {
         pose.lat = target.lat; pose.lon = target.lon; pose.alt = target.alt;
+        pose.agl = target.agl;
         pose.yaw = target.yaw; pose.pitch = target.pitch; pose.roll = target.roll;
     } else {
         var k = 1 - Math.exp(-dtMs / SMOOTH_TAU_MS);
         pose.lat += (target.lat - pose.lat) * k;
         pose.lon += (target.lon - pose.lon) * k;
         pose.alt += (target.alt - pose.alt) * k;
+        pose.agl += (target.agl - pose.agl) * k;
         pose.pitch += (target.pitch - pose.pitch) * k;
         pose.yaw += shortestAngleDelta(pose.yaw, target.yaw) * k;
         pose.roll += shortestAngleDelta(pose.roll, target.roll) * k;
@@ -325,14 +363,15 @@ class FpvView(QWebEngineView):
         # the page itself are same-origin.
         self.setHtml(html, QUrl(self._origin + "/"))
 
-    def set_aircraft(self, lat: float, lon: float, alt_msl: float,
+    def set_aircraft(self, lat: float, lon: float, alt_msl: float, agl: float,
                      yaw_deg: float, pitch_deg: float, roll_deg: float):
         # The no-token page defines none of these; calling into it would
         # just throw in the page console.
         if not self._token:
             return
         self.page().runJavaScript(
-            f"setAircraft({lat}, {lon}, {alt_msl}, {yaw_deg}, {pitch_deg}, {roll_deg});"
+            f"setAircraft({lat}, {lon}, {alt_msl}, {agl}, "
+            f"{yaw_deg}, {pitch_deg}, {roll_deg});"
         )
 
     def set_hud_image(self, data_uri: str):

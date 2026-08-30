@@ -830,6 +830,10 @@ class MainWindow(QMainWindow):
         self._last_lon = None
         self._waypoint_queue = []  # list of (lat, lon) tuples, in click order
         self._last_amsl_alt = 0.0
+        # True height above the terrain below, from TERRAIN_REPORT. None
+        # until the vehicle sends one (it needs terrain data loaded), in
+        # which case the 3D view falls back to height above home.
+        self._last_agl = None
         # Attitude in degrees, kept for the 3D camera: the horizon
         # widget stores roll/pitch in radians and drops yaw entirely.
         self._last_att_deg = (0.0, 0.0, 0.0)   # yaw, pitch, roll
@@ -1068,8 +1072,12 @@ class MainWindow(QMainWindow):
             return
         self.fpv_view.set_status("")
         yaw_deg, pitch_deg, roll_deg = self._last_att_deg
+        # Height above ground, which is what the 3D camera is positioned by.
+        # TERRAIN_REPORT's is the real thing; height above home is the
+        # fallback, and only differs once the ground itself rises or falls.
+        agl = self._last_agl if self._last_agl is not None else self._last_alt
         self.fpv_view.set_aircraft(self._last_lat, self._last_lon,
-                                   self._last_amsl_alt,
+                                   self._last_amsl_alt, agl,
                                    yaw_deg, pitch_deg, roll_deg)
 
     def _push_hud_overlay(self):
@@ -1238,6 +1246,11 @@ class MainWindow(QMainWindow):
                 self.horizon.set_battery_voltage(None)
         if "amsl_alt" in status_dict:
             self._last_amsl_alt = float(status_dict["amsl_alt"])
+        if "agl" in status_dict:
+            try:
+                self._last_agl = float(status_dict["agl"])
+            except (TypeError, ValueError):
+                pass
         if "ready_to_arm" in status_dict:
             self._ready_to_arm = status_dict["ready_to_arm"] == "YES"
             self._update_vehicle_state_label()

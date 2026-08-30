@@ -527,7 +527,13 @@ class MavlinkLink(QThread):
                     self.status_update.emit({"qnh": f"{qnh:.2f}"})
 
             elif mtype == "TERRAIN_REPORT":
-                self.status_update.emit({"terrain_gl": f"{msg.terrain_height:.2f}"})
+                # current_height is the vehicle's height above the terrain
+                # right beneath it - true AGL, which the 3D view needs to
+                # place its camera without depending on a sea-level datum.
+                self.status_update.emit({
+                    "terrain_gl": f"{msg.terrain_height:.2f}",
+                    "agl": f"{msg.current_height:.2f}",
+                })
 
             elif mtype == "SYS_STATUS":
                 # MAV_SYS_STATUS_PREARM_CHECK is just another bit in the
