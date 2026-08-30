@@ -69,6 +69,31 @@ CESIUM_HTML = """
   .cesium-viewer-timelineContainer, .cesium-viewer-fullscreenContainer {
       display: none !important;
   }
+  /* Left as one run, that credit line lies straight across the HUD's
+     bottom row, over LAT and into the EKF/VIBE boxes. It is three separate
+     elements though, so it can be split and lifted clear: the Ion logo to
+     the left, the "Upgrade for commercial use" text and the data
+     attribution link to the right, all sitting above the bottom row
+     (6px margin + 18px box = 24px tall). Everything stays on screen -
+     this moves the attribution, it doesn't hide it.
+     !important throughout: Cesium sets display:inline on these as an
+     inline style, which a plain rule can't outrank. */
+  .cesium-viewer-bottom { left: 0; right: 0; bottom: 0; padding-right: 0; }
+  .cesium-widget-credits { display: block !important; }
+  .cesium-credit-logoContainer {
+      display: block !important; position: absolute !important;
+      /* Hard against the left edge. Ion's logo file carries 1px of
+         transparent padding of its own, so the visible mark starts at 1px;
+         going below 0 here would crop the logo rather than move it. */
+      left: 0; bottom: 28px;
+  }
+  .cesium-credit-logoContainer img { max-height: 24px; width: auto; }
+  .cesium-credit-textContainer, .cesium-credit-expand-link {
+      display: block !important; position: absolute !important;
+      right: 8px; text-align: right; padding-left: 0;
+  }
+  .cesium-credit-textContainer { bottom: 28px; max-width: 55%; }
+  .cesium-credit-expand-link  { bottom: 42px; }
 </style>
 <script>
   // Must be set before Cesium.js loads: it resolves its workers, shaders
