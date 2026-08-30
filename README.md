@@ -1,5 +1,4 @@
-# MavGCS
-Ground Control Station for MAVLink
+# MavGCS - Ground Control Station for MAVLink
 
 ![MavGCS screenshot](screenshot.png)
 
