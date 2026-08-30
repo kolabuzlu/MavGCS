@@ -12,7 +12,7 @@ You can monitor HUD and vital information about flight, use weather radar, exper
 
 You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to activate 3D FPV view.
 
-Created by Derin Hakan Karakurt
+Created by **Derin Hakan Karakurt**
 
 ## Installing & Running MavGCS (Windows)
 
