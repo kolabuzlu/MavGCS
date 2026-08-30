@@ -29,8 +29,8 @@ import html
 import time
 from datetime import datetime
 from PySide6.QtCore import Signal, QTimer, Qt
-from PySide6.QtGui import QIcon, QImage, QPainter
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap, QPen, QColor
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QSize
 from PySide6.QtGui import QRegion
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -203,6 +203,10 @@ class ModePanel(QGroupBox):
         # set_active_mode never restyles it as though it were a mode.
         self.fly_to_btn = QPushButton("FLY TO LAT / LON")
         self.fly_to_btn.setStyleSheet(self.FLY_TO_STYLE)
+        # White to match the button's own label - the source artwork is
+        # black, which on this blue would read as a smudge.
+        self.fly_to_btn.setIcon(globe_icon(12, gap=7))
+        self.fly_to_btn.setIconSize(QSize(12 + 7, 12))
         self.fly_to_btn.setToolTip(
             "Type a coordinate and send the vehicle there in GUIDED mode."
         )
@@ -220,6 +224,141 @@ class ModePanel(QGroupBox):
                 btn.setStyleSheet(self.RTL_STYLE)
             else:
                 btn.setStyleSheet(self.NORMAL_STYLE)
+
+
+def globe_icon(px: int, color: str = "#ffffff", gap: int = 0) -> QIcon:
+    """A wireframe lat/lon globe, drawn rather than loaded from a file.
+
+    Drawn because it has to work at about 14px on a button: a bitmap
+    scaled down to that turns the fine grid into grey mush, and it would
+    also arrive the wrong colour for a blue background. Painting it means
+    it stays crisp at any DPI and takes the colour it is asked for.
+
+    Deliberately fewer grid lines than a full globe illustration - at this
+    size any more merge into a solid disc.
+
+    `gap` adds empty space to the right of the globe, inside the icon. Qt
+    centres a button's icon and text as one group with no spacing control
+    between them, so carrying the gap in the artwork is what pushes the
+    globe clear of the label.
+    """
+    scale = 4                       # supersample, then scale down smoothly
+    s = px * scale
+    pm = QPixmap(s + gap * scale, s)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(s * 0.055)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    margin = s * 0.06
+    r = (s - 2 * margin) / 2.0
+    c = QPointF(s / 2.0, s / 2.0)
+
+    painter.drawEllipse(c, r, r)                       # the sphere itself
+    painter.drawLine(QPointF(c.x() - r, c.y()),
+                     QPointF(c.x() + r, c.y()))        # equator, edge on
+    painter.drawLine(QPointF(c.x(), c.y() - r),
+                     QPointF(c.x(), c.y() + r))        # meridian, edge on
+
+    # Latitudes: circles of shrinking radius, so they sit inside the sphere
+    # rather than being drawn as if flat.
+    for frac in (0.5,):
+        dy = r * frac
+        half_width = r * math.sqrt(max(0.0, 1.0 - frac * frac))
+        for sign in (-1, 1):
+            painter.drawEllipse(QPointF(c.x(), c.y() + dy * sign),
+                                half_width, r * 0.13)
+    # Meridians, seen at an angle - narrower ellipses on the same axis.
+    for frac in (0.5,):
+        painter.drawEllipse(c, r * frac, r)
+    painter.end()
+
+    return QIcon(pm.scaled(px + gap, px,
+                           Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+
+
+class MarqueeLabel(QLabel):
+    """One line of text that scrolls itself only when it doesn't fit.
+
+    Pre-arm reasons run long ("PreArm: GPS horiz error 1.85m") and the space
+    beside the Force ARM checkbox is narrow. Eliding would hide the specific
+    figure, which is the part worth reading, so it scrolls instead - and
+    sits still when the text already fits, so a short reason doesn't wander
+    about for no reason.
+    """
+
+    # ~62 px/s. At the original 1px/40ms (25 px/s) a long pre-arm reason
+    # took over half a minute to scroll past once, which is no use at all
+    # when the whole point is reading the end of it. A 16ms tick is also
+    # smoother than covering the same ground in bigger jumps.
+    STEP_PX = 1
+    TICK_MS = 16
+    PAUSE_MS = 1200          # hold at the start before scrolling begins
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._offset = 0
+        self._pause_ticks = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def setMessage(self, text: str):
+        if text == self._text:
+            return
+        self._text = text or ""
+        self._offset = 0
+        self._pause_ticks = self.PAUSE_MS // self.TICK_MS
+        self.setToolTip(self._text)     # the full text, always readable
+        self._restart()
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._restart()
+
+    def _text_width(self):
+        return self.fontMetrics().horizontalAdvance(self._text)
+
+    def _restart(self):
+        if self._text and self._text_width() > self.width():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+            self._offset = 0
+
+    def _tick(self):
+        if self._pause_ticks > 0:
+            self._pause_ticks -= 1
+            return
+        # Scroll one full text width plus a gap, then wrap and pause again.
+        span = self._text_width() + 30
+        self._offset += self.STEP_PX
+        if self._offset >= span:
+            self._offset = 0
+            self._pause_ticks = self.PAUSE_MS // self.TICK_MS
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._text:
+            return
+        painter = QPainter(self)
+        painter.setPen(self.palette().windowText().color())
+        painter.setFont(self.font())
+        y = self.fontMetrics().ascent() + (
+            self.height() - self.fontMetrics().height()) // 2
+        painter.drawText(-self._offset, y, self._text)
+        # Second copy trailing the first, so the line reads continuously
+        # rather than blanking between passes.
+        if self._timer.isActive():
+            painter.drawText(-self._offset + self._text_width() + 30, y, self._text)
+        painter.end()
 
 
 class ArmDisarmPanel(QGroupBox):
@@ -271,8 +410,16 @@ class ArmDisarmPanel(QGroupBox):
         self.disarm_progress.setFixedHeight(5)
         layout.addWidget(self.disarm_progress)
 
+        force_row = QHBoxLayout()
+        force_row.setSpacing(8)
         self.force_checkbox = QCheckBox("Force ARM (bypass pre-arm safety checks)")
-        layout.addWidget(self.force_checkbox)
+        force_row.addWidget(self.force_checkbox)
+        # The reason the vehicle won't arm, in the space to the right.
+        self.prearm_label = MarqueeLabel()
+        self.prearm_label.setStyleSheet("color: #e6a23c; font-size: 10px;")
+        self.prearm_label.setMinimumWidth(60)
+        force_row.addWidget(self.prearm_label, stretch=1)
+        layout.addLayout(force_row)
 
         self.arm_btn.clicked.connect(
             lambda: self.arm_requested.emit(True, self.force_checkbox.isChecked())
@@ -304,6 +451,9 @@ class ArmDisarmPanel(QGroupBox):
             self._hold_timer.stop()
             self.disarm_progress.setValue(0)
             self.force_disarm_requested.emit()
+
+    def set_prearm_reason(self, text: str):
+        self.prearm_label.setMessage(text or "")
 
     def set_armed_state(self, armed):
         """armed: True, False, or None (unknown yet)."""
@@ -1335,6 +1485,8 @@ class MainWindow(QMainWindow):
             self.arm_panel.set_armed_state(armed)
             self._update_vehicle_state_label()
             self._set_flight_timer_running(armed)
+            if armed:
+                self.arm_panel.set_prearm_reason("")
         if "ekf_color" in status_dict:
             self.horizon.set_ekf_status(status_dict["ekf_color"])
         if "vibe_color" in status_dict:
@@ -1356,6 +1508,9 @@ class MainWindow(QMainWindow):
                 pass
         if "ready_to_arm" in status_dict:
             self._ready_to_arm = status_dict["ready_to_arm"] == "YES"
+            if self._ready_to_arm:
+                # Whatever it was complaining about has cleared.
+                self.arm_panel.set_prearm_reason("")
             self._update_vehicle_state_label()
 
     def on_connection_status(self, connected, message):
@@ -1438,6 +1593,25 @@ class MainWindow(QMainWindow):
         lat, lon, alt = dialog.values()
         self.map_view.show_target(lat, lon)
         link.fly_to(lat, lon, alt)
+
+    def on_status_text(self, text, severity):
+        """Surface the reason the vehicle won't arm.
+
+        NOT READY TO ARM says only that it is refusing, not why. ArduPilot
+        does say why - "PreArm: GPS horiz error 1.85m" - but only as one
+        line in a scrolling log that has usually moved on by the time you
+        look. It costs nothing to keep the latest one in view, and it turns
+        a dead-end indicator into something you can act on.
+        """
+        if self._armed:
+            # Pre-arm advice is meaningless once it is flying, and stale
+            # text on a panel you glance at is worse than none.
+            return
+        stripped = (text or "").strip()
+        # ArduPilot uses "PreArm:" for checks that block arming and "Arm:"
+        # for a rejected arming attempt. Both answer the same question.
+        if stripped.startswith("PreArm:") or stripped.startswith("Arm:"):
+            self.arm_panel.set_prearm_reason(stripped)
 
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
@@ -1579,6 +1753,7 @@ class MainWindow(QMainWindow):
         self.link.connection_status.connect(self.on_connection_status)
         self.link.command_feedback.connect(self.on_command_feedback)
         self.link.status_text_update.connect(self.messages_panel.add_message)
+        self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
 
     def on_connect_requested(self, connection_string):
@@ -1642,6 +1817,7 @@ class MainWindow(QMainWindow):
         self._update_vehicle_state_label()
         self._set_flight_timer_running(False)
         self._seen_disarmed = False   # nothing known about a link not yet up
+        self.arm_panel.set_prearm_reason("")
         self.arm_panel.set_armed_state(None)
         self.mode_panel.set_active_mode(None)
         self.horizon.set_ekf_status("white")
