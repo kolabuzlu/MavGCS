@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.13.0 - 3D FPV view added.
+## V1.13.0 - 3D FPV view and weather radar added.
 
 ## V1.12.0 - Minor fixes and improvements.
 

@@ -175,6 +175,18 @@ LEAFLET_HTML = """
            style="margin: 0; cursor: pointer;">
     <label for="adsb-checkbox" style="cursor: pointer; user-select: none;">ADS-B</label>
 </div>
+<div id="weather-control" style="
+    position: absolute; top: 74px; left: 46px;
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 4px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 12px;
+    z-index: 1000; display: flex; align-items: center; gap: 4px;
+">
+    <input type="checkbox" id="weather-checkbox"
+           onchange="setWeatherEnabled(this.checked);"
+           style="margin: 0; cursor: pointer;">
+    <label for="weather-checkbox" style="cursor: pointer; user-select: none;">Weather</label>
+</div>
 <div id="tilecache-control">
   <div class="tc-cols">
     <div class="tc-col">
@@ -469,6 +481,7 @@ function updatePosition(lat, lon, heading) {
     animStartTime = performance.now();
 
     path.addLatLng(latlng);
+    if (weatherEnabled) { updateWeatherClip(); }
 
     if (!haveCentered) {
         map.setView(latlng, 17);
@@ -650,6 +663,125 @@ function clearTarget() {
         targetMarker = null;
     }
 }
+
+// ---- Weather radar overlay ------------------------------------------------
+// Precipitation radar from RainViewer's free public API - no key, no
+// account. New frames appear roughly every 10 minutes.
+//
+// Confined to a circle around the aircraft: the radar is here to show what
+// you are about to fly into, and an unclipped national mosaic just buries
+// the map underneath it.
+var WEATHER_RADIUS_M = 50000;
+// RainViewer's free tiles stop at zoom 7. Ask for anything deeper and it
+// serves a "Zoom Level Not Supported" placeholder instead of radar - the
+// same 1370-byte image for every tile on earth, which tiles across the map
+// looking like a broken overlay.
+//
+// Leaflet's URL zoom is min(mapZoom, maxNativeZoom) + zoomOffset, so 9 with
+// an offset of -2 asks for zoom 7 and never deeper, whatever the map shows
+// (the map itself never goes below zoom 9).
+//
+// Tile size is the one dial left for detail, since the zoom is pinned: a
+// 1024px tile covers the same ground as a 256px one but with sixteen times
+// the pixels, 234m per radar pixel rather than 937m. Most of that is the
+// server resampling rather than new data - measured against upscaling the
+// smaller tile ourselves, only a couple of percent of pixels genuinely
+// differ - but it upscales more cleanly at flight zoom and costs only tens
+// of kilobytes, because the whole 50km circle is one or two tiles.
+var WEATHER_MAX_NATIVE_ZOOM = 9;
+var WEATHER_TILE_SIZE = 1024;
+var WEATHER_ZOOM_OFFSET = -2;
+var WEATHER_REFRESH_MS = 5 * 60 * 1000;
+
+var weatherEnabled = false;
+var weatherLayer = null;
+var weatherFramePath = null;
+var weatherTimer = null;
+
+function setWeatherEnabled(enabled) {
+    weatherEnabled = enabled;
+    if (enabled) {
+        if (!map.getPane('weatherPane')) {
+            var pane = map.createPane('weatherPane');
+            pane.style.zIndex = 250;          // over the map, under the markers
+            pane.style.pointerEvents = 'none';
+        }
+        weatherRefresh();
+        weatherTimer = setInterval(weatherRefresh, WEATHER_REFRESH_MS);
+    } else {
+        if (weatherTimer) { clearInterval(weatherTimer); weatherTimer = null; }
+        if (weatherLayer) { map.removeLayer(weatherLayer); weatherLayer = null; }
+        weatherFramePath = null;
+    }
+}
+
+function weatherRefresh() {
+    if (!weatherEnabled) return;
+    fetch('https://api.rainviewer.com/public/weather-maps.json', {cache: 'no-store'})
+        .then(function (resp) { return resp.json(); })
+        .then(function (index) {
+            if (!weatherEnabled) return;
+            var past = index && index.radar && index.radar.past;
+            if (!past || !past.length) return;
+            var path = past[past.length - 1].path;
+            if (path === weatherFramePath) return;      // same frame, nothing to do
+            weatherFramePath = path;
+            // colour scheme 2 (universal blue), smoothed, snow shown apart
+            var fresh = L.tileLayer(
+                index.host + path + '/' + WEATHER_TILE_SIZE + '/{z}/{x}/{y}/2/1_1.png', {
+                pane: 'weatherPane',
+                opacity: 0.65,
+                // Their free tier asks for a credit. Leaflet shows it only
+                // while the layer is on, and drops it when Weather is off.
+                attribution: 'Radar &copy; RainViewer',
+                tileSize: WEATHER_TILE_SIZE,
+                zoomOffset: WEATHER_ZOOM_OFFSET,
+                maxNativeZoom: WEATHER_MAX_NATIVE_ZOOM,
+                minZoom: MIN_ZOOM,
+                maxZoom: MAX_ZOOM
+            });
+            fresh.addTo(map);
+            // Keep the old frame up until the new one has drawn, so the
+            // radar doesn't blink out every time it refreshes.
+            var previous = weatherLayer;
+            weatherLayer = fresh;
+            if (previous) {
+                fresh.once('load', function () { map.removeLayer(previous); });
+                setTimeout(function () {
+                    if (map.hasLayer(previous)) { map.removeLayer(previous); }
+                }, 5000);
+            }
+            updateWeatherClip();
+        })
+        .catch(function () {
+            // Offline, or the API is down. Leave whatever is drawn rather
+            // than clearing it - stale radar still beats none.
+        });
+}
+
+// Confine the radar to WEATHER_RADIUS_M around the aircraft.
+function updateWeatherClip() {
+    var pane = map.getPane('weatherPane');
+    if (!pane) return;
+    // Before the aircraft has a position - not connected yet, or no GPS
+    // fix - fall back to the middle of the map. Clipping to a zero-radius
+    // circle instead just hides the whole layer, which looks exactly like
+    // a broken feature. With Follow UAV on, the two are the same point
+    // anyway once telemetry arrives.
+    var at = marker ? marker.getLatLng() : map.getCenter();
+    // Ground resolution shrinks with latitude as well as zoom, so the
+    // circle has to be sized from both or 25km is only right at the equator.
+    var metresPerPixel = 156543.03392804097 *
+        Math.cos(at.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+    var radiusPx = WEATHER_RADIUS_M / metresPerPixel;
+    var point = map.latLngToLayerPoint(at);
+    pane.style.clipPath = 'circle(' + radiusPx.toFixed(1) + 'px at ' +
+                          point.x.toFixed(1) + 'px ' + point.y.toFixed(1) + 'px)';
+}
+
+// Layer points are stable while panning (the whole pane is transformed),
+// but a zoom or a view reset moves them.
+map.on('zoomend viewreset moveend', updateWeatherClip);
 
 // ---- ADS-B traffic overlay ------------------------------------------------
 // Nearby manned air traffic from adsb.lol's free public API (no key/account
