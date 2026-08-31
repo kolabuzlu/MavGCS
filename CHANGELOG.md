@@ -8,4 +8,4 @@
 
 ## V1.11.0 - ADS-B traffic and Change Loiter Radius added. Bug fixes and improvements.
 
-## V1.10.0 - First release. Bug fixes and improvements.
+## V1.10.0 - First release.
