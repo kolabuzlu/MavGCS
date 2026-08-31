@@ -1743,6 +1743,9 @@ class MainWindow(QMainWindow):
         Connect button for runtime reconnection - factored out so both
         paths stay identical instead of duplicating the wiring list.
         """
+        # A new connection is a new flight: start with a clean trail rather
+        # than drawing this one on top of the last one's.
+        self.map_view.clear_trail()
         self.link = MavlinkLink(connection_string)
         self.link.attitude_update.connect(self.on_attitude)
         self.link.position_update.connect(self.on_position)

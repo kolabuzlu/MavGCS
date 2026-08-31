@@ -196,6 +196,23 @@ LEAFLET_HTML = """
            style="margin: 0; cursor: pointer;">
     <label for="weather-checkbox" style="cursor: pointer; user-select: none;">Weather</label>
 </div>
+<div id="trail-control" style="
+    /* Just past the map/terrain cache panel, which runs from 166px to
+       612px (430 wide plus its 8px padding either side). The layer
+       selector is anchored to the map's right edge, so this sits in the
+       gap between the two. */
+    position: absolute; top: 10px; left: 622px;
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 4px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 12px;
+    z-index: 1000; display: flex; align-items: center; gap: 4px;
+">
+    <button onclick="clearTrail();" title="Erase the red flight trail"
+            style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   cursor: pointer;">Clear Trail</button>
+</div>
 <div id="tilecache-control">
   <div class="tc-cols">
     <div class="tc-col">
@@ -519,6 +536,25 @@ setInterval(retryFailedTiles, TILE_RETRY_MS);
 
 var marker = null;
 var path = L.polyline([], {color: 'red', weight: 2}).addTo(map);
+// Every position update redraws the whole polyline, so an uncapped trail
+// costs more per update the longer you fly - measured at 0.12ms per update
+// at 1000 points and 3.27ms at 20000, climbing roughly linearly, all of it
+// on the GUI thread.
+var TRAIL_MAX_POINTS = 8000;      // about 45 minutes at ArduPilot's 3Hz
+
+function addTrailPoint(latlng) {
+    path.addLatLng(latlng);
+    var pts = path.getLatLngs();
+    if (pts.length <= TRAIL_MAX_POINTS) return;
+    // Halve the resolution of the older half rather than discarding it.
+    // Dropping the oldest points would erase where you have been, which is
+    // what the trail is for; thinning keeps the whole shape of the route
+    // and gives up only fine detail on the parts you flew longest ago.
+    var half = Math.floor(pts.length / 2);
+    var thinned = [];
+    for (var i = 0; i < half; i += 2) { thinned.push(pts[i]); }
+    path.setLatLngs(thinned.concat(pts.slice(half)));
+}
 var followDrone = true;
 var haveCentered = false;
 var targetMarker = null;
@@ -593,11 +629,23 @@ function updatePosition(lat, lon, heading) {
     animHeadingTo = heading;
     animStartTime = performance.now();
 
-    path.addLatLng(latlng);
+    addTrailPoint(latlng);
     if (weatherEnabled) { updateWeatherClip(); }
 
     if (!haveCentered) {
-        map.setView(latlng, 17);
+        // Only take over the view if Follow UAV is on. With it off the user
+        // has deliberately chosen where to look, and the first fix is
+        // exactly when they are most likely to have arranged it - planning
+        // while waiting for GPS lock.
+        //
+        // The zoom is left alone too. This used to force zoom 17, which
+        // threw away a deliberate wider view even for someone who did want
+        // to follow the aircraft.
+        if (followDrone) {
+            map.setView(latlng, map.getZoom());
+        }
+        // Set either way: _animateMarker gates its panning on this, so
+        // ticking Follow UAV later still starts tracking immediately.
         haveCentered = true;
     }
     // Panning while following now happens every animation frame (see
