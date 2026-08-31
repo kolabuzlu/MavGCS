@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QLabel, QGridLayout, QFrame, QInputDialog,
     QPushButton, QGroupBox, QCheckBox, QMessageBox, QProgressBar,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QStackedWidget,
+    QSizePolicy,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
 )
 
@@ -279,6 +280,43 @@ def globe_icon(px: int, color: str = "#ffffff", gap: int = 0) -> QIcon:
 
     return QIcon(pm.scaled(px + gap, px,
                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+
+
+class ElidedLabel(QLabel):
+    """One line that shortens its text with an ellipsis instead of wrapping.
+
+    These lines carry command feedback and connection errors, and some of
+    those run long - a Windows socket error in Turkish is well over a
+    hundred characters. Wrapped, it became two or three lines, which grew
+    the left column, which lives in a scroll area, which put a scrollbar
+    down the whole panel over one message.
+
+    The full text stays in the tooltip, so nothing is lost by shortening
+    it on screen.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setWordWrap(False)
+        # Ignored horizontally: a long message must not widen the column
+        # either, which would produce a horizontal scrollbar instead.
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def setText(self, text):
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._apply_elision()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def _apply_elision(self):
+        width = max(0, self.width())
+        super().setText(
+            self.fontMetrics().elidedText(self._full, Qt.ElideRight, width)
+        )
 
 
 class MarqueeLabel(QLabel):
@@ -1035,14 +1073,14 @@ class MainWindow(QMainWindow):
         self.waypoint_panel = WaypointMissionPanel()
         self.messages_panel = MessagesPanel()
         self.connection_panel = ConnectionPanel(*self._split_connection_string(connection_string))
-        self.status_label = QLabel("Disconnected")
-        self.status_label.setStyleSheet("color: orange; font-weight: bold;")
-        self.command_label = QLabel("")
-        self.command_label.setStyleSheet("color: #ccc;")
-        self.command_label.setWordWrap(True)
-        self.ack_label = QLabel("")
+        self.status_label = QLabel()
+        # True while the feedback line is showing a connection problem that
+        # we put there, and may therefore remove again.
+        self._link_message_shown = False
+        self.command_label = ElidedLabel()
+        self.command_label.setStyleSheet("color: #ccc; font-size: 9px;")
+        self.ack_label = ElidedLabel()
         self.ack_label.setStyleSheet("color: #888; font-size: 9px;")
-        self.ack_label.setWordWrap(True)
         self.vehicle_state_label = QLabel()
         self.vehicle_state_label.setAlignment(Qt.AlignCenter)
         self.flight_time_label = QLabel()
@@ -1193,8 +1231,7 @@ class MainWindow(QMainWindow):
         # the user clicks Connect in the Connection panel. The CLI
         # connection_string is only used to pre-fill that panel's fields.
         self.link = None
-        self.status_label.setText("Disconnected")
-        self.status_label.setStyleSheet("color: orange; font-weight: bold;")
+        self._set_link_status(False, "Not connected")
         self.connection_panel.connect_requested.connect(self.on_connect_requested)
         self.connection_panel.disconnect_requested.connect(self.on_disconnect_requested)
 
@@ -1513,18 +1550,63 @@ class MainWindow(QMainWindow):
                 self.arm_panel.set_prearm_reason("")
             self._update_vehicle_state_label()
 
-    def on_connection_status(self, connected, message):
-        self.status_label.setText(message)
+    LINK_STATUS_STYLE = "font-weight: bold; font-size: 15px; color: {};"
+
+    def _set_link_status(self, connected: bool, detail: str = ""):
+        """The link indicator: just CONNECTED or DISCONNECTED, large enough
+        to read at a glance, which across a field is the only part that
+        matters.
+
+        The specifics - sysid/compid, "waiting for heartbeat", or why a
+        connection failed - go into the tooltip rather than being thrown
+        away. That text is exactly what you need when a link will not come
+        up at all, so it stays reachable.
+        """
+        self.status_label.setText("CONNECTED" if connected else "DISCONNECTED")
         self.status_label.setStyleSheet(
-            "color: lightgreen; font-weight: bold;" if connected
-            else "color: orange; font-weight: bold;"
+            self.LINK_STATUS_STYLE.format("lightgreen" if connected else "orange")
         )
+        self.status_label.setToolTip(detail)
+
+    def on_connection_status(self, connected, message):
+        self._set_link_status(connected, message)
+        # A failure reason is worth more than a tooltip - it is the thing
+        # you need when nothing will connect, so put it on the line below,
+        # where command feedback already appears.
+        if not connected and message.lower().startswith("connection failed"):
+            self._show_link_message(message)
+        elif connected:
+            # Once connected, the last attempt's complaint is history, and
+            # it reads as a live problem sitting under a green CONNECTED.
+            self._clear_link_message()
+
+    def _show_link_message(self, text: str):
+        """Put a connection problem on the feedback line, and remember that
+        we were the ones who wrote it."""
+        self.command_label.setText(text)
+        self._link_message_shown = True
+
+    def _clear_link_message(self):
+        """Remove a connection problem, but never anything else.
+
+        Tracked with a flag rather than by matching the text: there is more
+        than one such message ("Connection failed: ..." from the link,
+        "Can't connect: ..." from the panel's own validation), and matching
+        one prefix meant the other stayed on screen under a green
+        CONNECTED. A flag cannot be forgotten when a third message is added.
+        """
+        if self._link_message_shown:
+            self.command_label.setText("")
+            self._link_message_shown = False
 
     def on_command_feedback(self, message):
         if message.startswith("ACK:"):
             self.ack_label.setText(message)
         else:
             self.command_label.setText(message)
+            # Whatever was there is now overwritten by real feedback, so
+            # it is no longer ours to clear.
+            self._link_message_shown = False
 
     def on_arm_requested(self, arm, force):
         link = self._require_link()
@@ -1761,24 +1843,26 @@ class MainWindow(QMainWindow):
 
     def on_connect_requested(self, connection_string):
         if not connection_string:
-            self.command_label.setText(
+            self._show_link_message(
                 "Can't connect: missing or invalid connection details"
             )
             return
         old_link = getattr(self, "link", None)
         if old_link is not None:
             old_link.stop()
-        self.status_label.setText("Connecting...")
-        self.status_label.setStyleSheet("color: orange; font-weight: bold;")
+        self._set_link_status(False, "Connecting...")
+        # Clear the previous attempt's complaint as soon as a new one
+        # starts, rather than leaving it up through "Connecting...".
+        self._clear_link_message()
         self._connect_link(connection_string)
 
     def on_disconnect_requested(self):
         if self.link is not None:
             self.link.stop()
             self.link = None
-        self.status_label.setText("Disconnected")
-        self.status_label.setStyleSheet("color: orange; font-weight: bold;")
+        self._set_link_status(False, "Disconnected by the user")
         self.command_label.setText("")
+        self._link_message_shown = False
         self.ack_label.setText("")
         self._reset_vehicle_state()
 
@@ -1810,10 +1894,16 @@ class MainWindow(QMainWindow):
 
     def _reset_vehicle_state(self):
         """
-        Drop everything that describes a live vehicle, so a disconnected
-        session can't keep presenting the last frame as if it were current.
-        The armed indicator matters most here - left alone it still reads
-        ARMED in red after the link is gone.
+        Clear the indicators that would be actively wrong once the link is
+        gone - the armed state above all, which left alone still reads
+        ARMED in red after the vehicle is out of contact, along with the
+        flight mode, the EKF/Vibe flags and the pre-arm reason.
+
+        The last telemetry frame itself is deliberately left on screen:
+        attitude, speeds, altitude, battery, and the position on the HUD
+        and map. After a link loss - which is when this matters - that
+        frame is the last thing known about the aircraft, and the position
+        in particular is how you go and find it.
         """
         self._armed = False
         self._ready_to_arm = False
@@ -1825,7 +1915,6 @@ class MainWindow(QMainWindow):
         self.mode_panel.set_active_mode(None)
         self.horizon.set_ekf_status("white")
         self.horizon.set_vibe_status("white")
-        self.horizon.set_battery_voltage(None)
         # Stop the terrain radar refreshing off the last known position.
         self.terrain_worker.clear_telemetry()
 
