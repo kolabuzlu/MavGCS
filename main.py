@@ -17,10 +17,10 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.14.0 - per-waypoint altitudes you can edit on the map
-# and send with Update, and a Fly To Lat/Lon button.
-# See CHANGELOG.md.
-APP_VERSION = "V1.14.0"
+# This is MavGCS V1.14.1 - a clearer CONNECTED/DISCONNECTED indicator, the
+# reason the vehicle won't arm, and a message log that stays where you put
+# it. See CHANGELOG.md.
+APP_VERSION = "V1.14.1"
 
 import sys
 import os
