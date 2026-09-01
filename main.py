@@ -2178,6 +2178,14 @@ class MainWindow(QMainWindow):
         self._ready_to_arm = False
         self._update_vehicle_state_label()
         self._set_flight_timer_running(False)
+        # A flight is closed off by the disarm arriving over telemetry. If
+        # the link goes first that never comes, so the accumulator would
+        # stay open and the NEXT flight would be added onto this one - one
+        # report covering two flights, the gap between them counted as
+        # flight time, and the hop between the two locations counted as
+        # distance flown. Discard it instead: without a disarm we do not
+        # know when, or whether, this flight ended.
+        self._flight_stats.reset()
         self._seen_disarmed = False   # nothing known about a link not yet up
         self.arm_panel.set_prearm_reason("")
         self.arm_panel.set_armed_state(None)
