@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.15.0 - Flight summary after landing added.
+## V1.15.0 - Flight statistics added.
 
 ## V1.14.1 - Bug fixes and improvements.
 
