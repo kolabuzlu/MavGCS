@@ -213,37 +213,149 @@ function init() {
 // applying each sample directly makes the view jump in visible steps. The
 // samples are kept as a target and the camera glides towards it every
 // frame instead, which costs no bandwidth at all.
-var pose = null;        // where the camera is now
-var target = null;      // newest telemetry
+var pose = null;        // what the camera is showing
+var posSamples = [];    // position telemetry, oldest first
+var attSamples = [];    // attitude telemetry, oldest first
 var lastFrameMs = 0;
 
 // Never sit exactly on the surface: on the ground AGL is 0, and a camera
 // level with the terrain clips through it.
 var MIN_EYE_M = 1.5;
 
-// Time constant of the glide. Long enough to smooth 250ms-apart samples,
-// short enough that the view isn't noticeably behind the aircraft.
-var SMOOTH_TAU_MS = 120;
+// Position and attitude arrive as SEPARATE MAVLink messages at different
+// rates - typically attitude about twice as often as position. Held in one
+// buffer, every other sample repeated the previous position, so playback
+// stood still and then jumped a whole step. Each stream therefore gets its
+// own timeline and is interpolated over its own intervals.
+//
+// The view is drawn slightly in the PAST, between two samples that have
+// both already arrived, rather than guessing where the aircraft has got to
+// since the last one. Guessing means correcting when the truth lands, and
+// those corrections show up as sudden movements - the more so on a radio
+// link, where packets do not arrive evenly.
+//
+// The cost is latency equal to the delay. For a view you fly by that would
+// matter; for one you watch, smoothness is worth more.
+var DELAY_MIN_MS = 150;
+var DELAY_MAX_MS = 1600;
+var DELAY_FACTOR = 1.6;      // of the average gap between samples
+var avgPosIntervalMs = 350;
+var avgAttIntervalMs = 250;
+var SAMPLE_HISTORY_MS = 6000;
+
+// Rounds the corner where one pair of samples hands over to the next.
+// Straight interpolation is continuous in position but not in direction,
+// which shows as a slight kink each time; this takes it out.
+var SMOOTH_TAU_MS = 60;
+
 // Beyond this the aircraft didn't fly there - it's a reposition, or the
 // first fix after connecting - so snap rather than sail across the map.
 var SNAP_DEG = 0.01;    // roughly a kilometre
+
+function nowMs() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+}
 
 function shortestAngleDelta(from, to) {
     // Via the short way round, so 359 -> 1 turns 2 degrees, not -358.
     return ((to - from + 540) % 360) - 180;
 }
 
-// Position and attitude straight from telemetry. Cesium takes
-// heading/pitch/roll natively, so no rotation maths is needed here.
-function setAircraft(lat, lon, altMsl, agl, yawDeg, pitchDeg, rollDeg) {
-    if (!ready || !viewer) return;
-    target = {lat: lat, lon: lon, alt: altMsl, agl: agl,
-              yaw: yawDeg, pitch: pitchDeg, roll: rollDeg};
-    if (pose === null) {
-        pose = {lat: lat, lon: lon, alt: altMsl, agl: agl,
-                yaw: yawDeg, pitch: pitchDeg, roll: rollDeg};
-        applyPose();
+function lerpAngle(from, to, u) {
+    return from + shortestAngleDelta(from, to) * u;
+}
+
+function pushSample(buffer, sample, t) {
+    sample.t = t;
+    buffer.push(sample);
+    var cutoff = t - SAMPLE_HISTORY_MS;
+    while (buffer.length > 2 && buffer[0].t < cutoff) {
+        buffer.shift();
     }
+}
+
+function updateInterval(buffer, current, t) {
+    if (buffer.length === 0) return current;
+    var gap = t - buffer[buffer.length - 1].t;
+    // Ignore a duplicate arrival and anything after a long silence: neither
+    // says what the normal rate is.
+    if (gap > 20 && gap < 3000) {
+        return current + (gap - current) * 0.2;
+    }
+    return current;
+}
+
+// Straight from GLOBAL_POSITION_INT.
+function setAircraftPosition(lat, lon, altMsl, agl) {
+    if (!ready || !viewer) return;
+    var t = nowMs();
+    avgPosIntervalMs = updateInterval(posSamples, avgPosIntervalMs, t);
+    pushSample(posSamples, {lat: lat, lon: lon, alt: altMsl, agl: agl}, t);
+    initPose();
+}
+
+// Straight from ATTITUDE. Cesium takes heading/pitch/roll natively, so no
+// rotation maths is needed here.
+function setAircraftAttitude(yawDeg, pitchDeg, rollDeg) {
+    if (!ready || !viewer) return;
+    var t = nowMs();
+    avgAttIntervalMs = updateInterval(attSamples, avgAttIntervalMs, t);
+    pushSample(attSamples, {yaw: yawDeg, pitch: pitchDeg, roll: rollDeg}, t);
+    initPose();
+}
+
+function initPose() {
+    if (pose !== null || posSamples.length === 0 || attSamples.length === 0) return;
+    var p = posSamples[posSamples.length - 1];
+    var a = attSamples[attSamples.length - 1];
+    pose = {lat: p.lat, lon: p.lon, alt: p.alt, agl: p.agl,
+            yaw: a.yaw, pitch: a.pitch, roll: a.roll};
+    applyPose();
+}
+
+// One delay for both streams, set by the slower of the two. Delaying them
+// independently would let the aircraft face a direction that belonged to a
+// different moment than its position.
+function playbackDelayMs() {
+    var slowest = Math.max(avgPosIntervalMs, avgAttIntervalMs);
+    return Math.max(DELAY_MIN_MS, Math.min(DELAY_MAX_MS, slowest * DELAY_FACTOR));
+}
+
+// The two samples either side of `renderTime`, blended. Both are real
+// measurements, so nothing here is invented.
+function interpolate(buffer, renderTime, blend) {
+    if (buffer.length === 0) return null;
+    if (buffer.length === 1) return buffer[0];
+    if (renderTime <= buffer[0].t) return buffer[0];
+    var last = buffer[buffer.length - 1];
+    // Telemetry has stalled and playback has caught up with it. Hold on the
+    // newest sample rather than carrying on past it into invention.
+    if (renderTime >= last.t) return last;
+    for (var i = buffer.length - 2; i >= 0; i--) {
+        var a = buffer[i], b = buffer[i + 1];
+        if (renderTime >= a.t && renderTime <= b.t) {
+            var span = b.t - a.t;
+            return blend(a, b, span > 0 ? (renderTime - a.t) / span : 1);
+        }
+    }
+    return last;
+}
+
+function blendPosition(a, b, u) {
+    return {
+        lat: a.lat + (b.lat - a.lat) * u,
+        lon: a.lon + (b.lon - a.lon) * u,
+        alt: a.alt + (b.alt - a.alt) * u,
+        agl: a.agl + (b.agl - a.agl) * u
+    };
+}
+
+function blendAttitude(a, b, u) {
+    return {
+        yaw: lerpAngle(a.yaw, b.yaw, u),
+        pitch: a.pitch + (b.pitch - a.pitch) * u,
+        roll: lerpAngle(a.roll, b.roll, u)
+    };
 }
 
 // The height to hand Cesium, in Cesium's own datum.
@@ -284,25 +396,30 @@ function applyPose() {
     });
 }
 
-// One frame of easing towards the latest telemetry. Exponential, driven by
-// elapsed time rather than a fixed step, so the speed of the glide doesn't
-// change with the frame rate.
+// One frame of playback. Both targets are already moving smoothly, so the
+// easing here only rounds the corner where one pair of samples hands over
+// to the next.
 function stepCamera(dtMs) {
-    if (pose === null || target === null) return;
-    if (Math.abs(target.lat - pose.lat) > SNAP_DEG ||
-        Math.abs(target.lon - pose.lon) > SNAP_DEG) {
-        pose.lat = target.lat; pose.lon = target.lon; pose.alt = target.alt;
-        pose.agl = target.agl;
-        pose.yaw = target.yaw; pose.pitch = target.pitch; pose.roll = target.roll;
+    if (pose === null) return;
+    var renderTime = nowMs() - playbackDelayMs();
+    var wantPos = interpolate(posSamples, renderTime, blendPosition);
+    var wantAtt = interpolate(attSamples, renderTime, blendAttitude);
+    if (wantPos === null || wantAtt === null) return;
+
+    if (Math.abs(wantPos.lat - pose.lat) > SNAP_DEG ||
+        Math.abs(wantPos.lon - pose.lon) > SNAP_DEG) {
+        pose.lat = wantPos.lat; pose.lon = wantPos.lon;
+        pose.alt = wantPos.alt; pose.agl = wantPos.agl;
+        pose.yaw = wantAtt.yaw; pose.pitch = wantAtt.pitch; pose.roll = wantAtt.roll;
     } else {
         var k = 1 - Math.exp(-dtMs / SMOOTH_TAU_MS);
-        pose.lat += (target.lat - pose.lat) * k;
-        pose.lon += (target.lon - pose.lon) * k;
-        pose.alt += (target.alt - pose.alt) * k;
-        pose.agl += (target.agl - pose.agl) * k;
-        pose.pitch += (target.pitch - pose.pitch) * k;
-        pose.yaw += shortestAngleDelta(pose.yaw, target.yaw) * k;
-        pose.roll += shortestAngleDelta(pose.roll, target.roll) * k;
+        pose.lat += (wantPos.lat - pose.lat) * k;
+        pose.lon += (wantPos.lon - pose.lon) * k;
+        pose.alt += (wantPos.alt - pose.alt) * k;
+        pose.agl += (wantPos.agl - pose.agl) * k;
+        pose.pitch += (wantAtt.pitch - pose.pitch) * k;
+        pose.yaw += shortestAngleDelta(pose.yaw, wantAtt.yaw) * k;
+        pose.roll += shortestAngleDelta(pose.roll, wantAtt.roll) * k;
     }
     applyPose();
 }
@@ -363,15 +480,22 @@ class FpvView(QWebEngineView):
         # the page itself are same-origin.
         self.setHtml(html, QUrl(self._origin + "/"))
 
-    def set_aircraft(self, lat: float, lon: float, alt_msl: float, agl: float,
-                     yaw_deg: float, pitch_deg: float, roll_deg: float):
-        # The no-token page defines none of these; calling into it would
-        # just throw in the page console.
+    def set_position(self, lat: float, lon: float, alt_msl: float, agl: float):
+        """One GLOBAL_POSITION_INT. Kept separate from attitude because the
+        two arrive at different rates, and pairing them would repeat
+        whichever was older."""
         if not self._token:
             return
         self.page().runJavaScript(
-            f"setAircraft({lat}, {lon}, {alt_msl}, {agl}, "
-            f"{yaw_deg}, {pitch_deg}, {roll_deg});"
+            f"setAircraftPosition({lat}, {lon}, {alt_msl}, {agl});"
+        )
+
+    def set_attitude(self, yaw_deg: float, pitch_deg: float, roll_deg: float):
+        """One ATTITUDE."""
+        if not self._token:
+            return
+        self.page().runJavaScript(
+            f"setAircraftAttitude({yaw_deg}, {pitch_deg}, {roll_deg});"
         )
 
     def set_hud_image(self, data_uri: str):

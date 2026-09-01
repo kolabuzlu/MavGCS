@@ -1703,7 +1703,7 @@ class MainWindow(QMainWindow):
         self._last_att_deg = (math.degrees(yaw) % 360,
                               math.degrees(pitch), math.degrees(roll))
         if self.view_stack.currentIndex() == 1:
-            self._update_fpv_camera()
+            self._push_fpv_attitude()
             self._push_hud_overlay()
 
     def on_position(self, lat, lon, alt, heading):
@@ -1711,6 +1711,8 @@ class MainWindow(QMainWindow):
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
         self._flight_stats.on_position(lat, lon, alt)
+        if self.view_stack.currentIndex() == 1:
+            self._push_fpv_position()
         self._last_alt = alt
         self._last_lat = lat
         self._last_lon = lon
@@ -1775,20 +1777,34 @@ class MainWindow(QMainWindow):
             "padding: 3px 12px; border-radius: 4px;"
         )
 
-    def _update_fpv_camera(self):
-        """Point the 3D camera where the aircraft is, facing where it faces."""
+    def _push_fpv_position(self):
+        """Hand one position sample to the 3D view.
+
+        Position and attitude are pushed separately, as each arrives, rather
+        than being paired up. They come in different MAVLink messages at
+        different rates, so pairing them repeated whichever was older and
+        made the view step instead of move.
+        """
         if self._last_lat is None or self._last_lon is None:
             self.fpv_view.set_status("Waiting for position...")
             return
         self.fpv_view.set_status("")
-        yaw_deg, pitch_deg, roll_deg = self._last_att_deg
         # Height above ground, which is what the 3D camera is positioned by.
         # TERRAIN_REPORT's is the real thing; height above home is the
         # fallback, and only differs once the ground itself rises or falls.
         agl = self._last_agl if self._last_agl is not None else self._last_alt
-        self.fpv_view.set_aircraft(self._last_lat, self._last_lon,
-                                   self._last_amsl_alt, agl,
-                                   yaw_deg, pitch_deg, roll_deg)
+        self.fpv_view.set_position(self._last_lat, self._last_lon,
+                                   self._last_amsl_alt, agl)
+
+    def _push_fpv_attitude(self):
+        yaw_deg, pitch_deg, roll_deg = self._last_att_deg
+        self.fpv_view.set_attitude(yaw_deg, pitch_deg, roll_deg)
+
+    def _update_fpv_camera(self):
+        """Both channels at once - used when switching into the view, so it
+        has something to show before the next telemetry arrives."""
+        self._push_fpv_position()
+        self._push_fpv_attitude()
 
     def _push_hud_overlay(self):
         """
