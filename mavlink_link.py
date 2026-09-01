@@ -582,6 +582,17 @@ class MavlinkLink(QThread):
                     "agl": f"{msg.current_height:.2f}",
                 })
 
+            elif mtype == "BATTERY_STATUS":
+                # Consumed capacity is the number that actually tells you
+                # how much of the pack you used - voltage sags under load
+                # and recovers, so it is a poor proxy. -1 means the
+                # autopilot has no current sensor, so there is nothing to
+                # report rather than a misleading zero.
+                if getattr(msg, "current_consumed", -1) >= 0:
+                    self.status_update.emit(
+                        {"battery_mah": f"{msg.current_consumed}"}
+                    )
+
             elif mtype == "SYS_STATUS":
                 # MAV_SYS_STATUS_PREARM_CHECK is just another bit in the
                 # sensor present/enabled/health bitmasks - "present" gates

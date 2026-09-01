@@ -17,10 +17,10 @@ Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.
 """
 
-# This is MavGCS V1.14.1 - a clearer CONNECTED/DISCONNECTED indicator, the
-# reason the vehicle won't arm, and a message log that stays where you put
-# it. See CHANGELOG.md.
-APP_VERSION = "V1.14.1"
+# This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
+# time, distance, speeds, altitudes and battery use for the flight just
+# flown. See CHANGELOG.md.
+APP_VERSION = "V1.15.0"
 
 import sys
 import os
@@ -101,6 +101,238 @@ class TelemetryPanel(QFrame):
     def set_value(self, key, value):
         if key in self.labels:
             self.labels[key].setText(str(value))
+
+
+class FlightStats:
+    """Accumulates one flight's numbers, from arming to disarming.
+
+    Totals (time, distance) span the whole armed period. Averages only
+    count samples taken while actually airborne - idling on the ground for
+    two minutes before takeoff would otherwise drag the average airspeed
+    down far enough to be meaningless.
+    """
+
+    # What counts as airborne. Deliberately generous: this only decides
+    # which samples feed the averages, not what gets reported.
+    AIRBORNE_SPEED_MPS = 3.0
+    AIRBORNE_ALT_M = 3.0
+    # Below this a report is not worth showing - an arm/disarm on the bench
+    # is not a flight.
+    MIN_REPORTABLE_S = 30.0
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.start_time = None
+        self.end_time = None
+        self.partial = False        # we joined after takeoff
+        self.ever_airborne = False
+        self._air_samples = 0
+        self._ias_sum = 0.0
+        self._gs_sum = 0.0
+        self.ias_max = 0.0
+        self.gs_max = 0.0
+        self.alt_max = 0.0          # relative to home
+        self.amsl_max = None
+        self.dist_home_max = 0.0
+        self.climb_max = 0.0
+        self.sink_max = 0.0         # most negative climb, stored positive
+        self.wind_max = 0.0
+        self.volt_start = None
+        self.volt_end = None
+        self.volt_min = None
+        self.mah_start = None
+        self.mah_end = None
+        self.distance_m = 0.0
+        self._last_pos = None
+        self._alt = 0.0
+        self._gs = 0.0
+
+    # ---- lifecycle ------------------------------------------------------
+    def start(self, partial: bool):
+        self.reset()
+        self.start_time = time.monotonic()
+        self.partial = partial
+
+    def finish(self):
+        self.end_time = time.monotonic()
+
+    @property
+    def duration_s(self) -> float:
+        if self.start_time is None:
+            return 0.0
+        end = self.end_time if self.end_time is not None else time.monotonic()
+        return end - self.start_time
+
+    @property
+    def running(self) -> bool:
+        return self.start_time is not None and self.end_time is None
+
+    def worth_reporting(self) -> bool:
+        return self.ever_airborne and self.duration_s >= self.MIN_REPORTABLE_S
+
+    @property
+    def _airborne(self) -> bool:
+        return self._gs >= self.AIRBORNE_SPEED_MPS or self._alt >= self.AIRBORNE_ALT_M
+
+    # ---- sample feeds ---------------------------------------------------
+    def on_vfr(self, airspeed, groundspeed, climb):
+        if not self.running:
+            return
+        self._gs = groundspeed
+        if self._airborne:
+            self.ever_airborne = True
+            self._air_samples += 1
+            self._ias_sum += airspeed
+            self._gs_sum += groundspeed
+            self.ias_max = max(self.ias_max, airspeed)
+            self.gs_max = max(self.gs_max, groundspeed)
+            self.climb_max = max(self.climb_max, climb)
+            self.sink_max = max(self.sink_max, -climb)
+
+    def on_position(self, lat, lon, alt_relative):
+        if not self.running:
+            return
+        self._alt = alt_relative
+        self.alt_max = max(self.alt_max, alt_relative)
+        # Ground track, summed between fixes. More honest than integrating
+        # groundspeed, which drifts whenever telemetry stutters.
+        if self._last_pos is not None:
+            self.distance_m += self._haversine_m(
+                self._last_pos[0], self._last_pos[1], lat, lon
+            )
+        self._last_pos = (lat, lon)
+
+    def on_wind(self, speed_mps):
+        if self.running:
+            self.wind_max = max(self.wind_max, speed_mps)
+
+    def on_status(self, status):
+        if not self.running:
+            return
+        if "amsl_alt" in status:
+            try:
+                amsl = float(status["amsl_alt"])
+                self.amsl_max = amsl if self.amsl_max is None else max(self.amsl_max, amsl)
+            except ValueError:
+                pass
+        if "dist_home" in status:
+            try:
+                self.dist_home_max = max(self.dist_home_max, float(status["dist_home"]))
+            except ValueError:
+                pass
+        if "battery_voltage" in status:
+            try:
+                volts = float(status["battery_voltage"])   # "--" raises
+            except ValueError:
+                volts = None
+            if volts is not None:
+                if self.volt_start is None:
+                    self.volt_start = volts
+                self.volt_end = volts
+                self.volt_min = volts if self.volt_min is None else min(self.volt_min, volts)
+        if "battery_mah" in status:
+            try:
+                mah = float(status["battery_mah"])
+            except ValueError:
+                mah = None
+            if mah is not None:
+                if self.mah_start is None:
+                    self.mah_start = mah
+                self.mah_end = mah
+
+    @staticmethod
+    def _haversine_m(lat1, lon1, lat2, lon2):
+        r = 6371000.0
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(a))
+
+    # ---- output ---------------------------------------------------------
+    def rows(self):
+        """(label, value) pairs for the report, already formatted."""
+        def hms(seconds):
+            h, rem = divmod(int(seconds), 3600)
+            m, sec = divmod(rem, 60)
+            return "%02d:%02d:%02d" % (h, m, sec)
+
+        avg_ias = self._ias_sum / self._air_samples if self._air_samples else 0.0
+        avg_gs = self._gs_sum / self._air_samples if self._air_samples else 0.0
+        out = [
+            ("Flight time", hms(self.duration_s) + (" +" if self.partial else "")),
+            ("Distance flown", f"{self.distance_m / 1000.0:.2f} km"),
+            ("Max distance from home", f"{self.dist_home_max:.0f} m"),
+            ("Average airspeed", f"{avg_ias:.1f} m/s"),
+            ("Max airspeed", f"{self.ias_max:.1f} m/s"),
+            ("Average groundspeed", f"{avg_gs:.1f} m/s"),
+            ("Max groundspeed", f"{self.gs_max:.1f} m/s"),
+            ("Max altitude (above home)", f"{self.alt_max:.0f} m"),
+        ]
+        if self.amsl_max is not None:
+            out.append(("Max altitude (AMSL)", f"{self.amsl_max:.0f} m"))
+        out += [
+            ("Max climb rate", f"{self.climb_max:.1f} m/s"),
+            ("Max descent rate", f"{self.sink_max:.1f} m/s"),
+            ("Max wind", f"{self.wind_max * 3.6:.1f} kph"),
+        ]
+        if self.volt_start is not None:
+            out.append(("Battery start / end",
+                        f"{self.volt_start:.2f} V / {self.volt_end:.2f} V"))
+            out.append(("Battery lowest", f"{self.volt_min:.2f} V"))
+        if self.mah_start is not None and self.mah_end is not None:
+            out.append(("Consumed", f"{self.mah_end - self.mah_start:.0f} mAh"))
+        return out
+
+    def as_text(self) -> str:
+        rows = self.rows()
+        width = max(len(label) for label, _ in rows)
+        lines = [f"{label.ljust(width)}  {value}" for label, value in rows]
+        return chr(10).join(lines)
+
+
+class FlightSummaryDialog(QDialog):
+    """The post-flight report, shown once the vehicle disarms."""
+
+    def __init__(self, stats, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Flight Summary")
+        self._stats = stats
+        layout = QVBoxLayout(self)
+
+        if stats.partial:
+            note = QLabel(
+                "Connected after this flight began - these figures cover "
+                "only the part seen by this GCS."
+            )
+            note.setStyleSheet("color: #e6a23c; font-size: 10px;")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(3)
+        for row, (label, value) in enumerate(stats.rows()):
+            name = QLabel(label)
+            name.setStyleSheet("color: #b8bcc2;")
+            val = QLabel(value)
+            val.setStyleSheet("color: white; font-weight: bold;")
+            val.setAlignment(Qt.AlignRight)
+            grid.addWidget(name, row, 0)
+            grid.addWidget(val, row, 1)
+        layout.addLayout(grid)
+
+        buttons = QDialogButtonBox()
+        copy_btn = buttons.addButton("Copy", QDialogButtonBox.ActionRole)
+        buttons.addButton(QDialogButtonBox.Close)
+        copy_btn.clicked.connect(self._copy)
+        buttons.rejected.connect(self.accept)
+        layout.addWidget(buttons)
+
+    def _copy(self):
+        QApplication.clipboard().setText(self._stats.as_text())
 
 
 class FlyToDialog(QDialog):
@@ -1106,6 +1338,8 @@ class MainWindow(QMainWindow):
         # Counts up while armed, back to zero on disarm. Monotonic rather
         # than wall-clock so it can't jump if the system clock is corrected.
         self._flight_start = None
+        # Accumulates the numbers reported after landing.
+        self._flight_stats = FlightStats()
         # Whether this link has ever reported the vehicle DISARMED. If it
         # hasn't by the time we first see it armed, we joined an aircraft
         # that was already flying and the clock can only be a lower bound.
@@ -1305,6 +1539,7 @@ class MainWindow(QMainWindow):
         self.horizon.set_altitude(alt)
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
+        self._flight_stats.on_position(lat, lon, alt)
         self._last_alt = alt
         self._last_lat = lat
         self._last_lon = lon
@@ -1478,9 +1713,11 @@ class MainWindow(QMainWindow):
         self.horizon.set_airspeed(airspeed)
         self._last_groundspeed = groundspeed
         self._last_climb = climb
+        self._flight_stats.on_vfr(airspeed, groundspeed, climb)
 
     def on_wind(self, direction, speed):
         self.horizon.set_wind(direction, speed)
+        self._flight_stats.on_wind(speed)
         # direction from atan2-based math (WIND_COV path) can come out
         # negative before wrapping - the HUD widget wraps it internally
         # (self.wind_dir = direction_deg % 360), but this text field was
@@ -1528,6 +1765,7 @@ class MainWindow(QMainWindow):
     def on_status(self, status_dict):
         for key, value in status_dict.items():
             self.telemetry.set_value(key, value)
+        self._flight_stats.on_status(status_dict)
         if "mode" in status_dict:
             self.mode_panel.set_active_mode(status_dict["mode"])
         if "armed" in status_dict:
@@ -1538,6 +1776,13 @@ class MainWindow(QMainWindow):
             self._set_flight_timer_running(armed)
             if armed:
                 self.arm_panel.set_prearm_reason("")
+                if not self._flight_stats.running:
+                    # Same test the flight timer uses: if this link never saw
+                    # the vehicle disarmed, we joined a flight already under
+                    # way and the figures cover only part of it.
+                    self._flight_stats.start(partial=not self._seen_disarmed)
+            elif self._flight_stats.running:
+                self._finish_flight()
         if "ekf_color" in status_dict:
             self.horizon.set_ekf_status(status_dict["ekf_color"])
         if "vibe_color" in status_dict:
@@ -1689,6 +1934,16 @@ class MainWindow(QMainWindow):
         lat, lon, alt = dialog.values()
         self.map_view.show_target(lat, lon)
         link.fly_to(lat, lon, alt)
+
+    def _finish_flight(self):
+        """Close the flight off and show its report.
+
+        Nothing is shown for a brief arm/disarm that never left the ground -
+        a bench test is not a flight, and a dialog for one would be noise.
+        """
+        self._flight_stats.finish()
+        if self._flight_stats.worth_reporting():
+            FlightSummaryDialog(self._flight_stats, self).exec()
 
     def on_status_text(self, text, severity):
         """Surface the reason the vehicle won't arm.
