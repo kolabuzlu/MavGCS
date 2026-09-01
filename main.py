@@ -893,15 +893,29 @@ class MessagesPanel(QGroupBox):
         self.setMinimumHeight(130)
         self.setMaximumHeight(170)
 
+    # How close to the bottom still counts as "following". A few pixels of
+    # slack, because the scrollbar rarely sits exactly on maximum().
+    FOLLOW_SLACK_PX = 4
+
     def add_message(self, text, severity):
+        scrollbar = self.text_edit.verticalScrollBar()
+        # Decide BEFORE appending. Afterwards maximum() has already grown by
+        # the new line, so "were we at the bottom?" can no longer be asked.
+        following = scrollbar.value() >= scrollbar.maximum() - self.FOLLOW_SLACK_PX
+
         color = self.SEVERITY_COLORS.get(severity, "#cfd2d6")
         timestamp = datetime.now().strftime("%H:%M:%S")
         safe_text = html.escape(text)
         self.text_edit.appendHtml(
             f'<span style="color:{color};">{timestamp} : {safe_text}</span>'
         )
-        scrollbar = self.text_edit.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+
+        # Follow the tail only if the reader was already at it. Scrolling
+        # back to read something and being dragged to the bottom by the next
+        # routine message made the log unreadable exactly when it mattered -
+        # and made selecting text to copy impossible.
+        if following:
+            scrollbar.setValue(scrollbar.maximum())
 
 
 class GuidedControlPanel(QGroupBox):
