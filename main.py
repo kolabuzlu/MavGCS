@@ -103,6 +103,12 @@ class TelemetryPanel(QFrame):
             self.labels[key].setText(str(value))
 
 
+def _hms(seconds) -> str:
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    return "%02d:%02d:%02d" % (hours, minutes, secs)
+
+
 class FlightStats:
     """Accumulates one flight's numbers, from arming to disarming.
 
@@ -145,6 +151,10 @@ class FlightStats:
         self.mah_start = None
         self.mah_end = None
         self.distance_m = 0.0
+        # Seconds of this flight that nobody recorded, because the link was
+        # down. Only ever non-zero on a merged view.
+        self.unrecorded_s = 0.0
+        self.suspended = False
         self._last_pos = None
         self._alt = 0.0
         self._gs = 0.0
@@ -157,6 +167,109 @@ class FlightStats:
 
     def finish(self):
         self.end_time = time.monotonic()
+
+    def suspend(self):
+        """The link went while still armed.
+
+        Stop accumulating, but keep everything: the aircraft may well still
+        be flying the same sortie, and if it turns out to be the same one we
+        do not want to have thrown this away. Whether it IS the same flight
+        is not decided here.
+        """
+        self.end_time = time.monotonic()
+        self.suspended = True
+
+    # Beyond this, an earlier segment is not plausibly the same flight and
+    # is not offered for merging at all.
+    MERGE_WINDOW_S = 30 * 60
+
+    def mergeable_earlier(self, segments):
+        """The run of earlier segments that plausibly belong to this flight.
+
+        Walks backwards from this flight: each segment must end before the
+        next one starts, separated by a gap short enough to be a dropout
+        rather than a separate sortie. A marginal radio link does not fail
+        once cleanly - it stutters repeatedly - so this has to chain any
+        number of them, not just the most recent.
+
+        Deliberately only a plausibility test, not a verdict. Nothing in the
+        protocol distinguishes a dropout from a landing and a relaunch, so
+        the software does not decide; it offers, with the numbers on screen.
+
+        Returns oldest first. Empty if this flight never left the ground -
+        an arm/disarm on the bench is not the continuation of anything - or
+        if this GCS watched the vehicle sitting disarmed before this flight
+        began, which is proof that whatever came earlier had already ended.
+        That case is an observation rather than a guess, so it is settled
+        here rather than being put to the user.
+        """
+        if not self.ever_airborne or self.start_time is None:
+            return []
+        if not self.partial:
+            # partial is set only when we rejoined an aircraft that was
+            # already armed. A flight that began after we saw it disarmed
+            # cannot be the continuation of anything.
+            return []
+        candidates = [
+            seg for seg in segments
+            if seg.suspended and seg.ever_airborne
+            and seg.start_time is not None and seg.end_time is not None
+        ]
+        chain = []
+        next_start = self.start_time
+        for seg in sorted(candidates, key=lambda x: x.start_time, reverse=True):
+            gap = next_start - seg.end_time
+            if not 0 <= gap <= self.MERGE_WINDOW_S:
+                break
+            chain.append(seg)
+            next_start = seg.start_time
+        return list(reversed(chain))
+
+    def merged_with(self, earlier_segments):
+        """A combined view of earlier segments and this one, oldest first.
+
+        Time spans the first arming to this disarming, gaps included: the
+        aircraft really was flying throughout. Distance and the maxima cover
+        only what was recorded, so the unrecorded time is reported on its
+        own line rather than quietly folded in - and the straight lines
+        across the gaps are NOT counted as distance flown, because nobody
+        measured those paths.
+        """
+        parts = list(earlier_segments) + [self]
+        first = parts[0]
+        m = FlightStats()
+        m.start_time = first.start_time
+        m.end_time = self.end_time
+        m.partial = first.partial
+        m.ever_airborne = True
+        m.unrecorded_s = max(
+            0.0, (m.end_time - m.start_time) - sum(p.duration_s for p in parts)
+        )
+        for p in parts:
+            m._air_samples += p._air_samples
+            m._ias_sum += p._ias_sum
+            m._gs_sum += p._gs_sum
+            m.ias_max = max(m.ias_max, p.ias_max)
+            m.gs_max = max(m.gs_max, p.gs_max)
+            m.alt_max = max(m.alt_max, p.alt_max)
+            m.dist_home_max = max(m.dist_home_max, p.dist_home_max)
+            m.climb_max = max(m.climb_max, p.climb_max)
+            m.sink_max = max(m.sink_max, p.sink_max)
+            m.wind_max = max(m.wind_max, p.wind_max)
+            m.distance_m += p.distance_m
+            if p.amsl_max is not None:
+                m.amsl_max = p.amsl_max if m.amsl_max is None else max(m.amsl_max, p.amsl_max)
+            if p.volt_start is not None and m.volt_start is None:
+                m.volt_start = p.volt_start
+            if p.volt_end is not None:
+                m.volt_end = p.volt_end
+            if p.volt_min is not None:
+                m.volt_min = p.volt_min if m.volt_min is None else min(m.volt_min, p.volt_min)
+            if p.mah_start is not None and m.mah_start is None:
+                m.mah_start = p.mah_start
+            if p.mah_end is not None:
+                m.mah_end = p.mah_end
+        return m
 
     @property
     def duration_s(self) -> float:
@@ -254,15 +367,15 @@ class FlightStats:
     # ---- output ---------------------------------------------------------
     def rows(self):
         """(label, value) pairs for the report, already formatted."""
-        def hms(seconds):
-            h, rem = divmod(int(seconds), 3600)
-            m, sec = divmod(rem, 60)
-            return "%02d:%02d:%02d" % (h, m, sec)
-
+        hms = _hms
         avg_ias = self._ias_sum / self._air_samples if self._air_samples else 0.0
         avg_gs = self._gs_sum / self._air_samples if self._air_samples else 0.0
         out = [
             ("Flight time", hms(self.duration_s) + (" +" if self.partial else "")),
+        ]
+        if self.unrecorded_s > 0:
+            out.append(("  of which not recorded", hms(self.unrecorded_s)))
+        out += [
             ("Distance flown", f"{self.distance_m / 1000.0:.2f} km"),
             ("Max distance from home", f"{self.dist_home_max:.0f} m"),
             ("Average airspeed", f"{avg_ias:.1f} m/s"),
@@ -294,12 +407,20 @@ class FlightStats:
 
 
 class FlightSummaryDialog(QDialog):
-    """The post-flight report, shown once the vehicle disarms."""
+    """The post-flight report, shown once the vehicle disarms.
 
-    def __init__(self, stats, parent=None):
+    If the link dropped earlier in the same session while the aircraft was
+    armed, that segment is offered here rather than merged automatically.
+    Nothing can distinguish a dropout from a landing and a relaunch, so the
+    decision is left to the person who was there - made at the end, with
+    both sets of numbers visible, rather than as a guess at reconnect time.
+    """
+
+    def __init__(self, stats, earlier=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Flight Summary")
         self._stats = stats
+        self._earlier = list(earlier or [])
         layout = QVBoxLayout(self)
 
         if stats.partial:
@@ -311,18 +432,39 @@ class FlightSummaryDialog(QDialog):
             note.setWordWrap(True)
             layout.addWidget(note)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(3)
-        for row, (label, value) in enumerate(stats.rows()):
-            name = QLabel(label)
-            name.setStyleSheet("color: #b8bcc2;")
-            val = QLabel(value)
-            val.setStyleSheet("color: white; font-weight: bold;")
-            val.setAlignment(Qt.AlignRight)
-            grid.addWidget(name, row, 0)
-            grid.addWidget(val, row, 1)
-        layout.addLayout(grid)
+        self._merge_box = None
+        if self._earlier:
+            preview = stats.merged_with(self._earlier)
+            recorded = sum(seg.duration_s for seg in self._earlier)
+            if len(self._earlier) == 1:
+                text = (f"Include the {_hms(recorded)} recorded before the link "
+                        f"dropped ({_hms(preview.unrecorded_s)} unrecorded)")
+            else:
+                text = (f"Include the {len(self._earlier)} earlier segments "
+                        f"({_hms(recorded)} recorded, "
+                        f"{_hms(preview.unrecorded_s)} unrecorded)")
+            self._merge_box = QCheckBox(text)
+            # Ticked by default only when this segment alone would not have
+            # been worth reporting - which is the only reason the dialog is
+            # on screen at all. Opening on a view we had already judged too
+            # short to show would be incoherent. Where both segments stand
+            # on their own it stays clear, so merging remains deliberate.
+            self._merge_box.setChecked(not stats.worth_reporting())
+            self._merge_box.setToolTip(
+                "Tick this if the aircraft stayed airborne through the "
+                "dropout, so both segments are one flight. Leave it clear if "
+                "it landed and took off again."
+            )
+            self._merge_box.setStyleSheet("font-size: 10px;")
+            self._merge_box.toggled.connect(self._rebuild)
+            layout.addWidget(self._merge_box)
+
+        self._rows_host = QWidget()
+        self._rows_layout = QGridLayout(self._rows_host)
+        self._rows_layout.setHorizontalSpacing(18)
+        self._rows_layout.setVerticalSpacing(3)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._rows_host)
 
         buttons = QDialogButtonBox()
         copy_btn = buttons.addButton("Copy", QDialogButtonBox.ActionRole)
@@ -331,8 +473,32 @@ class FlightSummaryDialog(QDialog):
         buttons.rejected.connect(self.accept)
         layout.addWidget(buttons)
 
+        self._rebuild()
+
+    def current_stats(self):
+        """What is on screen: this flight, or both segments together."""
+        if self._merge_box is not None and self._merge_box.isChecked():
+            return self._stats.merged_with(self._earlier)
+        return self._stats
+
+    def _rebuild(self):
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for row, (label, value) in enumerate(self.current_stats().rows()):
+            name = QLabel(label)
+            name.setStyleSheet("color: #b8bcc2;")
+            val = QLabel(value)
+            val.setStyleSheet("color: white; font-weight: bold;")
+            val.setAlignment(Qt.AlignRight)
+            self._rows_layout.addWidget(name, row, 0)
+            self._rows_layout.addWidget(val, row, 1)
+        self.adjustSize()
+
     def _copy(self):
-        QApplication.clipboard().setText(self._stats.as_text())
+        QApplication.clipboard().setText(self.current_stats().as_text())
 
 
 class FlyToDialog(QDialog):
@@ -1340,6 +1506,11 @@ class MainWindow(QMainWindow):
         self._flight_start = None
         # Accumulates the numbers reported after landing.
         self._flight_stats = FlightStats()
+        # Flights whose link died before they could be closed off, oldest
+        # first. A marginal radio drops repeatedly rather than once, so this
+        # is a list: keeping only the most recent would silently discard the
+        # earliest part of a stuttering flight.
+        self._suspended_flights = []
         # Whether this link has ever reported the vehicle DISARMED. If it
         # hasn't by the time we first see it armed, we joined an aircraft
         # that was already flying and the clock can only be a lower bound.
@@ -1942,8 +2113,22 @@ class MainWindow(QMainWindow):
         a bench test is not a flight, and a dialog for one would be noise.
         """
         self._flight_stats.finish()
-        if self._flight_stats.worth_reporting():
-            FlightSummaryDialog(self._flight_stats, self).exec()
+        earlier = self._flight_stats.mergeable_earlier(self._suspended_flights)
+        # Judged on the whole flight, not just the piece we were connected
+        # for. Reconnecting on short final and landing twenty seconds later
+        # would otherwise throw away the quarter of an hour before it.
+        whole = (self._flight_stats.merged_with(earlier) if earlier
+                 else self._flight_stats)
+        if not whole.worth_reporting():
+            # An arm/disarm that never left the ground is not a flight, and
+            # is not the continuation of one either. Any suspended segments
+            # are left alone: a bench test between sorties should not
+            # silently discard them.
+            return
+        FlightSummaryDialog(self._flight_stats, earlier, self).exec()
+        # Offered once. Keeping them would let them resurface against an
+        # unrelated flight later in the session.
+        self._suspended_flights = []
 
     def on_status_text(self, text, severity):
         """Surface the reason the vehicle won't arm.
@@ -2179,13 +2364,23 @@ class MainWindow(QMainWindow):
         self._update_vehicle_state_label()
         self._set_flight_timer_running(False)
         # A flight is closed off by the disarm arriving over telemetry. If
-        # the link goes first that never comes, so the accumulator would
-        # stay open and the NEXT flight would be added onto this one - one
-        # report covering two flights, the gap between them counted as
-        # flight time, and the hop between the two locations counted as
-        # distance flown. Discard it instead: without a disarm we do not
-        # know when, or whether, this flight ended.
-        self._flight_stats.reset()
+        # the link goes first that never comes, so the accumulator must not
+        # simply stay open - the NEXT flight would be added onto this one,
+        # counting the gap between them as flight time and the hop between
+        # two locations as distance flown.
+        #
+        # It is not thrown away either. The aircraft may still be flying the
+        # same sortie, in which case these figures are half of it. It is set
+        # aside, and the next landing offers to include it.
+        if self._flight_stats.running:
+            self._flight_stats.suspend()
+            self._suspended_flights.append(self._flight_stats)
+            self._flight_stats = FlightStats()
+            # Anything too old to be part of a current flight is just memory.
+            cutoff = time.monotonic() - FlightStats.MERGE_WINDOW_S
+            self._suspended_flights = [
+                seg for seg in self._suspended_flights if seg.end_time >= cutoff
+            ]
         self._seen_disarmed = False   # nothing known about a link not yet up
         self.arm_panel.set_prearm_reason("")
         self.arm_panel.set_armed_state(None)
