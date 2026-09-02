@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V1.17.0 - Check for updates added.
+Bug fixes and improvements.
+
 ## V1.16.0 - Heading indicator and vectors added.
 Bug fixes and improvements.
 
