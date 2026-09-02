@@ -331,27 +331,29 @@ LEAFLET_HTML = """
        corner rather than two competing labels. */
     position: absolute; bottom: 40px; left: 8px;
     background: rgba(0,0,0,0.6);
-    padding: 5px 8px 3px 8px; border-radius: 4px;
+    padding: 4px 7px 3px 7px; border-radius: 4px;
     font-family: sans-serif;
     z-index: 1000; pointer-events: none; display: none;
 ">
-    <svg id="cog-svg" width="158" height="44" viewBox="0 0 158 44">
+    <!-- Drawn in a 158x44 space but rendered at 90% of it: the viewBox
+         keeps every coordinate below, and the marker's travel, honest. -->
+    <svg id="cog-svg" width="142.2" height="39.6" viewBox="0 0 158 44">
         <!-- Plan view, nose to the left, so fore and aft run the way the
              marker slides. Drawn once; only the marker moves. -->
         <g id="cog-plane" fill="#8f9aa3">
             <!-- Blunt nose at the left, tapering to a point at the tail.
                  Which end is the nose IS the meaning here, so the two ends
                  must never look alike. -->
-            <path d="M12,22 Q12,15.5 34,15.5 L118,18.5 L140,22 L118,25.5
-                     L34,28.5 Q12,28.5 12,22 Z"/>
+            <path d="M17.8,22 Q17.8,15.5 37.6,15.5 L113.2,18.5 L133,22
+                     L113.2,25.5 L37.6,28.5 Q17.8,28.5 17.8,22 Z"/>
             <!-- Main wing, swept back, centred on the neutral line. -->
-            <path d="M56,17 L84,17 L94,2 L78,2 Z"/>
-            <path d="M56,27 L84,27 L94,42 L78,42 Z"/>
+            <path d="M57.4,17 L82.6,17 L91.6,2 L77.2,2 Z"/>
+            <path d="M57.4,27 L82.6,27 L91.6,42 L77.2,42 Z"/>
             <!-- Tailplane: clearly the smaller pair, and well aft. -->
-            <path d="M112,19 L126,19 L132,10 L122,10 Z"/>
-            <path d="M112,25 L126,25 L132,34 L122,34 Z"/>
+            <path d="M107.8,19 L120.4,19 L125.8,10 L116.8,10 Z"/>
+            <path d="M107.8,25 L120.4,25 L125.8,34 L116.8,34 Z"/>
             <!-- The fin, edge on from above - a last cue for the tail. -->
-            <path d="M106,20.4 L138,21.5 L138,22.5 L106,23.6 Z"
+            <path d="M102.4,20.4 L131.2,21.5 L131.2,22.5 L102.4,23.6 Z"
                   fill="#c3ced6"/>
         </g>
         <!-- Where a balanced aircraft would sit, so the marker has
@@ -368,7 +370,7 @@ LEAFLET_HTML = """
             <path d="M70,28.5 A6.5,6.5 0 0,1 63.5,22 L70,22 Z" fill="#111"/>
         </g>
     </svg>
-    <div id="cog-label" style="font-size: 11px; color: #cfd8e0;
+    <div id="cog-label" style="font-size: 10px; color: #cfd8e0;
          text-align: center; margin-top: 1px;"></div>
 </div>
 <div id="credit" style="
