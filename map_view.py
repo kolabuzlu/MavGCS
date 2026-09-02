@@ -1087,6 +1087,20 @@ function _animateMarker(now) {
 }
 requestAnimationFrame(_animateMarker);
 
+// Dragging the map is the user asking to look somewhere else, and
+// following would spend every frame tugging it back. So following steps
+// aside the moment a drag begins, and the checkbox unticks to say so -
+// rather than the map appearing to fight, or to ignore, the mouse.
+//
+// Deliberately 'dragstart' and not 'movestart': the latter also fires for
+// the panTo this very feature performs while following, which would
+// switch itself off on the first frame.
+map.on('dragstart', function () {
+    if (followDrone) {
+        setFollow(false);
+    }
+});
+
 function setFollow(v) {
     followDrone = v;
     var cb = document.getElementById('follow-checkbox');
