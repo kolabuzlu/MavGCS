@@ -331,13 +331,14 @@ LEAFLET_HTML = """
        corner rather than two competing labels. */
     position: absolute; bottom: 40px; left: 8px;
     background: rgba(0,0,0,0.6);
-    padding: 4px 7px 3px 7px; border-radius: 4px;
+    padding: 4px 6px 3px 6px; border-radius: 4px;
     font-family: sans-serif;
     z-index: 1000; pointer-events: none; display: none;
 ">
-    <!-- Drawn in a 158x44 space but rendered at 90% of it: the viewBox
-         keeps every coordinate below, and the marker's travel, honest. -->
-    <svg id="cog-svg" width="142.2" height="39.6" viewBox="0 0 158 44">
+    <!-- Rendered at 90% of the space it is drawn in, and cropped to the
+         aeroplane: the coordinates below, and the marker's travel, stay
+         as written while the black behind them stops at the wingtips. -->
+    <svg id="cog-svg" width="108" height="39.6" viewBox="16 0 120 44">
         <!-- Plan view, nose to the left, so fore and aft run the way the
              marker slides. Drawn once; only the marker moves. -->
         <g id="cog-plane" fill="#8f9aa3">

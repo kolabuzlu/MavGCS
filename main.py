@@ -406,12 +406,12 @@ class FlightStats:
         """
         samples = self.balance_samples
         if not samples:
-            return ("waiting", "waiting for level cruise", 0.0)
+            return ("waiting", "Waiting for level cruise", 0.0)
         span = samples[-1][0] - samples[0][0]
         verdict = self.balance_verdict()
         if verdict is None:
             return ("sampling",
-                    f"sampling {span:.0f}/{self.BALANCE_MIN_SPAN_S:.0f}s", 0.0)
+                    f"Sampling {span:.0f}/{self.BALANCE_MIN_SPAN_S:.0f}s", 0.0)
         headline, _ = verdict
         mean = sum(v for _, v in samples) / len(samples)
         # Positive means up elevator is being held, which is nose heavy, so
