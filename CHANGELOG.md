@@ -1,5 +1,11 @@
 # MavGCS Changelog
 
+## V1.16.0 - Map vectors and compass rose added.
+Heading, ground track, bearing to waypoint and turn prediction drawn on
+the map; new compass instrument showing heading, course, drift, wind and
+the direction home. 3D FPV instrument overlay now matches the view.
+Bug fixes and improvements.
+
 ## V1.15.0 - Flight statistics added.
 Bug fixes and improvements.
 
