@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V1.17.1 - Bug fixes and improvements.
+
 ## V1.17.0 - Check for updates added.
 Bug fixes and improvements.
 

@@ -20,7 +20,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V1.17.0"
+APP_VERSION = "V1.17.1"
 
 import sys
 import os
@@ -1269,7 +1269,9 @@ class ConnectionPanel(QGroupBox):
 
     def __init__(self, default_protocol="TCP", default_host="127.0.0.1", default_port="5762", parent=None):
         super().__init__("Connection", parent)
-        self.setMaximumWidth(380)
+        # No width cap: this sits directly above the mission panel, which has
+        # none, so capping this one left the two group frames ending at
+        # different places down the right-hand edge.
         self.setStyleSheet("""
             QGroupBox { font-size: 10px; font-weight: bold; margin-top: 6px; padding-top: 4px; }
             QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }
@@ -1282,11 +1284,8 @@ class ConnectionPanel(QGroupBox):
         row.setSpacing(3)
         refresh_row = QHBoxLayout()
         refresh_row.setSpacing(3)
-        update_row = QHBoxLayout()
-        update_row.setSpacing(3)
         outer.addLayout(row)
         outer.addLayout(refresh_row)
-        outer.addLayout(update_row)
         outer.addStretch(1)  # keep the rows pinned to the top, don't stretch vertically
 
         # Nothing to do with connecting to a vehicle, but this is the one
@@ -1296,8 +1295,7 @@ class ConnectionPanel(QGroupBox):
         self.update_btn.setFixedHeight(self.FIELD_HEIGHT)
         self.update_btn.setStyleSheet(self.UPDATE_STYLE)
         self.update_btn.clicked.connect(self.update_requested)
-        update_row.addStretch(1)
-        update_row.addWidget(self.update_btn)
+
 
         self.protocol_combo = QComboBox()
         self.protocol_combo.addItems(self.PROTOCOLS)
@@ -1357,6 +1355,10 @@ class ConnectionPanel(QGroupBox):
         row.addWidget(self.field2_stack)      # stretch, so the row ends flush)
         refresh_row.addWidget(self.refresh_btn)
         refresh_row.addStretch(1)
+        # Shares the button row rather than taking one of its own: a row to
+        # itself cost the map 27px of height for a control used once in a
+        # while, and there is width to spare here.
+        refresh_row.addWidget(self.update_btn)
         refresh_row.addWidget(self.connect_btn)
         refresh_row.addWidget(self.disconnect_btn)
 
@@ -1491,8 +1493,16 @@ class MessagesPanel(QGroupBox):
         )
         layout.addWidget(self.text_edit)
 
+        # This sits beside the connection and mission panels. Its height is
+        # deliberately NOT its own business: an explicit ceiling left it
+        # stopping short of them whenever they grew, and letting its own
+        # preferred height win made the whole row taller than the panels
+        # needed, wasting space the map could have had. Ignoring the
+        # vertical hint hands the decision to the stack beside it - this
+        # then fills exactly that, no more.
         self.setMinimumHeight(130)
-        self.setMaximumHeight(170)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Ignored)
 
     # How close to the bottom still counts as "following". A few pixels of
     # slack, because the scrollbar rarely sits exactly on maximum().
