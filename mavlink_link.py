@@ -129,7 +129,44 @@ class MavlinkLink(QThread):
     # Where home actually is, for the map marker.
     home_position_update = Signal(float, float)  # lat, lon
 
-    def __init__(self, connection_string="udpin:0.0.0.0:14550", parent=None):
+    # What to ask for, in Hz, for everything the app actually displays.
+    # ATTITUDE and GLOBAL_POSITION_INT are left out because the user sets
+    # those two: they dominate the budget and they are what the 3D view
+    # rides on.
+    #
+    # Anything NOT listed here and not in DISABLED_MESSAGES keeps whatever
+    # rate the vehicle chose. The lists are derived from the message types
+    # handled in _handle_message() - if you start consuming a new message,
+    # add it here, and check it is not in the disable list below.
+    SUPPORTING_RATES = {
+        "VFR_HUD": 2.0,                 # airspeed, altitude, climb
+        "SYS_STATUS": 1.0,              # battery voltage, sensor health
+        "GPS_RAW_INT": 1.0,             # satellite count, HDOP
+        "NAV_CONTROLLER_OUTPUT": 2.0,   # wp distance and the map's bearings
+        "WIND": 1.0,                    # compass wind arrow
+        "TERRAIN_REPORT": 1.0,          # terrain altitude, and the FPV camera height
+        "BATTERY_STATUS": 0.5,          # consumed mAh
+        "EKF_STATUS_REPORT": 0.5,       # EKF indicator
+        "VIBRATION": 0.5,               # vibe indicator
+        "SCALED_PRESSURE": 0.5,         # QNH
+        "RANGEFINDER": 1.0,
+        "DISTANCE_SENSOR": 0.5,
+    }
+
+    # Streamed by ArduPilot but never read by this app. On a link with
+    # bandwidth to spare these are harmless; on a slow RC link they crowd
+    # out the messages that matter, and the radio drops whatever overflows
+    # without caring which. Measured on ArduPlane 4.8: these accounted for
+    # roughly three quarters of the default stream.
+    DISABLED_MESSAGES = (
+        "SIMSTATE", "ESC_TELEMETRY_1_TO_4", "AOA_SSA", "AHRS", "AHRS2",
+        "RAW_IMU", "SCALED_IMU2", "SCALED_IMU3", "SCALED_PRESSURE2",
+        "SERVO_OUTPUT_RAW", "RC_CHANNELS", "MEMINFO", "POWER_STATUS",
+        "LOCAL_POSITION_NED", "POSITION_TARGET_GLOBAL_INT", "SYSTEM_TIME",
+    )
+
+    def __init__(self, connection_string="udpin:0.0.0.0:14550", parent=None,
+                 attitude_hz=5.0, position_hz=2.0, full_telemetry=False):
         """
         connection_string examples:
           "udpin:0.0.0.0:14550"   -> listen for incoming UDP packets on 14550
@@ -149,6 +186,9 @@ class MavlinkLink(QThread):
         self._send_lock = threading.Lock()
         # State for values MAVLink doesn't hand us directly - we compute
         # these ourselves from other messages (see run()).
+        self._attitude_hz = attitude_hz
+        self._position_hz = position_hz
+        self._full_telemetry = full_telemetry
         self._home_lat = None
         # Arming is when ArduPilot sets home, so an arm is the cue to ask
         # again rather than trust that the announcement reached us.
@@ -169,6 +209,13 @@ class MavlinkLink(QThread):
         try:
             self._run_link()
         finally:
+            # Hand the vehicle back as we found it. Stream rates live in the
+            # autopilot, not here, so anything we asked for outlives this
+            # process: close the app, downgrade it, and the vehicle is still
+            # sending the reduced set with nothing left to explain why. Best
+            # effort - on a link that has already dropped this goes nowhere,
+            # and that is fine.
+            self._restore_default_rates()
             # The thread owns the connection and closes it on its own way
             # out. Closing it from stop() instead meant the socket could be
             # pulled out from under this thread while it was still reading,
@@ -253,27 +300,7 @@ class MavlinkLink(QThread):
                     mavutil.mavlink.MAV_CMD_GET_HOME_POSITION,
                     0, 0, 0, 0, 0, 0, 0, 0,
                 )
-                # SCALED_PRESSURE (for QNH), TERRAIN_REPORT (for Terrain
-                # Alt), EKF_STATUS_REPORT and VIBRATION (for the HUD's
-                # EKF/Vibe indicators) aren't guaranteed to stream by
-                # default on every vehicle/firmware config - request them
-                # explicitly at 2 Hz rather than silently depending on
-                # whatever the vehicle's default stream rates happen to be.
-                for msg_id in (
-                    mavutil.mavlink.MAVLINK_MSG_ID_SCALED_PRESSURE,
-                    mavutil.mavlink.MAVLINK_MSG_ID_TERRAIN_REPORT,
-                    mavutil.mavlink.MAVLINK_MSG_ID_EKF_STATUS_REPORT,
-                    mavutil.mavlink.MAVLINK_MSG_ID_VIBRATION,
-                ):
-                    self.master.mav.command_long_send(
-                        self.master.target_system,
-                        self.master.target_component,
-                        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                        0,
-                        msg_id,
-                        500000,  # microseconds -> 2 Hz
-                        0, 0, 0, 0, 0,
-                    )
+            self.apply_stream_rates()
         except Exception as e:
             self.connection_status.emit(False, f"Connection failed: {e}")
             return
@@ -709,6 +736,82 @@ class MavlinkLink(QThread):
                 if armed and not self._was_armed:
                     self._request_home()
                 self._was_armed = armed
+
+    def set_stream_rates(self, attitude_hz: float, position_hz: float,
+                         full_telemetry: bool):
+        """Change the requested rates and push them to the vehicle now."""
+        self._attitude_hz = attitude_hz
+        self._position_hz = position_hz
+        self._full_telemetry = full_telemetry
+        self.apply_stream_rates()
+
+    def apply_stream_rates(self):
+        """Tell the vehicle what to send us.
+
+        Rates are per-link in ArduPilot, so this only shapes our own
+        connection - another GCS talking to the same vehicle is unaffected.
+
+        With full telemetry on, every message this class touches is put
+        back to the vehicle's own default rate. Simply not asking is NOT
+        enough: ArduPilot remembers a rate per ground station, not per
+        connection, so a previously reduced set survives a reconnect and
+        "full telemetry" would quietly deliver the reduced one.
+
+        Every request is best effort. A vehicle that ignores these behaves
+        exactly as it did before, so a firmware that does not support
+        SET_MESSAGE_INTERVAL loses nothing.
+        """
+        if self.master is None:
+            return
+
+        wanted = dict(self.SUPPORTING_RATES)
+        wanted["ATTITUDE"] = self._attitude_hz
+        wanted["GLOBAL_POSITION_INT"] = self._position_hz
+
+        if self._full_telemetry:
+            # 0 means "your default rate", as distinct from -1 for off.
+            intervals = {name: 0 for name in wanted}
+            intervals.update({name: 0 for name in self.DISABLED_MESSAGES})
+        else:
+            intervals = {name: int(1_000_000 / hz) if hz > 0 else -1
+                         for name, hz in wanted.items()}
+            intervals.update({name: -1 for name in self.DISABLED_MESSAGES})
+
+        try:
+            with self._send_lock:
+                for name, interval in intervals.items():
+                    msg_id = getattr(mavutil.mavlink,
+                                     f"MAVLINK_MSG_ID_{name}", None)
+                    if msg_id is not None:
+                        self._set_interval(msg_id, interval)
+        except Exception:
+            pass
+
+    def _restore_default_rates(self):
+        """Put every message we touched back to the vehicle's own rate."""
+        if self.master is None or self._full_telemetry:
+            return          # full telemetry never changed anything
+        names = list(self.SUPPORTING_RATES) + list(self.DISABLED_MESSAGES) + [
+            "ATTITUDE", "GLOBAL_POSITION_INT"]
+        try:
+            with self._send_lock:
+                for name in names:
+                    msg_id = getattr(mavutil.mavlink,
+                                     f"MAVLINK_MSG_ID_{name}", None)
+                    if msg_id is not None:
+                        self._set_interval(msg_id, 0)   # 0 = vehicle default
+        except Exception:
+            pass
+
+    def _set_interval(self, msg_id: int, interval_us: int):
+        """One SET_MESSAGE_INTERVAL: microseconds between messages,
+        0 for the vehicle's default rate, -1 to stop it entirely."""
+        self.master.mav.command_long_send(
+            self.master.target_system,
+            self.master.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            0, msg_id, interval_us, 0, 0, 0, 0, 0,
+        )
 
     def _request_home(self):
         """Ask the vehicle to send HOME_POSITION now."""

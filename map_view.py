@@ -1256,6 +1256,12 @@ function clearTarget() {
 // you are about to fly into, and an unclipped national mosaic just buries
 // the map underneath it.
 var WEATHER_RADIUS_M = 50000;
+// ADS-B contacts are shown over the same ground the weather radar covers,
+// centred the same way, so the two agree about what counts as "nearby".
+// The feed is queried far wider than this - filtering here rather than at
+// the request keeps contacts available the moment the aircraft moves,
+// instead of waiting for the next poll to widen.
+var ADSB_RADIUS_M = WEATHER_RADIUS_M;
 // RainViewer's free tiles stop at zoom 7. Ask for anything deeper and it
 // serves a "Zoom Level Not Supported" placeholder instead of radar - the
 // same 1370-byte image for every tile on earth, which tiles across the map
@@ -1486,11 +1492,31 @@ function adsbReadout(ac, callsign, track) {
 // recreating every divIcon + tooltip + popup meant a burst of DOM churn on
 // each poll - exactly the kind of hitch we just finished removing from the
 // map's motion.
+// Same centre the weather clip uses: the aircraft, or the middle of the
+// map before there is a fix, so the two circles always coincide.
+function adsbCentre() {
+    return marker ? marker.getLatLng() : map.getCenter();
+}
+
+function metresBetween(a, bLat, bLon) {
+    var R = 6371008.8;
+    var p1 = a.lat * Math.PI / 180, p2 = bLat * Math.PI / 180;
+    var dp = p2 - p1;
+    var dl = (bLon - a.lng) * Math.PI / 180;
+    var h = Math.sin(dp / 2) * Math.sin(dp / 2) +
+            Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 function renderAdsbContacts(contacts) {
     var seen = {};
+    var centre = adsbCentre();
     for (var i = 0; i < contacts.length; i++) {
         var ac = contacts[i];
         if (typeof ac.lat !== 'number' || typeof ac.lon !== 'number') continue;
+        // Outside the circle it is not drawn, and any marker it already had
+        // is dropped below with everything else that went unseen.
+        if (metresBetween(centre, ac.lat, ac.lon) > ADSB_RADIUS_M) continue;
         var track = typeof ac.track === 'number' ? ac.track : 0;
         var callsign = (ac.flight || ac.hex || '?').trim();
         var key = ac.hex || callsign;

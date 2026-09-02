@@ -20,7 +20,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V1.17.1"
+APP_VERSION = "V1.17.2"
 
 import sys
 import os
@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QPushButton, QGroupBox, QCheckBox, QMessageBox, QProgressBar,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QStackedWidget,
     QSizePolicy,
-    QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
+    QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QMenu,
 )
 
 from mavlink_link import MavlinkLink, PLANE_MODES
@@ -1061,6 +1061,129 @@ class WaypointMissionPanel(QGroupBox):
         # Clear with nothing to clear is harmless.
 
 
+class TelemetryRatesDialog(QDialog):
+    """
+    How much telemetry to ask the vehicle for.
+
+    A slow RC link carries far less than a flight controller streams by
+    default, and the radio drops whatever overflows without regard for
+    which messages mattered. Asking for less means what we do ask for
+    actually arrives - the 3D view is smoother at 5Hz requested than at
+    10Hz sent and mostly discarded.
+
+    Deliberately a dialog rather than controls in the connection panel:
+    these are set once and forgotten, and the panel's layout is not worth
+    disturbing for them.
+    """
+
+    SETTING_ATTITUDE = "telemetry_attitude_hz"
+    SETTING_POSITION = "telemetry_position_hz"
+    SETTING_FULL = "telemetry_full"
+
+    DEFAULT_ATTITUDE = 5.0
+    DEFAULT_POSITION = 2.0
+    CHOICES = [1.0, 2.0, 3.0, 5.0]
+
+    @classmethod
+    def current(cls):
+        """(attitude_hz, position_hz, full_telemetry) as configured.
+
+        Falls back to the defaults for anything missing or unreadable. This
+        runs on every connection, and a settings file with a null or a
+        stray string in it must not be the reason a link fails to open.
+        """
+        s = load_settings()
+
+        def rate(key, default):
+            try:
+                value = float(s.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return value if value in cls.CHOICES else default
+
+        return (rate(cls.SETTING_ATTITUDE, cls.DEFAULT_ATTITUDE),
+                rate(cls.SETTING_POSITION, cls.DEFAULT_POSITION),
+                bool(s.get(cls.SETTING_FULL, False)))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Telemetry Rates")
+        att, pos, full = self.current()
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        blurb = QLabel(
+            "How often to ask the vehicle for the two messages the 3D view "
+            "and map depend on. Lower rates suit a slow radio link, where "
+            "asking for more than it can carry means losing packets rather "
+            "than gaining data."
+        )
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        form = QFormLayout()
+        self.attitude_combo = QComboBox()
+        self.position_combo = QComboBox()
+        for combo, value in ((self.attitude_combo, att),
+                             (self.position_combo, pos)):
+            for hz in self.CHOICES:
+                combo.addItem(f"{hz:g} Hz", hz)
+            idx = combo.findData(value)
+            combo.setCurrentIndex(idx if idx >= 0 else combo.findData(
+                self.DEFAULT_ATTITUDE if combo is self.attitude_combo
+                else self.DEFAULT_POSITION))
+        form.addRow("Attitude", self.attitude_combo)
+        form.addRow("GPS position", self.position_combo)
+        layout.addLayout(form)
+
+        self.full_box = QCheckBox("Full MAVLink telemetry")
+        self.full_box.setChecked(full)
+        self.full_box.setToolTip(
+            "Stream everything the flight controller sends at its own rates, "
+            "ignoring the settings above. For fast links, and for capturing "
+            "everything. Off by default: the reduced set is what fits a slow "
+            "RC link."
+        )
+        self.full_box.toggled.connect(self._sync_enabled)
+        layout.addWidget(self.full_box)
+
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("font-size: 11px; color: #aaa;")
+        layout.addWidget(self.note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._sync_enabled(self.full_box.isChecked())
+
+    def _sync_enabled(self, full):
+        self.attitude_combo.setEnabled(not full)
+        self.position_combo.setEnabled(not full)
+        self.note.setText(
+            "The vehicle decides everything; these settings are ignored."
+            if full else
+            "Applied immediately while connected, and on every connection "
+            "after this. Only this link is affected - another ground station "
+            "talking to the same vehicle keeps its own rates."
+        )
+
+    def values(self):
+        return (self.attitude_combo.currentData(),
+                self.position_combo.currentData(),
+                self.full_box.isChecked())
+
+    def save(self):
+        att, pos, full = self.values()
+        save_setting(self.SETTING_ATTITUDE, att)
+        save_setting(self.SETTING_POSITION, pos)
+        save_setting(self.SETTING_FULL, full)
+        return att, pos, full
+
+
 class UpdateDialog(QDialog):
     """
     One dialog for every outcome of an update check - already current, a
@@ -1261,6 +1384,7 @@ class ConnectionPanel(QGroupBox):
     connect_requested = Signal(str)
     disconnect_requested = Signal()
     update_requested = Signal()
+    telemetry_settings_requested = Signal()
 
     FIELD_HEIGHT = 24
     UPDATE_STYLE = "color: #aaa; font-size: 9px; padding: 2px 6px;"
@@ -1291,6 +1415,14 @@ class ConnectionPanel(QGroupBox):
         # Nothing to do with connecting to a vehicle, but this is the one
         # group that is always on screen and never scrolls, and a window
         # with no menu bar has nowhere else to put it.
+        self.telemetry_btn = QPushButton("Telemetry Rates")
+        self.telemetry_btn.setFixedHeight(self.FIELD_HEIGHT)
+        self.telemetry_btn.setStyleSheet(self.UPDATE_STYLE)
+        self.telemetry_btn.setToolTip(
+            "How often to ask the vehicle for attitude and position. "
+            "Lower rates suit a slow radio link.")
+        self.telemetry_btn.clicked.connect(self.telemetry_settings_requested)
+
         self.update_btn = QPushButton("Check for Updates")
         self.update_btn.setFixedHeight(self.FIELD_HEIGHT)
         self.update_btn.setStyleSheet(self.UPDATE_STYLE)
@@ -1358,6 +1490,7 @@ class ConnectionPanel(QGroupBox):
         # Shares the button row rather than taking one of its own: a row to
         # itself cost the map 27px of height for a control used once in a
         # while, and there is width to spare here.
+        refresh_row.addWidget(self.telemetry_btn)
         refresh_row.addWidget(self.update_btn)
         refresh_row.addWidget(self.connect_btn)
         refresh_row.addWidget(self.disconnect_btn)
@@ -1396,6 +1529,14 @@ class ConnectionPanel(QGroupBox):
         listening_udp = protocol == "UDP (listen)"
         self.host_edit.setEnabled(not listening_udp)
         self.host_edit.setPlaceholderText("(listening)" if listening_udp else "")
+
+    def contextMenuEvent(self, event):
+        """Right-click reaches the same settings as the button, for anyone
+        who looks for a context menu first."""
+        menu = QMenu(self)
+        menu.addAction("Telemetry Rates...",
+                       self.telemetry_settings_requested.emit)
+        menu.exec(event.globalPos())
 
     def set_update_state(self, text: str, found: bool = False, enabled: bool = True):
         """Reflect a check in the button itself, so a waiting or successful
@@ -1877,6 +2018,8 @@ class MainWindow(QMainWindow):
         self.connection_panel.connect_requested.connect(self.on_connect_requested)
         self.connection_panel.disconnect_requested.connect(self.on_disconnect_requested)
         self.connection_panel.update_requested.connect(self.on_check_updates)
+        self.connection_panel.telemetry_settings_requested.connect(
+            self.on_telemetry_settings)
 
         self.map_view.fly_to_here.connect(self.on_fly_to_here)
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
@@ -2032,6 +2175,15 @@ class MainWindow(QMainWindow):
         )
 
     # ---- update checking ------------------------------------------------
+
+    def on_telemetry_settings(self):
+        """Edit the requested rates, and push them to a live link at once."""
+        dialog = TelemetryRatesDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        att, pos, full = dialog.save()
+        if self.link is not None:
+            self.link.set_stream_rates(att, pos, full)
 
     def on_check_updates(self, silent: bool = False):
         """Ask GitHub what the latest release is, off the GUI thread.
@@ -2700,7 +2852,9 @@ class MainWindow(QMainWindow):
         self.map_view.clear_trail()
         # Home belongs to the vehicle we were talking to, not the next one.
         self.map_view.clear_home()
-        self.link = MavlinkLink(connection_string)
+        att, pos, full = TelemetryRatesDialog.current()
+        self.link = MavlinkLink(connection_string, attitude_hz=att,
+                                position_hz=pos, full_telemetry=full)
         self.link.attitude_update.connect(self.on_attitude)
         self.link.position_update.connect(self.on_position)
         self.link.ground_track_update.connect(self.on_ground_track)
