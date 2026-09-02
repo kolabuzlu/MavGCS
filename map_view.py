@@ -736,6 +736,16 @@ function waypointIcon(number, sent, altText, dirty) {
 // fixed duration using requestAnimationFrame - the same technique flight
 // trackers use to animate aircraft between ADS-B updates.
 var animFrom = null, animTo = null, animStartTime = 0;
+// The marker itself is interpolated every frame - it is the thing being
+// watched, and it should glide. The overlays hanging off it are a different
+// matter: four polylines (one of up to 49 points) plus the compass rose,
+// all rewritten 60 times a second to show quantities that evolve over
+// seconds. That is a great deal of continuous compositing for no visible
+// gain, and on a machine whose driver is unhappy with sustained GPU work it
+// is enough to take the browser engine down. 20Hz is indistinguishable here
+// and costs a third as much.
+var OVERLAY_INTERVAL_MS = 50;
+var lastOverlayMs = 0;
 var animDuration = 450;  // ms - tuned to sit comfortably above a 2-3 Hz update interval
 var animHeadingFrom = 0, animHeadingTo = 0, currentHeading = 0;
 
@@ -1019,10 +1029,16 @@ function _animateMarker(now) {
             var cdiff = ((animCourseTo - animCourseFrom + 540) % 360) - 180;
             currentCourse = (animCourseFrom + cdiff * t + 360) % 360;
         }
-        _drawVectors(lat, lon, currentHeading, currentCourse);
-        // Driven from the same interpolated values as the marker, so the
-        // card turns as smoothly as the aircraft icon does.
-        _updateCompass(currentHeading, currentCourse);
+        // Always redraw on the last frame of a leg, so the overlays end
+        // up exactly where the marker settled rather than up to one
+        // interval behind it.
+        if (now - lastOverlayMs >= OVERLAY_INTERVAL_MS || t >= 1) {
+            lastOverlayMs = now;
+            _drawVectors(lat, lon, currentHeading, currentCourse);
+            // Driven from the same interpolated values as the marker, so
+            // the card turns as smoothly as the aircraft icon does.
+            _updateCompass(currentHeading, currentCourse);
+        }
 
         if (followDrone && haveCentered) {
             // Skip sub-pixel pans. panTo() repositions the whole tile layer
