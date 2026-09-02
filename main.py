@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QStackedWidget,
     QSizePolicy,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QMenu,
+    QFileDialog,
 )
 
 from mavlink_link import MavlinkLink, PLANE_MODES
@@ -55,6 +56,7 @@ from tile_cache import TileCacheServer
 from fpv_view import FpvView
 from app_paths import data_dir, load_settings, resource_path, save_setting
 from update_check import UpdateChecker, UpdateDownloader, RELEASES_PAGE
+from kmz_export import write_kmz
 
 
 class TelemetryPanel(QFrame):
@@ -161,6 +163,13 @@ class FlightStats:
         self.unrecorded_s = 0.0
         self.suspended = False
         self._last_pos = None
+        # The flown path, for the KMZ export: (unix time, lat, lon, AMSL,
+        # altitude above home). Wall-clock rather than monotonic, because
+        # Google Earth wants real timestamps to animate against. Bounded
+        # only as a guard against something pathological - a two-hour
+        # flight at 2Hz is about 14,000 points, a few hundred kilobytes.
+        self.track = []
+        self._amsl = None
         self._alt = 0.0
         self._gs = 0.0
 
@@ -262,6 +271,7 @@ class FlightStats:
             m.sink_max = max(m.sink_max, p.sink_max)
             m.wind_max = max(m.wind_max, p.wind_max)
             m.distance_m += p.distance_m
+            m.track.extend(p.track)
             if p.amsl_max is not None:
                 m.amsl_max = p.amsl_max if m.amsl_max is None else max(m.amsl_max, p.amsl_max)
             if p.volt_start is not None and m.volt_start is None:
@@ -309,10 +319,14 @@ class FlightStats:
             self.climb_max = max(self.climb_max, climb)
             self.sink_max = max(self.sink_max, -climb)
 
+    TRACK_MAX_POINTS = 250_000
+
     def on_position(self, lat, lon, alt_relative):
         if not self.running:
             return
         self._alt = alt_relative
+        if len(self.track) < self.TRACK_MAX_POINTS:
+            self.track.append((time.time(), lat, lon, self._amsl, alt_relative))
         self.alt_max = max(self.alt_max, alt_relative)
         # Ground track, summed between fixes. More honest than integrating
         # groundspeed, which drifts whenever telemetry stutters.
@@ -332,6 +346,10 @@ class FlightStats:
         if "amsl_alt" in status:
             try:
                 amsl = float(status["amsl_alt"])
+                # Kept for the track: Google Earth places an absolute
+                # altitude correctly over its own terrain, where a
+                # height above home would float or sink with the ground.
+                self._amsl = amsl
                 self.amsl_max = amsl if self.amsl_max is None else max(self.amsl_max, amsl)
             except ValueError:
                 pass
@@ -421,9 +439,10 @@ class FlightSummaryDialog(QDialog):
     both sets of numbers visible, rather than as a guess at reconnect time.
     """
 
-    def __init__(self, stats, earlier=None, parent=None):
+    def __init__(self, stats, earlier=None, parent=None, home=None):
         super().__init__(parent)
         self.setWindowTitle("Flight Summary")
+        self._home = home       # (lat, lon) for the KMZ, if it is known
         self._stats = stats
         self._earlier = list(earlier or [])
         layout = QVBoxLayout(self)
@@ -473,8 +492,14 @@ class FlightSummaryDialog(QDialog):
 
         buttons = QDialogButtonBox()
         copy_btn = buttons.addButton("Copy", QDialogButtonBox.ActionRole)
+        self._kmz_btn = buttons.addButton("Save KMZ...",
+                                          QDialogButtonBox.ActionRole)
+        self._kmz_btn.setToolTip(
+            "Save the flown track for Google Earth. It carries a timestamp "
+            "per point, so Google Earth can replay the flight.")
         buttons.addButton(QDialogButtonBox.Close)
         copy_btn.clicked.connect(self._copy)
+        self._kmz_btn.clicked.connect(self._save_kmz)
         buttons.rejected.connect(self.accept)
         layout.addWidget(buttons)
 
@@ -504,6 +529,59 @@ class FlightSummaryDialog(QDialog):
 
     def _copy(self):
         QApplication.clipboard().setText(self.current_stats().as_text())
+
+    def _save_kmz(self):
+        """Write the flown track where the user asks, for Google Earth.
+
+        Uses whichever flight the summary is currently showing, so ticking
+        the merge box and then saving gives the whole sortie rather than
+        the last segment of it.
+        """
+        stats = self.current_stats()
+        if not stats.track:
+            QMessageBox.information(
+                self, "Nothing to save",
+                "This flight has no recorded positions, so there is no "
+                "track to export. That happens when the vehicle never had "
+                "a GPS fix while armed.")
+            return
+
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+        folder = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
+        suggested = str(Path(folder) / f"MavGCS-flight-{stamp}.kmz")
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save flight as KMZ", suggested,
+            "Google Earth (*.kmz);;All files (*)")
+        if not path:
+            return
+        if not path.lower().endswith(".kmz"):
+            path += ".kmz"
+
+        try:
+            written = write_kmz(
+                path, stats.track,
+                name=f"MavGCS flight {stamp}",
+                home=self._home,
+                summary=stats.as_text(),
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Could not save",
+                                "Writing the KMZ failed: " + str(e))
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Flight saved")
+        box.setText(f"{len(stats.track)} track points written.")
+        box.setInformativeText(
+            f"{written}"
+            "\n\nOpen it in Google Earth to replay the flight.")
+        open_btn = box.addButton("Open Folder", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(written.parent)))
 
 
 class FlyToDialog(QDialog):
@@ -1865,6 +1943,7 @@ class MainWindow(QMainWindow):
         # at the newest telemetry. Without this the instrument lines lead
         # the scene by the playback delay - rolling out of a turn, the
         # horizon line levelled a second before the ground did.
+        self._home_pos = None       # (lat, lon) once the vehicle reports it
         self._hud_history = deque(maxlen=240)
         self._att_interval_ms = 250.0
         self._pos_interval_ms = 350.0
@@ -2098,6 +2177,7 @@ class MainWindow(QMainWindow):
         self.map_view.set_home_bearing(bearing_deg)
 
     def on_home_position(self, lat, lon):
+        self._home_pos = (lat, lon)     # marked in the exported KMZ too
         self.map_view.set_home(lat, lon)
 
     def on_position(self, lat, lon, alt, heading):
@@ -2693,7 +2773,8 @@ class MainWindow(QMainWindow):
             # are left alone: a bench test between sorties should not
             # silently discard them.
             return
-        FlightSummaryDialog(self._flight_stats, earlier, self).exec()
+        FlightSummaryDialog(self._flight_stats, earlier, self,
+                            home=self._home_pos).exec()
         # Offered once. Keeping them would let them resurface against an
         # unrelated flight later in the session.
         self._suspended_flights = []
