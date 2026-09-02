@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.17.2 - Telemetry rate settings and Google Earth export added.
+## V1.17.2 - Telemetry rate settings added.
 Bug fixes and improvements.
 
 ## V1.17.1 - Bug fixes and improvements.
