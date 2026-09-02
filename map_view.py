@@ -746,6 +746,17 @@ var animFrom = null, animTo = null, animStartTime = 0;
 // and costs a third as much.
 var OVERLAY_INTERVAL_MS = 50;
 var lastOverlayMs = 0;
+// Set once the overlays have been drawn at the end of an animation leg,
+// and cleared by anything that changes what they show. Without it the
+// "draw the final frame exactly" rule fired on EVERY frame once a leg had
+// finished - so with telemetry stopped, the cap was defeated and the map
+// redrew flat out for as long as the app stayed open, which is the very
+// load this throttle exists to avoid.
+var overlaysSettled = false;
+
+// Every entry point that changes what the overlays display calls this, so
+// a change with no accompanying position update still gets drawn.
+function overlaysNeedRedraw() { overlaysSettled = false; }
 var animDuration = 450;  // ms - tuned to sit comfortably above a 2-3 Hz update interval
 var animHeadingFrom = 0, animHeadingTo = 0, currentHeading = 0;
 
@@ -769,6 +780,7 @@ function updatePosition(lat, lon, heading) {
     animTo = latlng;
     animHeadingTo = heading;
     animStartTime = performance.now();
+    overlaysNeedRedraw();
 
     addTrailPoint(latlng);
     if (weatherEnabled) { updateWeatherClip(); }
@@ -848,17 +860,21 @@ function offsetLatLng(lat, lon, bearingDeg, metres) {
 function setGroundTrack(course, speed) {
     trackSpeed = speed;
     trackCourse = course;
+    overlaysNeedRedraw();
     if (course < 0) { currentCourse = -1; return; }
     // Arrives in the same telemetry cycle as the position, so it rides the
     // animation the marker has just started.
     animCourseFrom = (currentCourse >= 0) ? currentCourse : course;
     animCourseTo = course;
 }
-function setNavTarget(bearing, distance) { navBearing = bearing; navDistance = distance; }
-function setTurnRate(rate) { turnRate = rate; }
+function setNavTarget(bearing, distance) {
+    navBearing = bearing; navDistance = distance; overlaysNeedRedraw();
+}
+function setTurnRate(rate) { turnRate = rate; overlaysNeedRedraw(); }
 
 function setVectorsEnabled(on) {
     vectorsEnabled = on;
+    overlaysNeedRedraw();
     var cb = document.getElementById('vectors-checkbox');
     if (cb) { cb.checked = on; }
     if (!on) {
@@ -947,11 +963,13 @@ var homeBearing = null;   // deg to home, null until known
 
 function setHomeBearing(deg) {
     homeBearing = (deg >= 0) ? (((deg % 360) + 360) % 360) : null;
+    overlaysNeedRedraw();
 }
 
 function setWind(fromDeg, speedMps) {
     windFrom = ((fromDeg % 360) + 360) % 360;
     windSpeed = speedMps;
+    overlaysNeedRedraw();
 }
 
 function _updateCompass(heading, course) {
@@ -1029,15 +1047,20 @@ function _animateMarker(now) {
             var cdiff = ((animCourseTo - animCourseFrom + 540) % 360) - 180;
             currentCourse = (animCourseFrom + cdiff * t + 360) % 360;
         }
-        // Always redraw on the last frame of a leg, so the overlays end
-        // up exactly where the marker settled rather than up to one
-        // interval behind it.
-        if (now - lastOverlayMs >= OVERLAY_INTERVAL_MS || t >= 1) {
-            lastOverlayMs = now;
-            _drawVectors(lat, lon, currentHeading, currentCourse);
-            // Driven from the same interpolated values as the marker, so
-            // the card turns as smoothly as the aircraft icon does.
-            _updateCompass(currentHeading, currentCourse);
+        // Capped mid-leg; drawn once more exactly where the marker
+        // settles; then nothing at all until something changes. Idle costs
+        // no redraws, which is the state the app sits in whenever the link
+        // is quiet.
+        if (!overlaysSettled) {
+            var settling = t >= 1;
+            if (settling || now - lastOverlayMs >= OVERLAY_INTERVAL_MS) {
+                lastOverlayMs = now;
+                overlaysSettled = settling;
+                _drawVectors(lat, lon, currentHeading, currentCourse);
+                // Driven from the same interpolated values as the marker,
+                // so the card turns as smoothly as the aircraft icon does.
+                _updateCompass(currentHeading, currentCourse);
+            }
         }
 
         if (followDrone && haveCentered) {
