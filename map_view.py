@@ -280,12 +280,17 @@ LEAFLET_HTML = """
         <div class="tc-row">
             <span class="tc-title">Map</span>
             <select id="tc-limit" onchange="setTileCacheLimit(this.value);">
-                <!-- Starts at No Cache to match the server's own default:
-                     saving map tiles to disk is opt-in. -->
-                <option value="0" selected>No Cache</option>
+                <!-- 500 MB by default, matching what the app applies at
+                     startup. Caching map tiles is what makes a previously
+                     flown area work with no internet at the field, and half
+                     a gigabyte is a few hundred square kilometres. The app
+                     overwrites this selection with the saved preference as
+                     soon as the page loads; the value here only has to
+                     agree with that default so the two never disagree. -->
+                <option value="0">No Cache</option>
                 <option value="100">100 MB</option>
                 <option value="200">200 MB</option>
-                <option value="500">500 MB</option>
+                <option value="500" selected>500 MB</option>
                 <option value="1024">1 GB</option>
                 <option value="2048">2 GB</option>
                 <option value="5120">5 GB</option>
@@ -1197,6 +1202,15 @@ function clearWaypoints() {
 // How much map to keep for offline use. "No Cache" (0) stops saving new
 // tiles; whatever is already saved is still served from disk, so choosing
 // it never loses what you've collected - only Clear does that.
+// Set both dropdowns to what the app has actually applied. Assigning
+// .value does not fire onchange, so this cannot loop back into the app.
+function showCacheLimits(mapMb, terrainMb) {
+    var m = document.getElementById('tc-limit');
+    var t = document.getElementById('tr-limit');
+    if (m) { m.value = String(mapMb); }
+    if (t) { t.value = String(terrainMb); }
+}
+
 function setTileCacheLimit(megabytes) {
     if (bridge) {
         bridge.tileCacheLimitChanged(parseInt(megabytes, 10));
@@ -1904,6 +1918,11 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
+
+    def show_cache_limits(self, map_mb: int, terrain_mb: int):
+        """Point the cache dropdowns at what the app has actually applied."""
+        self.page().runJavaScript(
+            f"showCacheLimits({int(map_mb)}, {int(terrain_mb)});")
 
     def set_home(self, lat: float, lon: float):
         """Place (or move) the home marker."""

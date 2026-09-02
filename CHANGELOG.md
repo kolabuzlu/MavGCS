@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V1.17.4 - Map caching on by default.
+Bug fixes and improvements.
+
 ## V1.17.3 - Track export added.
 Bug fixes and improvements.
 

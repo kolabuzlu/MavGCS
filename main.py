@@ -20,7 +20,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V1.17.3"
+APP_VERSION = "V1.17.4"
 
 import sys
 import os
@@ -1998,6 +1998,13 @@ class MainWindow(QMainWindow):
         # point at this proxy's port. See tile_cache.py.
         self.tile_server = TileCacheServer()
         _tile_port = self.tile_server.start()
+        # Caching map tiles is what lets a previously flown area work with
+        # no internet at the field, so it is on by default rather than
+        # something to remember to switch on beforehand. The server itself
+        # still defaults to off - that is a sensible default for a cache
+        # component; wanting it on is this application's policy.
+        self.tile_server.set_size_limit(self.MAP_CACHE_MB_DEFAULT
+                                        * 1024 * 1024)
         self.map_view = MapView(_tile_port)
         self.fpv_view = FpvView(_tile_port, load_settings().get("cesium_ion_token", ""))
         self.waypoint_panel = WaypointMissionPanel()
@@ -2089,6 +2096,10 @@ class MainWindow(QMainWindow):
         # Anything pushed before the page finishes loading is dropped, so
         # redraw the overlay once it's ready.
         self.fpv_view.loadFinished.connect(lambda ok: self._push_hud_overlay())
+        # Apply the remembered cache sizes once the map page exists, and
+        # point its dropdowns at what was applied, so the controls never
+        # disagree with what is actually in force.
+        self.map_view.loadFinished.connect(lambda ok: self._apply_cache_limits())
 
         self.adsb_worker = AdsbWorker(self)
         self.adsb_worker.contacts_ready.connect(self.map_view.update_adsb_contacts)
@@ -2401,6 +2412,13 @@ class MainWindow(QMainWindow):
 
     # Matches playbackDelayMs() in the 3D page, which takes this value from
     # here rather than working it out again.
+    # Cache sizes in MB. Both are remembered between runs; these are
+    # only what a fresh install starts with.
+    MAP_CACHE_MB_DEFAULT = 500
+    TERRAIN_CACHE_MB_DEFAULT = 2048
+    SETTING_MAP_CACHE = "map_cache_mb"
+    SETTING_TERRAIN_CACHE = "terrain_cache_mb"
+
     HUD_DELAY_MIN_MS = 150.0
     HUD_DELAY_MAX_MS = 1600.0
     HUD_DELAY_FACTOR = 1.6
@@ -3066,6 +3084,25 @@ class MainWindow(QMainWindow):
 
     def on_tile_cache_limit(self, megabytes):
         self.tile_server.set_size_limit(int(megabytes) * 1024 * 1024)
+        save_setting(self.SETTING_MAP_CACHE, int(megabytes))
+        self._push_tile_cache_stats()
+
+    def _apply_cache_limits(self):
+        """Put the saved cache sizes into force and show them in the UI."""
+        settings = load_settings()
+
+        def size(key, default):
+            try:
+                return max(0, int(settings.get(key, default)))
+            except (TypeError, ValueError):
+                return default
+
+        map_mb = size(self.SETTING_MAP_CACHE, self.MAP_CACHE_MB_DEFAULT)
+        terrain_mb = size(self.SETTING_TERRAIN_CACHE,
+                          self.TERRAIN_CACHE_MB_DEFAULT)
+        self.tile_server.set_size_limit(map_mb * 1024 * 1024)
+        terrain_provider.set_cache_limit(terrain_mb * 1024 * 1024)
+        self.map_view.show_cache_limits(map_mb, terrain_mb)
         self._push_tile_cache_stats()
 
     def on_tile_cache_clear(self):
@@ -3074,6 +3111,7 @@ class MainWindow(QMainWindow):
 
     def on_terrain_cache_limit(self, megabytes):
         terrain_provider.set_cache_limit(int(megabytes) * 1024 * 1024)
+        save_setting(self.SETTING_TERRAIN_CACHE, int(megabytes))
         self._push_tile_cache_stats()
 
     def on_terrain_cache_clear(self):
