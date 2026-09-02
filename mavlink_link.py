@@ -108,6 +108,24 @@ class MavlinkLink(QThread):
     # STATUSTEXT from the vehicle: message text, MAV_SEVERITY (0-7)
     status_text_update = Signal(str, int)
 
+    # Where the aircraft is actually travelling, as opposed to where its
+    # nose points. Both come off GLOBAL_POSITION_INT, which already carries
+    # ground velocity - it was simply being dropped. The two differ by the
+    # crab angle, which is what makes the wind's effect visible on the map.
+    ground_track_update = Signal(float, float)   # course deg, groundspeed m/s
+
+    # What the navigation controller is steering at. NAV_CONTROLLER_OUTPUT
+    # was already being parsed for the Dist to WP readout; these are the
+    # bearings in the same message.
+    nav_target_update = Signal(float, float)     # bearing deg, distance m
+
+    # Yaw rate, for drawing where the current turn leads.
+    turn_rate_update = Signal(float)             # deg/s
+
+    # Which way home lies, for the arrow on the compass. -1 when the vehicle
+    # is close enough that the bearing is meaningless.
+    home_bearing_update = Signal(float)          # deg, or -1
+
     def __init__(self, connection_string="udpin:0.0.0.0:14550", parent=None):
         """
         connection_string examples:
@@ -332,6 +350,7 @@ class MavlinkLink(QThread):
 
             if mtype == "ATTITUDE":
                 self.attitude_update.emit(msg.roll, msg.pitch, msg.yaw)
+                self.turn_rate_update.emit(math.degrees(msg.yawspeed))
 
             elif mtype == "GLOBAL_POSITION_INT":
                 lat = msg.lat / 1e7
@@ -339,6 +358,15 @@ class MavlinkLink(QThread):
                 alt = msg.relative_alt / 1000.0
                 heading = msg.hdg / 100.0 if msg.hdg != 65535 else 0.0
                 self.position_update.emit(lat, lon, alt, heading)
+
+                # vx/vy are ground velocity north/east in cm/s. Below a
+                # walking pace their direction is GPS noise rather than a
+                # heading, so the course is reported as unknown (-1) instead
+                # of spinning a track line around a parked aircraft.
+                groundspeed = math.hypot(msg.vx, msg.vy) / 100.0
+                course = (math.degrees(math.atan2(msg.vy, msg.vx)) % 360.0
+                          if groundspeed >= 1.0 else -1.0)
+                self.ground_track_update.emit(course, groundspeed)
 
                 self._last_amsl_alt_m = msg.alt / 1000.0
                 # AMSL (not relative) altitude - needed to compare against
@@ -348,6 +376,13 @@ class MavlinkLink(QThread):
                 if self._home_lat is not None:
                     dist_home = self._haversine_m(lat, lon, self._home_lat, self._home_lon)
                     self.status_update.emit({"dist_home": f"{dist_home:.2f}"})
+                    # Standing on the launch point, "which way is home" has no
+                    # answer - the bearing would swing wildly on GPS noise
+                    # alone, so the arrow is hidden instead.
+                    self.home_bearing_update.emit(
+                        self._bearing_deg(lat, lon, self._home_lat, self._home_lon)
+                        if dist_home > 15.0 else -1.0
+                    )
 
             elif mtype == "VFR_HUD":
                 self.vfr_update.emit(msg.airspeed, msg.groundspeed, msg.climb)
@@ -546,6 +581,11 @@ class MavlinkLink(QThread):
 
             elif mtype == "NAV_CONTROLLER_OUTPUT":
                 self.status_update.emit({"wp_dist": f"{msg.wp_dist:.2f}"})
+                # The same message says which way the controller is steering
+                # and how far it has to go - enough to draw the line to the
+                # waypoint without downloading the mission.
+                self.nav_target_update.emit(float(msg.target_bearing),
+                                            float(msg.wp_dist))
 
             elif mtype == "RANGEFINDER":
                 self.status_update.emit({"rangefinder_m": f"{msg.distance:.2f}"})
@@ -988,6 +1028,16 @@ class MavlinkLink(QThread):
         dl = math.radians(lon2 - lon1)
         a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
         return 2 * r * math.asin(math.sqrt(a))
+
+    @staticmethod
+    def _bearing_deg(lat1, lon1, lat2, lon2):
+        """Initial great-circle bearing from the first point to the second,
+        in degrees clockwise from north."""
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dl = math.radians(lon2 - lon1)
+        y = math.sin(dl) * math.cos(p2)
+        x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+        return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
     def stop(self):
         """

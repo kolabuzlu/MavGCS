@@ -45,6 +45,56 @@ LEAFLET_HTML = """
     margin-top: 4px; padding: 4px 10px; cursor: pointer;
     background: #2a6; color: white; border: none; border-radius: 4px;
   }
+  #compass {
+    /* Directly above the terrain radar (which is 200px tall at bottom:26px),
+       same size and styling so the two read as one stack of instruments. */
+    position: absolute; bottom: 234px; right: 8px;
+    width: 200px; height: 200px;
+    background: rgba(30,30,30,0.75);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    z-index: 1000;
+    overflow: hidden;
+    font-family: sans-serif;
+  }
+  #compass svg { display: block; width: 100%; height: 100%; }
+  #compass .cp-face { fill: rgba(0,0,0,0.35); }
+  #compass .cp-rim { fill: none; stroke: rgba(255,255,255,0.18); stroke-width: 2; }
+  #compass .cp-tick { stroke: rgba(255,255,255,0.55); stroke-width: 1.5; }
+  #compass .cp-tick.major { stroke: #ffffff; stroke-width: 2.5; }
+  #compass .cp-card {
+    fill: #ffffff; font-size: 20px; font-weight: 700;
+    text-anchor: middle; dominant-baseline: middle;
+  }
+  #compass .cp-card.cp-north { fill: #ff4d4d; }
+  /* Two markers at the top of the dial. The white one is fixed: the card
+     turns under it, so it always marks the nose. The amber one rides the
+     card at the course over ground, so the gap between them IS the drift
+     angle - it shows up as a separation you can see, rather than as the
+     difference between two numbers you have to subtract. */
+  #compass .cp-index { fill: #ffffff; }
+  #compass .cp-track { fill: #ffc83d; }
+  #compass .cp-course {
+    fill: #ffa726; font-size: 13px; font-weight: 600;
+    text-anchor: middle; dominant-baseline: middle;
+  }
+  #compass .cp-heading {
+    fill: #ffffff; font-size: 25px; font-weight: 700;
+    text-anchor: middle; dominant-baseline: middle;
+  }
+  #compass .cp-windtext {
+    fill: #4fc3f7; font-size: 13px; font-weight: 600;
+    text-anchor: middle; dominant-baseline: middle;
+  }
+  #compass #cp-wind { opacity: 0.78; }
+  /* Home. Still ends short of the wind arrow's head, so when the two
+     happen to point the same way you see two arrowheads at different radii
+     rather than one muddled shape - though the margin is now only a few
+     pixels. */
+  #compass .cp-home-shaft { stroke: #6ee787; stroke-width: 4; stroke-linecap: round; }
+  #compass .cp-home-head { fill: #6ee787; }
+  #compass .cp-wind-shaft { stroke: #4fc3f7; stroke-width: 4; stroke-linecap: round; }
+  #compass .cp-wind-head { fill: #4fc3f7; }
   #terrain-radar {
     position: absolute; bottom: 26px; right: 8px;
     width: 200px; height: 200px;
@@ -212,6 +262,14 @@ LEAFLET_HTML = """
                    border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
                    font-family: sans-serif; font-size: 11px; padding: 1px 6px;
                    cursor: pointer;">Clear Trail</button>
+    <!-- Sits in the same flex row as the button rather than at its own
+         absolute position, so it stays put if the button's width changes. -->
+    <input type="checkbox" id="vectors-checkbox" checked
+           onchange="setVectorsEnabled(this.checked);"
+           style="margin: 0 0 0 8px; cursor: pointer;">
+    <label for="vectors-checkbox" style="cursor: pointer; user-select: none;"
+           title="Ground track, nose heading, bearing to waypoint and the current turn"
+           >Vectors</label>
 </div>
 <div id="tilecache-control">
   <div class="tc-cols">
@@ -267,6 +325,40 @@ LEAFLET_HTML = """
     font-family: sans-serif; font-size: 11px;
     z-index: 1000; pointer-events: none;
 ">Created by Derin Hakan Karakurt</div>
+<div id="compass" title="Heading (white), course over ground (orange), wind (blue)">
+    <svg id="cp-svg" viewBox="0 0 200 200">
+        <circle class="cp-face" cx="100" cy="100" r="94" />
+        <circle class="cp-rim" cx="100" cy="100" r="94" />
+        <!-- Everything inside this group turns with the aircraft, so the
+             card is heading-up: what is at the top is straight ahead. -->
+        <g id="cp-rose">
+            <g id="cp-ticks"></g>
+            <!-- Points the way the wind is blowing TO. Drawn pointing up so
+                 a rotation of B aims it at bearing B. Placed before the
+                 cardinals so that where it reaches out far enough to cross
+                 them, they paint over it and stay the readable thing. -->
+            <g id="cp-wind" style="display:none">
+                <line class="cp-wind-shaft" x1="100" y1="72" x2="100" y2="42" />
+                <path class="cp-wind-head" d="M100,28 L91,46 L100,41 L109,46 Z" />
+            </g>
+            <g id="cp-home" style="display:none">
+                <line class="cp-home-shaft" x1="100" y1="66" x2="100" y2="46" />
+                <path class="cp-home-head" d="M100,34 L92,50 L100,45 L108,50 Z" />
+            </g>
+            <text class="cp-card cp-north" x="100" y="34">N</text>
+            <text class="cp-card" x="166" y="100">E</text>
+            <text class="cp-card" x="100" y="166">S</text>
+            <text class="cp-card" x="34" y="100">W</text>
+            <!-- Course over ground, riding the card at its own bearing. -->
+            <path class="cp-track" id="cp-trackmark" d="M100,28 L91,6 L109,6 Z"
+                  style="display:none" />
+        </g>
+        <path class="cp-index" d="M100,4 L94,22 L106,22 Z" />
+        <text class="cp-course" id="cp-course" x="100" y="79">---</text>
+        <text class="cp-heading" id="cp-heading" x="100" y="103">---</text>
+        <text class="cp-windtext" id="cp-windtext" x="100" y="134">--</text>
+    </svg>
+</div>
 <div id="terrain-radar">
     <svg id="tr-svg" viewBox="0 0 200 200" style="display:none;">
         <defs>
@@ -654,6 +746,219 @@ function updatePosition(lat, lon, heading) {
     // update (~2-3 Hz) and looked jerky compared to the marker itself.
 }
 
+// ---- vectors attached to the aircraft --------------------------------
+// Every one of these is drawn from telemetry the link already receives -
+// ground velocity out of GLOBAL_POSITION_INT, the bearings out of
+// NAV_CONTROLLER_OUTPUT, yaw rate out of ATTITUDE - so none of it costs
+// any bandwidth on a link that has little to spare.
+//
+// They are redrawn from the marker's interpolated position on every
+// animation frame rather than on each telemetry update, so they travel
+// with the icon instead of stepping along behind it.
+var vectorsEnabled = true;
+var trackCourse = -1;     // deg over ground, -1 while too slow to know
+var trackSpeed = 0;       // m/s
+// The course is interpolated on the same clock as the heading. Drawing one
+// from smoothed values and the other from the newest telemetry made the
+// angle between them - the crab angle, the whole reason for showing both -
+// read several degrees out through a turn.
+var animCourseFrom = 0, animCourseTo = 0, currentCourse = -1;
+var navBearing = null;    // deg, what the controller is steering at
+var navDistance = 0;      // m to that point
+var turnRate = 0;         // deg/s
+
+// Lengths are given in SECONDS of flight, not metres, so a line always
+// means "where this takes you" whatever the speed - and shrinks to nothing
+// on the ground instead of covering the map.
+var TRACK_SECONDS = 16;
+var ARC_SECONDS = 12;
+// The nose line states a direction rather than a prediction, so it stays a
+// fixed length - set to roughly what the track line reaches at cruise, so
+// the two are comparable and the crab angle between them reads easily.
+var HEADING_LINE_M = 300;
+var MIN_TURN_RATE = 2;      // deg/s; below this the turn arc is just the track
+var MIN_ARC_SPEED = 1;      // m/s
+
+var trackLine = L.polyline([], {color: '#00e5ff', weight: 3, opacity: 0.9}).addTo(map);
+var headingLine = L.polyline([], {color: '#ffffff', weight: 1.5, opacity: 0.85,
+                                  dashArray: '4,4'}).addTo(map);
+var navLine = L.polyline([], {color: '#ff2fd0', weight: 2, opacity: 0.9}).addTo(map);
+var turnArc = L.polyline([], {color: '#ffd24a', weight: 2, opacity: 0.9}).addTo(map);
+
+function offsetLatLng(lat, lon, bearingDeg, metres) {
+    // Equirectangular offset: under a metre of error over the few hundred
+    // metres these lines span, and much cheaper than the spherical form
+    // when it runs several times per frame.
+    var R = 6378137.0;
+    var br = bearingDeg * Math.PI / 180;
+    var dLat = (metres * Math.cos(br)) / R;
+    var dLon = (metres * Math.sin(br)) / (R * Math.cos(lat * Math.PI / 180));
+    return [lat + dLat * 180 / Math.PI, lon + dLon * 180 / Math.PI];
+}
+
+function setGroundTrack(course, speed) {
+    trackSpeed = speed;
+    trackCourse = course;
+    if (course < 0) { currentCourse = -1; return; }
+    // Arrives in the same telemetry cycle as the position, so it rides the
+    // animation the marker has just started.
+    animCourseFrom = (currentCourse >= 0) ? currentCourse : course;
+    animCourseTo = course;
+}
+function setNavTarget(bearing, distance) { navBearing = bearing; navDistance = distance; }
+function setTurnRate(rate) { turnRate = rate; }
+
+function setVectorsEnabled(on) {
+    vectorsEnabled = on;
+    var cb = document.getElementById('vectors-checkbox');
+    if (cb) { cb.checked = on; }
+    if (!on) {
+        trackLine.setLatLngs([]); headingLine.setLatLngs([]);
+        navLine.setLatLngs([]); turnArc.setLatLngs([]);
+    }
+}
+
+function _drawVectors(lat, lon, heading, course) {
+    if (!vectorsEnabled) { return; }
+
+    // Where the nose points.
+    headingLine.setLatLngs([[lat, lon],
+                            offsetLatLng(lat, lon, heading, HEADING_LINE_M)]);
+
+    // Where it is actually going. The angle between this and the nose line
+    // is the crab angle, so the wind's effect can be read at a glance
+    // rather than worked out from the wind readout.
+    if (course >= 0 && trackSpeed > 0) {
+        var reach = Math.max(120, trackSpeed * TRACK_SECONDS);
+        trackLine.setLatLngs([[lat, lon],
+                              offsetLatLng(lat, lon, course, reach)]);
+    } else {
+        trackLine.setLatLngs([]);
+    }
+
+    // Straight at whatever the navigation controller is steering for - the
+    // current waypoint in AUTO, the loiter point in RTL, and so on.
+    if (navBearing !== null && navDistance > 0) {
+        navLine.setLatLngs([[lat, lon],
+                            offsetLatLng(lat, lon, navBearing, navDistance)]);
+    } else {
+        navLine.setLatLngs([]);
+    }
+
+    // Where the turn currently leads, integrated forward a few seconds. A
+    // straight-line prediction would be wrong exactly when it matters most,
+    // which is mid-turn.
+    if (Math.abs(turnRate) >= MIN_TURN_RATE && trackSpeed > MIN_ARC_SPEED
+        && course >= 0) {
+        var h = (course >= 0) ? course : heading;
+        var pts = [[lat, lon]], la = lat, lo = lon, step = 0.25, swept = 0;
+        for (var t = 0; t < ARC_SECONDS; t += step) {
+            var p = offsetLatLng(la, lo, h, trackSpeed * step);
+            la = p[0]; lo = p[1];
+            h += turnRate * step;
+            pts.push([la, lo]);
+            // In a hard turn the horizon is long enough to come all the way
+            // round. Stopping at one revolution shows the turn circle, which
+            // is the useful part, without the line crossing back over itself.
+            swept += Math.abs(turnRate) * step;
+            if (swept >= 360) { break; }
+        }
+        turnArc.setLatLngs(pts);
+    } else {
+        turnArc.setLatLngs([]);
+    }
+}
+
+// ---- compass rose ----------------------------------------------------
+// Heading-up: the card turns under a fixed index, so whatever sits at the
+// top of the dial is straight ahead. Everything shown here is telemetry the
+// app already had - heading, the course over ground added for the track
+// line, and the wind the HUD was already displaying.
+var windFrom = null;      // deg the wind is coming FROM (the WIND convention)
+var windSpeed = 0;        // m/s
+
+(function buildCompassTicks() {
+    var g = document.getElementById('cp-ticks');
+    if (!g) { return; }
+    for (var deg = 0; deg < 360; deg += 10) {
+        var major = (deg % 30) === 0;
+        var r1 = 94, r2 = major ? 80 : 87;
+        var rad = (deg - 90) * Math.PI / 180;
+        var ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        ln.setAttribute('x1', (100 + r1 * Math.cos(rad)).toFixed(2));
+        ln.setAttribute('y1', (100 + r1 * Math.sin(rad)).toFixed(2));
+        ln.setAttribute('x2', (100 + r2 * Math.cos(rad)).toFixed(2));
+        ln.setAttribute('y2', (100 + r2 * Math.sin(rad)).toFixed(2));
+        ln.setAttribute('class', major ? 'cp-tick major' : 'cp-tick');
+        g.appendChild(ln);
+    }
+})();
+
+var homeBearing = null;   // deg to home, null until known
+
+function setHomeBearing(deg) {
+    homeBearing = (deg >= 0) ? (((deg % 360) + 360) % 360) : null;
+}
+
+function setWind(fromDeg, speedMps) {
+    windFrom = ((fromDeg % 360) + 360) % 360;
+    windSpeed = speedMps;
+}
+
+function _updateCompass(heading, course) {
+    var rose = document.getElementById('cp-rose');
+    if (!rose) { return; }
+    rose.setAttribute('transform', 'rotate(' + (-heading).toFixed(2) + ' 100 100)');
+
+    var h = document.getElementById('cp-heading');
+    if (h) { h.textContent = Math.round(heading % 360) + '\u00b0'; }
+
+    // Course is blank rather than zero when the aircraft is too slow for
+    // the GPS to have a direction - a false 0 would read as due north.
+    var c = document.getElementById('cp-course');
+    if (c) { c.textContent = (course >= 0) ? (Math.round(course) + '\u00b0') : '---'; }
+
+    // The amber marker sits at the course, inside the card - so on screen it
+    // lands (course - heading) from the top, which is the drift angle.
+    var tm = document.getElementById('cp-trackmark');
+    if (tm) {
+        if (course >= 0) {
+            tm.style.display = '';
+            tm.setAttribute('transform', 'rotate(' + course.toFixed(2) + ' 100 100)');
+        } else {
+            tm.style.display = 'none';
+        }
+    }
+
+    var hg = document.getElementById('cp-home');
+    if (hg) {
+        if (homeBearing === null) {
+            hg.style.display = 'none';
+        } else {
+            hg.style.display = '';
+            hg.setAttribute('transform',
+                            'rotate(' + homeBearing.toFixed(2) + ' 100 100)');
+        }
+    }
+
+    var wg = document.getElementById('cp-wind');
+    var wt = document.getElementById('cp-windtext');
+    if (windFrom === null) {
+        if (wg) { wg.style.display = 'none'; }
+        if (wt) { wt.textContent = '--'; }
+        return;
+    }
+    if (wg) {
+        wg.style.display = '';
+        // WIND reports where the wind comes FROM; the arrow shows where it
+        // is pushing the aircraft, which is the opposite way.
+        var toward = (windFrom + 180) % 360;
+        wg.setAttribute('transform', 'rotate(' + toward.toFixed(2) + ' 100 100)');
+    }
+    // km/h, matching the wind readout in the telemetry panel.
+    if (wt) { wt.textContent = (windSpeed * 3.6).toFixed(1) + ' km/h'; }
+}
+
 function _animateMarker(now) {
     if (marker && animFrom && animTo) {
         var t = Math.min(1, (now - animStartTime) / animDuration);
@@ -670,6 +975,15 @@ function _animateMarker(now) {
             var inner = el.querySelector('div');
             if (inner) { inner.style.transform = 'rotate(' + currentHeading + 'deg)'; }
         }
+
+        if (trackCourse >= 0) {
+            var cdiff = ((animCourseTo - animCourseFrom + 540) % 360) - 180;
+            currentCourse = (animCourseFrom + cdiff * t + 360) % 360;
+        }
+        _drawVectors(lat, lon, currentHeading, currentCourse);
+        // Driven from the same interpolated values as the marker, so the
+        // card turns as smoothly as the aircraft icon does.
+        _updateCompass(currentHeading, currentCourse);
 
         if (followDrone && haveCentered) {
             // Skip sub-pixel pans. panTo() repositions the whole tile layer
@@ -1473,6 +1787,33 @@ class MapView(QWebEngineView):
 
     def update_position(self, lat: float, lon: float, heading: float = 0.0):
         self.page().runJavaScript(f"updatePosition({lat}, {lon}, {heading});")
+
+    def set_ground_track(self, course_deg: float, groundspeed: float):
+        """Course over ground and speed - the direction of travel, which is
+        not the heading whenever there is any wind."""
+        self.page().runJavaScript(
+            f"setGroundTrack({float(course_deg)}, {float(groundspeed)});"
+        )
+
+    def set_nav_target(self, bearing_deg: float, distance_m: float):
+        """Where the vehicle's navigation controller is steering."""
+        self.page().runJavaScript(
+            f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
+        )
+
+    def set_home_bearing(self, bearing_deg: float):
+        """Which way home lies, for the compass arrow. Negative hides it."""
+        self.page().runJavaScript(f"setHomeBearing({float(bearing_deg)});")
+
+    def set_wind(self, direction_from_deg: float, speed_mps: float):
+        """Wind for the compass rose. Direction is where it blows FROM, the
+        convention the WIND message and the HUD both use."""
+        self.page().runJavaScript(
+            f"setWind({float(direction_from_deg)}, {float(speed_mps)});"
+        )
+
+    def set_turn_rate(self, deg_per_s: float):
+        self.page().runJavaScript(f"setTurnRate({float(deg_per_s)});")
 
     def set_follow(self, follow: bool):
         self.page().runJavaScript(f"setFollow({'true' if follow else 'false'});")

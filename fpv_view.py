@@ -241,6 +241,9 @@ var DELAY_MAX_MS = 1600;
 var DELAY_FACTOR = 1.6;      // of the average gap between samples
 var avgPosIntervalMs = 350;
 var avgAttIntervalMs = 250;
+// Set from Python, which needs the same figure to draw the HUD overlay at
+// the moment this view is showing. One owner, so the two cannot drift.
+var overrideDelayMs = null;
 var SAMPLE_HISTORY_MS = 6000;
 
 // Rounds the corner where one pair of samples hands over to the next.
@@ -316,7 +319,12 @@ function initPose() {
 // One delay for both streams, set by the slower of the two. Delaying them
 // independently would let the aircraft face a direction that belonged to a
 // different moment than its position.
+function setPlaybackDelay(ms) {
+    overrideDelayMs = (typeof ms === 'number' && ms > 0) ? ms : null;
+}
+
 function playbackDelayMs() {
+    if (overrideDelayMs !== null) return overrideDelayMs;
     var slowest = Math.max(avgPosIntervalMs, avgAttIntervalMs);
     return Math.max(DELAY_MIN_MS, Math.min(DELAY_MAX_MS, slowest * DELAY_FACTOR));
 }
@@ -489,6 +497,13 @@ class FpvView(QWebEngineView):
         self.page().runJavaScript(
             f"setAircraftPosition({lat}, {lon}, {alt_msl}, {agl});"
         )
+
+    def set_playback_delay(self, delay_ms: float):
+        """How far behind the scene plays. Python owns it so the HUD drawn
+        over this view can be rendered at the same moment."""
+        if not self._token:
+            return
+        self.page().runJavaScript(f"setPlaybackDelay({float(delay_ms)});")
 
     def set_attitude(self, yaw_deg: float, pitch_deg: float, roll_deg: float):
         """One ATTITUDE."""

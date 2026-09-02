@@ -20,13 +20,14 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V1.15.0"
+APP_VERSION = "V1.16.0"
 
 import sys
 import os
 import math
 import html
 import time
+from collections import deque
 from datetime import datetime
 from PySide6.QtCore import Signal, QTimer, Qt
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap, QPen, QColor
@@ -1506,6 +1507,16 @@ class MainWindow(QMainWindow):
         self._flight_start = None
         # Accumulates the numbers reported after landing.
         self._flight_stats = FlightStats()
+        # Recent HUD state, so the overlay drawn over the 3D view can be
+        # rendered at the moment that view is actually showing rather than
+        # at the newest telemetry. Without this the instrument lines lead
+        # the scene by the playback delay - rolling out of a turn, the
+        # horizon line levelled a second before the ground did.
+        self._hud_history = deque(maxlen=240)
+        self._att_interval_ms = 250.0
+        self._pos_interval_ms = 350.0
+        self._last_att_time = None
+        self._last_pos_time = None
         # Flights whose link died before they could be closed off, oldest
         # first. A marginal radio drops repeatedly rather than once, so this
         # is a list: keeping only the most recent would silently discard the
@@ -1702,15 +1713,35 @@ class MainWindow(QMainWindow):
         # no point paying that for a hidden widget.
         self._last_att_deg = (math.degrees(yaw) % 360,
                               math.degrees(pitch), math.degrees(roll))
+        self._last_att_time = self._note_interval("_att_interval_ms",
+                                                  self._last_att_time)
+        self._record_hud_state()
         if self.view_stack.currentIndex() == 1:
             self._push_fpv_attitude()
             self._push_hud_overlay()
+
+    def on_ground_track(self, course_deg, groundspeed):
+        """Direction of travel, which the map draws alongside the heading -
+        the gap between the two is the crab angle."""
+        self.map_view.set_ground_track(course_deg, groundspeed)
+
+    def on_nav_target(self, bearing_deg, distance_m):
+        self.map_view.set_nav_target(bearing_deg, distance_m)
+
+    def on_turn_rate(self, deg_per_s):
+        self.map_view.set_turn_rate(deg_per_s)
+
+    def on_home_bearing(self, bearing_deg):
+        self.map_view.set_home_bearing(bearing_deg)
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
         self._flight_stats.on_position(lat, lon, alt)
+        self._last_pos_time = self._note_interval("_pos_interval_ms",
+                                                  self._last_pos_time)
+        self._record_hud_state()
         if self.view_stack.currentIndex() == 1:
             self._push_fpv_position()
         self._last_alt = alt
@@ -1777,6 +1808,95 @@ class MainWindow(QMainWindow):
             "padding: 3px 12px; border-radius: 4px;"
         )
 
+    def _note_interval(self, attr, previous):
+        """Rolling average of how often one message type arrives."""
+        now = time.monotonic()
+        if previous is not None:
+            gap_ms = (now - previous) * 1000.0
+            # Ignore a duplicate arrival and anything after a long silence:
+            # neither says what the normal rate is.
+            if 20.0 < gap_ms < 3000.0:
+                current = getattr(self, attr)
+                setattr(self, attr, current + (gap_ms - current) * 0.2)
+        return now
+
+    # Matches playbackDelayMs() in the 3D page, which takes this value from
+    # here rather than working it out again.
+    HUD_DELAY_MIN_MS = 150.0
+    HUD_DELAY_MAX_MS = 1600.0
+    HUD_DELAY_FACTOR = 1.6
+
+    def _playback_delay_ms(self) -> float:
+        slowest = max(self._att_interval_ms, self._pos_interval_ms)
+        return max(self.HUD_DELAY_MIN_MS,
+                   min(self.HUD_DELAY_MAX_MS, slowest * self.HUD_DELAY_FACTOR))
+
+    def _record_hud_state(self):
+        """Snapshot what the HUD is showing, with the time it was true."""
+        if self._last_att_time is None:
+            # No attitude has arrived yet, so the instruments are still at
+            # their defaults. Recording that would have the overlay show a
+            # level horizon for the length of the playback delay after
+            # connecting, while the 3D already showed the real attitude.
+            return
+        h = self.horizon
+        self._hud_history.append({
+            "t": time.monotonic(),
+            "roll": h.roll, "pitch": h.pitch, "heading": h.heading,
+            "airspeed": h.airspeed, "altitude": h.altitude,
+            "lat": h.lat, "lon": h.lon,
+        })
+
+    @staticmethod
+    def _blend(a, b, u):
+        if a is None or b is None:
+            return b if b is not None else a
+        return a + (b - a) * u
+
+    @staticmethod
+    def _blend_angle(a, b, u):
+        """Degrees, the short way round, so 359 -> 1 turns 2 not -358."""
+        if a is None or b is None:
+            return b if b is not None else a
+        return a + (((b - a + 540.0) % 360.0) - 180.0) * u
+
+    @staticmethod
+    def _blend_rad(a, b, u):
+        """The same for radians - roll comes off ATTITUDE over -pi..+pi, so
+        rolling through inverted wraps and a plain average would spin the
+        horizon the long way round."""
+        if a is None or b is None:
+            return b if b is not None else a
+        return a + (((b - a + 3.0 * math.pi) % (2.0 * math.pi)) - math.pi) * u
+
+    def _hud_state_at(self, when):
+        """What the HUD was showing at `when`, from the two snapshots either
+        side of it. None if there is nothing to interpolate between."""
+        history = self._hud_history
+        if len(history) < 2:
+            return None
+        if when <= history[0]["t"]:
+            # Nothing recorded that far back yet - hold the oldest sample,
+            # which is what the 3D view does with its own buffer.
+            return history[0]
+        if when >= history[-1]["t"]:
+            return history[-1]
+        for i in range(len(history) - 2, -1, -1):
+            a, b = history[i], history[i + 1]
+            if a["t"] <= when <= b["t"]:
+                span = b["t"] - a["t"]
+                u = (when - a["t"]) / span if span > 0 else 1.0
+                return {
+                    "roll": self._blend_rad(a["roll"], b["roll"], u),
+                    "pitch": self._blend(a["pitch"], b["pitch"], u),
+                    "heading": self._blend_angle(a["heading"], b["heading"], u),
+                    "airspeed": self._blend(a["airspeed"], b["airspeed"], u),
+                    "altitude": self._blend(a["altitude"], b["altitude"], u),
+                    "lat": self._blend(a["lat"], b["lat"], u),
+                    "lon": self._blend(a["lon"], b["lon"], u),
+                }
+        return history[-1]
+
     def _push_fpv_position(self):
         """Hand one position sample to the 3D view.
 
@@ -1798,6 +1918,7 @@ class MainWindow(QMainWindow):
 
     def _push_fpv_attitude(self):
         yaw_deg, pitch_deg, roll_deg = self._last_att_deg
+        self.fpv_view.set_playback_delay(self._playback_delay_ms())
         self.fpv_view.set_attitude(yaw_deg, pitch_deg, roll_deg)
 
     def _update_fpv_camera(self):
@@ -1827,6 +1948,20 @@ class MainWindow(QMainWindow):
             # old size - and the image gets stretched to fill the 3D view,
             # distorting every instrument on it. Keep the two in step.
             self.horizon.resize(size)
+        # Draw the instruments at the moment the scene below them is
+        # showing, not at the newest telemetry. The 3D view plays back
+        # slightly in the past so it moves smoothly on a slow link; drawing
+        # the HUD live made the lines lead the terrain by that much, which
+        # showed up as the horizon levelling before the ground did.
+        h = self.horizon
+        live = (h.roll, h.pitch, h.heading, h.airspeed, h.altitude, h.lat, h.lon)
+        delayed = self._hud_state_at(time.monotonic() - self._playback_delay_ms() / 1000.0)
+        if delayed is not None:
+            h.roll, h.pitch = delayed["roll"], delayed["pitch"]
+            h.heading, h.airspeed = delayed["heading"], delayed["airspeed"]
+            h.altitude = delayed["altitude"]
+            h.lat, h.lon = delayed["lat"], delayed["lon"]
+
         image = QImage(size, QImage.Format_ARGB32)
         image.fill(Qt.transparent)
         self.horizon.overlay_mode = True
@@ -1838,6 +1973,9 @@ class MainWindow(QMainWindow):
                                 QWidget.RenderFlag.DrawChildren)
         finally:
             self.horizon.overlay_mode = False
+            # The widget is shared with the 2D HUD, which must stay live.
+            (h.roll, h.pitch, h.heading, h.airspeed,
+             h.altitude, h.lat, h.lon) = live
 
         buf = QBuffer()
         buf.open(QIODevice.WriteOnly)
@@ -1904,6 +2042,7 @@ class MainWindow(QMainWindow):
 
     def on_wind(self, direction, speed):
         self.horizon.set_wind(direction, speed)
+        self.map_view.set_wind(direction, speed)
         self._flight_stats.on_wind(speed)
         # direction from atan2-based math (WIND_COV path) can come out
         # negative before wrapping - the HUD widget wraps it internally
@@ -2301,6 +2440,10 @@ class MainWindow(QMainWindow):
         self.link = MavlinkLink(connection_string)
         self.link.attitude_update.connect(self.on_attitude)
         self.link.position_update.connect(self.on_position)
+        self.link.ground_track_update.connect(self.on_ground_track)
+        self.link.nav_target_update.connect(self.on_nav_target)
+        self.link.turn_rate_update.connect(self.on_turn_rate)
+        self.link.home_bearing_update.connect(self.on_home_bearing)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
         self.link.status_update.connect(self.on_status)
