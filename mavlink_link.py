@@ -126,6 +126,12 @@ class MavlinkLink(QThread):
     # is close enough that the bearing is meaningless.
     home_bearing_update = Signal(float)          # deg, or -1
 
+    # The pitch controller's integrator - PIDP.I in the dataflash log. Held
+    # steadily above zero the aircraft is carrying up elevator to stay
+    # level, which is what a nose-heavy balance looks like; below zero,
+    # the reverse. Only arrives when GCS_PID_MASK asks for it.
+    pitch_integrator_update = Signal(float)
+
     # Where home actually is, for the map marker.
     home_position_update = Signal(float, float)  # lat, lon
 
@@ -188,6 +194,13 @@ class MavlinkLink(QThread):
         # these ourselves from other messages (see run()).
         self._attitude_hz = attitude_hz
         self._position_hz = position_hz
+        # GCS_PID_MASK is a vehicle-wide parameter, not a per-link stream
+        # rate: turning it on affects every ground station talking to this
+        # aircraft. So the value found on arrival is remembered and put back
+        # when the link closes, and only the pitch bit is ever touched.
+        self._want_pitch_pid = False
+        self._pid_mask_original = None
+        self._pid_mask_current = None
         self._full_telemetry = full_telemetry
         self._home_lat = None
         # Arming is when ArduPilot sets home, so an arm is the cue to ask
@@ -215,6 +228,7 @@ class MavlinkLink(QThread):
             # sending the reduced set with nothing left to explain why. Best
             # effort - on a link that has already dropped this goes nowhere,
             # and that is fine.
+            self._restore_pid_mask()
             self._restore_default_rates()
             # The thread owns the connection and closes it on its own way
             # out. Closing it from stop() instead meant the socket could be
@@ -301,6 +315,8 @@ class MavlinkLink(QThread):
                     0, 0, 0, 0, 0, 0, 0, 0,
                 )
             self.apply_stream_rates()
+            # Ask what it is now; the reply drives everything else.
+            self._request_pid_mask()
         except Exception as e:
             self.connection_status.emit(False, f"Connection failed: {e}")
             return
@@ -523,6 +539,11 @@ class MavlinkLink(QThread):
                     result_name = f"result {msg.result}"
                 self.command_feedback.emit(f"ACK: {cmd_name} -> {result_name}")
 
+            elif mtype == "PID_TUNING":
+                # axis 2 is pitch (PID_TUNING_PITCH).
+                if msg.axis == 2:
+                    self.pitch_integrator_update.emit(float(msg.I))
+
             elif mtype == "PARAM_VALUE":
                 # Confirmation for change_loiter_radius() - a PARAM_SET is
                 # fire-and-forget (no COMMAND_ACK), so the echoed
@@ -530,10 +551,13 @@ class MavlinkLink(QThread):
                 param_id = msg.param_id
                 if isinstance(param_id, bytes):
                     param_id = param_id.decode(errors="replace")
-                if param_id.rstrip("\x00") == "WP_LOITER_RAD":
+                name = param_id.rstrip("\x00")
+                if name == "WP_LOITER_RAD":
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
                     )
+                elif name == "GCS_PID_MASK":
+                    self._on_pid_mask(int(msg.param_value))
 
             elif mtype == "WIND":
                 # ArduPilot-specific message (id 168): direction is where
@@ -790,6 +814,68 @@ class MavlinkLink(QThread):
                                      f"MAVLINK_MSG_ID_{name}", None)
                     if msg_id is not None:
                         self._set_interval(msg_id, interval)
+        except Exception:
+            pass
+
+    # Bit 1 (value 2) is pitch, per GCS_PID_MASK's own documentation.
+    PID_MASK_PITCH = 2
+
+    def set_pitch_pid_enabled(self, enabled: bool):
+        """Ask the vehicle to report its pitch PID terms, or stop."""
+        self._want_pitch_pid = bool(enabled)
+        if self._pid_mask_current is not None:
+            self._apply_pid_mask()
+
+    def _request_pid_mask(self):
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_read_send(
+                    self.master.target_system, self.master.target_component,
+                    b"GCS_PID_MASK", -1)
+        except Exception:
+            pass
+
+    def _on_pid_mask(self, value: int):
+        """The vehicle told us its current mask."""
+        if self._pid_mask_original is None:
+            self._pid_mask_original = value
+        self._pid_mask_current = value
+        self._apply_pid_mask()
+
+    def _apply_pid_mask(self):
+        """Set or clear only the pitch bit, leaving the rest as found."""
+        if self._pid_mask_current is None:
+            return
+        if self._want_pitch_pid:
+            wanted = self._pid_mask_current | self.PID_MASK_PITCH
+        else:
+            # Back to whatever the pitch bit was before we arrived, rather
+            # than simply clearing it - somebody may have wanted it on.
+            was_set = (self._pid_mask_original or 0) & self.PID_MASK_PITCH
+            wanted = ((self._pid_mask_current & ~self.PID_MASK_PITCH)
+                      | was_set)
+        if wanted != self._pid_mask_current:
+            self._set_pid_mask(wanted)
+
+    def _restore_pid_mask(self):
+        """Put the mask back exactly as it was found."""
+        if (self._pid_mask_original is None
+                or self._pid_mask_current == self._pid_mask_original):
+            return
+        self._set_pid_mask(self._pid_mask_original)
+
+    def _set_pid_mask(self, value: int):
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_set_send(
+                    self.master.target_system, self.master.target_component,
+                    b"GCS_PID_MASK", float(value),
+                    mavutil.mavlink.MAV_PARAM_TYPE_INT16)
+            self._pid_mask_current = value
         except Exception:
             pass
 

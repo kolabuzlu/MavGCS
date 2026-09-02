@@ -326,6 +326,51 @@ LEAFLET_HTML = """
     </div>
   </div>
 </div>
+<div id="cog-readout" style="
+    /* Directly above the credit line, same styling, so the two read as one
+       corner rather than two competing labels. */
+    position: absolute; bottom: 40px; left: 8px;
+    background: rgba(0,0,0,0.6);
+    padding: 5px 8px 3px 8px; border-radius: 4px;
+    font-family: sans-serif;
+    z-index: 1000; pointer-events: none; display: none;
+">
+    <svg id="cog-svg" width="158" height="44" viewBox="0 0 158 44">
+        <!-- Plan view, nose to the left, so fore and aft run the way the
+             marker slides. Drawn once; only the marker moves. -->
+        <g id="cog-plane" fill="#8f9aa3">
+            <!-- Blunt nose at the left, tapering to a point at the tail.
+                 Which end is the nose IS the meaning here, so the two ends
+                 must never look alike. -->
+            <path d="M12,22 Q12,15.5 34,15.5 L118,18.5 L140,22 L118,25.5
+                     L34,28.5 Q12,28.5 12,22 Z"/>
+            <!-- Main wing, swept back, centred on the neutral line. -->
+            <path d="M56,17 L84,17 L94,2 L78,2 Z"/>
+            <path d="M56,27 L84,27 L94,42 L78,42 Z"/>
+            <!-- Tailplane: clearly the smaller pair, and well aft. -->
+            <path d="M112,19 L126,19 L132,10 L122,10 Z"/>
+            <path d="M112,25 L126,25 L132,34 L122,34 Z"/>
+            <!-- The fin, edge on from above - a last cue for the tail. -->
+            <path d="M106,20.4 L138,21.5 L138,22.5 L106,23.6 Z"
+                  fill="#c3ced6"/>
+        </g>
+        <!-- Where a balanced aircraft would sit, so the marker has
+             something to be displaced from. -->
+        <line id="cog-neutral" x1="70" y1="6" x2="70" y2="38"
+              stroke="rgba(255,255,255,0.35)" stroke-width="1"
+              stroke-dasharray="2 2"/>
+        <!-- The surveyor's centre-of-gravity symbol: a quartered circle.
+             Recognisable to anyone who has balanced an aeroplane. -->
+        <g id="cog-marker">
+            <circle cx="70" cy="22" r="6.5" fill="#ffffff"
+                    stroke="#111" stroke-width="1"/>
+            <path d="M70,15.5 A6.5,6.5 0 0,1 76.5,22 L70,22 Z" fill="#111"/>
+            <path d="M70,28.5 A6.5,6.5 0 0,1 63.5,22 L70,22 Z" fill="#111"/>
+        </g>
+    </svg>
+    <div id="cog-label" style="font-size: 11px; color: #cfd8e0;
+         text-align: center; margin-top: 1px;"></div>
+</div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
     background: rgba(0,0,0,0.6); color: white;
@@ -965,6 +1010,52 @@ var windSpeed = 0;        // m/s
 })();
 
 var homeBearing = null;   // deg to home, null until known
+
+// state is 'off', 'waiting', 'sampling' or a verdict; only the verdict
+// is coloured, because that is the only one saying anything about the
+// aeroplane rather than about the data collection.
+var COG_COLOURS = {
+    'Nose heavy': '#ffa726',
+    'Tail heavy': '#ffa726',
+    'Balanced': '#7ddc7d'
+};
+
+// How far the marker may slide from neutral, in SVG units. Bounded on
+// purpose: the pitch integrator says which way the balance is out and
+// roughly how much, not where the centre of gravity is in millimetres,
+// and a marker running off the tail would claim precision that is not
+// there.
+var COG_MAX_SHIFT = 26;
+
+function setCogStatus(state, text, deflection) {
+    var el = document.getElementById('cog-readout');
+    if (!el) { return; }
+    if (state === 'off') {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = '';
+
+    var label = document.getElementById('cog-label');
+    if (label) {
+        label.textContent = text;
+        label.style.color = COG_COLOURS[state] || '#cfd8e0';
+    }
+
+    var settled = COG_COLOURS.hasOwnProperty(state);
+    var plane = document.getElementById('cog-plane');
+    var marker = document.getElementById('cog-marker');
+    // While still collecting, the aeroplane and the symbol are dimmed and
+    // the marker sits at neutral: it has nothing to report yet, and a
+    // confident-looking marker would be a lie.
+    if (plane) { plane.setAttribute('opacity', settled ? '1' : '0.45'); }
+    if (marker) {
+        marker.setAttribute('opacity', settled ? '1' : '0.35');
+        var d = settled ? Math.max(-1, Math.min(1, deflection || 0)) : 0;
+        marker.setAttribute('transform',
+                            'translate(' + (d * COG_MAX_SHIFT).toFixed(1) + ',0)');
+    }
+}
 
 function setHomeBearing(deg) {
     homeBearing = (deg >= 0) ? (((deg % 360) + 360) % 360) : null;
@@ -1932,6 +2023,16 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
+
+    def set_cog_status(self, state: str, text: str, deflection: float = 0.0):
+        """The live balance indicator above the credit line.
+
+        `deflection` runs -1 (fully forward) to +1 (fully aft) and only
+        positions the marker; it is not a centre-of-gravity measurement.
+        """
+        self.page().runJavaScript(
+            f"setCogStatus({json.dumps(state)}, {json.dumps(text)}, "
+            f"{float(deflection)});")
 
     def show_cache_limits(self, map_mb: int, terrain_mb: int):
         """Point the cache dropdowns at what the app has actually applied."""

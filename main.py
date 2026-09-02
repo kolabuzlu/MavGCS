@@ -129,6 +129,34 @@ class FlightStats:
     # which samples feed the averages, not what gets reported.
     AIRBORNE_SPEED_MPS = 3.0
     AIRBORNE_ALT_M = 3.0
+
+    # ---- balance, from the pitch integrator -----------------------------
+    # ArduPilot's own guidance: a pitch integrator held consistently above
+    # zero means the aircraft is carrying up elevator to stay level, which
+    # is what nose-heavy looks like; consistently below means the reverse.
+    #
+    # That only holds in steady, hands-off, level flight, so a sample is
+    # taken nowhere else. Averaging across turns, climbs and manual flying
+    # would produce a confident number that means nothing at all - the one
+    # outcome worse than saying "not enough evidence".
+    BALANCE_MODES = ("CRUISE", "FBWB", "AUTO")
+    BALANCE_MAX_ROLL_DEG = 5.0
+    BALANCE_MAX_CLIMB_MPS = 0.5
+    # After a mode change the integrator is still winding to its new
+    # working point, and says more about the transition than the balance.
+    BALANCE_SETTLE_S = 20.0
+    # Less steady flight than this is not evidence of anything.
+    BALANCE_MIN_SPAN_S = 30.0
+    # The source describes a sign held CONSISTENTLY, so consistency is what
+    # is measured rather than the size of the average.
+    BALANCE_AGREEMENT = 0.8
+    # Below this the integrator is doing so little that calling it either
+    # way would be reading noise.
+    BALANCE_DEADBAND = 0.05
+    # The integrator says which way the balance is out and roughly how
+    # much; it is not a centre-of-gravity measurement. This is only the
+    # value at which the indicator's marker reaches its travel stop.
+    BALANCE_FULL_SCALE = 1.0
     # Below this a report is not worth showing - an arm/disarm on the bench
     # is not a flight.
     MIN_REPORTABLE_S = 30.0
@@ -170,6 +198,11 @@ class FlightStats:
         # flight at 2Hz is about 14,000 points, a few hundred kilobytes.
         self.track = []
         self._amsl = None
+        self.balance_samples = []   # (monotonic time, pitch integrator)
+        self._roll_deg = 0.0
+        self._climb = 0.0
+        self._mode = None
+        self._mode_since = None
         self._alt = 0.0
         self._gs = 0.0
 
@@ -272,6 +305,7 @@ class FlightStats:
             m.wind_max = max(m.wind_max, p.wind_max)
             m.distance_m += p.distance_m
             m.track.extend(p.track)
+            m.balance_samples.extend(p.balance_samples)
             if p.amsl_max is not None:
                 m.amsl_max = p.amsl_max if m.amsl_max is None else max(m.amsl_max, p.amsl_max)
             if p.volt_start is not None and m.volt_start is None:
@@ -309,6 +343,7 @@ class FlightStats:
         if not self.running:
             return
         self._gs = groundspeed
+        self._climb = climb
         if self._airborne:
             self.ever_airborne = True
             self._air_samples += 1
@@ -336,6 +371,78 @@ class FlightStats:
             )
         self._last_pos = (lat, lon)
 
+    def on_attitude(self, roll_deg):
+        """Roll only - the balance check needs to know the wings are level."""
+        self._roll_deg = roll_deg
+
+    def on_pitch_integrator(self, value):
+        """One PID_TUNING pitch sample, kept only if the flight is steady.
+
+        Every rejection here is deliberate: a sample taken in a turn, a
+        climb, or a mode where the pilot is flying the elevator says
+        nothing about where the centre of gravity is.
+        """
+        if not self.running or not self.ever_airborne:
+            return
+        if self._mode not in self.BALANCE_MODES:
+            return
+        if self._mode_since is None:
+            return
+        if time.monotonic() - self._mode_since < self.BALANCE_SETTLE_S:
+            return
+        if abs(self._roll_deg) > self.BALANCE_MAX_ROLL_DEG:
+            return
+        if abs(self._climb) > self.BALANCE_MAX_CLIMB_MPS:
+            return
+        self.balance_samples.append((time.monotonic(), float(value)))
+
+    def balance_status(self):
+        """(state, text, marker position) for the indicator on the map.
+
+        Deliberately shows the collecting as well as the answer: without
+        it the readout would sit blank for a whole circuit and look
+        broken, when in fact it is waiting for the level flight that makes
+        the number mean anything.
+        """
+        samples = self.balance_samples
+        if not samples:
+            return ("waiting", "waiting for level cruise", 0.0)
+        span = samples[-1][0] - samples[0][0]
+        verdict = self.balance_verdict()
+        if verdict is None:
+            return ("sampling",
+                    f"sampling {span:.0f}/{self.BALANCE_MIN_SPAN_S:.0f}s", 0.0)
+        headline, _ = verdict
+        mean = sum(v for _, v in samples) / len(samples)
+        # Positive means up elevator is being held, which is nose heavy, so
+        # the marker belongs forward - to the left, where the nose is drawn.
+        shift = max(-1.0, min(1.0, -mean / self.BALANCE_FULL_SCALE))
+        return (headline, f"{headline} ({mean:+.2f})", shift)
+
+    def balance_verdict(self):
+        """(headline, detail), or None when there is not enough to say.
+
+        Returning None is a real answer: a flight with no settled level
+        cruise cannot tell you anything about the balance, and should say
+        so rather than average whatever it happened to see.
+        """
+        samples = self.balance_samples
+        if len(samples) < 5:
+            return None
+        span = samples[-1][0] - samples[0][0]
+        if span < self.BALANCE_MIN_SPAN_S:
+            return None
+
+        values = [v for _, v in samples]
+        mean = sum(values) / len(values)
+        agree = sum(1 for v in values if (v > 0) == (mean > 0)) / len(values)
+        detail = (f"{mean:+.3f} mean over {span:.0f}s level, "
+                  f"{agree * 100:.0f}% same sign")
+
+        if abs(mean) < self.BALANCE_DEADBAND or agree < self.BALANCE_AGREEMENT:
+            return ("Balanced", detail)
+        return ("Nose heavy" if mean > 0 else "Tail heavy", detail)
+
     def on_wind(self, speed_mps):
         if self.running:
             self.wind_max = max(self.wind_max, speed_mps)
@@ -343,6 +450,12 @@ class FlightStats:
     def on_status(self, status):
         if not self.running:
             return
+        if "mode" in status and status["mode"] != self._mode:
+            # The settle timer runs from the mode change, not from arming:
+            # entering cruise is when the integrator starts winding to its
+            # new working point.
+            self._mode = status["mode"]
+            self._mode_since = time.monotonic()
         if "amsl_alt" in status:
             try:
                 amsl = float(status["amsl_alt"])
@@ -1243,6 +1356,17 @@ class TelemetryRatesDialog(QDialog):
     SETTING_ATTITUDE = "telemetry_attitude_hz"
     SETTING_POSITION = "telemetry_position_hz"
     SETTING_FULL = "telemetry_full"
+    SETTING_COG = "cog_check"
+    # On by default: it is a readout people ask for by name, and hiding it
+    # behind a setting meant looking for something that was never switched
+    # on. It costs about 40 B/s of telemetry and sets no flight parameter -
+    # only whether the vehicle reports its pitch controller - and the link
+    # puts that back as it found it on the way out.
+    DEFAULT_COG = True
+
+    @classmethod
+    def cog_enabled(cls) -> bool:
+        return bool(load_settings().get(cls.SETTING_COG, cls.DEFAULT_COG))
 
     DEFAULT_ATTITUDE = 5.0
     DEFAULT_POSITION = 2.0
@@ -1312,6 +1436,15 @@ class TelemetryRatesDialog(QDialog):
         self.full_box.toggled.connect(self._sync_enabled)
         layout.addWidget(self.full_box)
 
+        self.cog_box = QCheckBox("Estimate centre of gravity")
+        self.cog_box.setChecked(self.cog_enabled())
+        self.cog_box.setToolTip(
+            "Asks the vehicle to report its pitch controller, and reads the "
+            "balance from it during steady level flight. Reported after "
+            "landing. Unlike the rates above this sets a parameter on the "
+            "aircraft, so it is off unless you want it.")
+        layout.addWidget(self.cog_box)
+
         self.note = QLabel()
         self.note.setWordWrap(True)
         self.note.setStyleSheet("font-size: 11px; color: #aaa;")
@@ -1345,6 +1478,7 @@ class TelemetryRatesDialog(QDialog):
         save_setting(self.SETTING_ATTITUDE, att)
         save_setting(self.SETTING_POSITION, pos)
         save_setting(self.SETTING_FULL, full)
+        save_setting(self.SETTING_COG, self.cog_box.isChecked())
         return att, pos, full
 
 
@@ -2211,6 +2345,7 @@ class MainWindow(QMainWindow):
         self._tile_stats_timer = QTimer(self)
         self._tile_stats_timer.setInterval(2000)
         self._tile_stats_timer.timeout.connect(self._push_tile_cache_stats)
+        self._tile_stats_timer.timeout.connect(self._push_cog_status)
         self._tile_stats_timer.start()
 
         self._update_checker = None
@@ -2252,6 +2387,7 @@ class MainWindow(QMainWindow):
         # no point paying that for a hidden widget.
         self._last_att_deg = (math.degrees(yaw) % 360,
                               math.degrees(pitch), math.degrees(roll))
+        self._flight_stats.on_attitude(math.degrees(roll))
         self._last_att_time = self._note_interval("_att_interval_ms",
                                                   self._last_att_time)
         self._record_hud_state()
@@ -2361,6 +2497,7 @@ class MainWindow(QMainWindow):
         att, pos, full = dialog.save()
         if self.link is not None:
             self.link.set_stream_rates(att, pos, full)
+            self.link.set_pitch_pid_enabled(dialog.cog_box.isChecked())
 
     def on_check_updates(self, silent: bool = False):
         """Ask GitHub what the latest release is, off the GUI thread.
@@ -3040,6 +3177,9 @@ class MainWindow(QMainWindow):
         att, pos, full = TelemetryRatesDialog.current()
         self.link = MavlinkLink(connection_string, attitude_hz=att,
                                 position_hz=pos, full_telemetry=full)
+        # Off unless asked for: this one sets a parameter on the aircraft,
+        # which every other ground station shares.
+        self.link.set_pitch_pid_enabled(TelemetryRatesDialog.cog_enabled())
         self.link.attitude_update.connect(self.on_attitude)
         self.link.position_update.connect(self.on_position)
         self.link.ground_track_update.connect(self.on_ground_track)
@@ -3047,6 +3187,8 @@ class MainWindow(QMainWindow):
         self.link.turn_rate_update.connect(self.on_turn_rate)
         self.link.home_bearing_update.connect(self.on_home_bearing)
         self.link.home_position_update.connect(self.on_home_position)
+        self.link.pitch_integrator_update.connect(
+            self._flight_stats.on_pitch_integrator)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
         self.link.status_update.connect(self.on_status)
@@ -3104,6 +3246,14 @@ class MainWindow(QMainWindow):
         terrain_provider.set_cache_limit(terrain_mb * 1024 * 1024)
         self.map_view.show_cache_limits(map_mb, terrain_mb)
         self._push_tile_cache_stats()
+
+    def _push_cog_status(self):
+        """Keep the map's balance readout current, or hide it."""
+        if not TelemetryRatesDialog.cog_enabled():
+            self.map_view.set_cog_status("off", "", 0.0)
+            return
+        state, text, shift = self._flight_stats.balance_status()
+        self.map_view.set_cog_status(state, text, shift)
 
     def on_tile_cache_clear(self):
         self.tile_server.clear()
