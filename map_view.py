@@ -47,10 +47,13 @@ LEAFLET_HTML = """
   }
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
-       same size and styling so the two read as one stack of instruments. */
+       same size and position so the two read as one stack of instruments.
+       Deliberately more transparent than the radar: that one is a data
+       display which needs its own ground, while this is a dial you read
+       against the map underneath it. */
     position: absolute; bottom: 234px; right: 8px;
     width: 200px; height: 200px;
-    background: rgba(30,30,30,0.75);
+    background: rgba(30,30,30,0.50);
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px;
     z-index: 1000;
@@ -58,7 +61,7 @@ LEAFLET_HTML = """
     font-family: sans-serif;
   }
   #compass svg { display: block; width: 100%; height: 100%; }
-  #compass .cp-face { fill: rgba(0,0,0,0.35); }
+  #compass .cp-face { fill: rgba(0,0,0,0.22); }
   #compass .cp-rim { fill: none; stroke: rgba(255,255,255,0.18); stroke-width: 2; }
   #compass .cp-tick { stroke: rgba(255,255,255,0.55); stroke-width: 1.5; }
   #compass .cp-tick.major { stroke: #ffffff; stroke-width: 2.5; }
@@ -664,6 +667,42 @@ var allWaypointLayers = [waypointLine];
 // The batch currently sitting on the vehicle. Sending a new mission
 // replaces it, on the map as well as on the aircraft.
 var sentLayers = [];
+
+// Where the vehicle will return to. Drawn beneath the aircraft and the
+// waypoints - it is a reference point, not something you interact with, and
+// it must never hide the thing you are actually watching.
+var homeMarker = null;
+var homeIcon = L.divIcon({
+    className: 'home-icon',
+    html: '<svg width="34" height="34" viewBox="0 0 28 28">' +
+          '<circle cx="14" cy="14" r="12" fill="rgba(20,20,20,0.72)" ' +
+          'stroke="#4caf50" stroke-width="2"/>' +
+          '<path d="M14 6 L22 13.5 L6 13.5 Z" fill="#ffffff"/>' +
+          '<rect x="8.5" y="13.5" width="11" height="7" fill="#ffffff"/>' +
+          '<rect x="12.2" y="16" width="3.6" height="4.5" fill="#4caf50"/>' +
+          '</svg>',
+    iconSize: [34, 34],
+    iconAnchor: [17, 17]
+});
+
+function setHome(lat, lon) {
+    var ll = [lat, lon];
+    if (homeMarker === null) {
+        homeMarker = L.marker(ll, {icon: homeIcon, zIndexOffset: -500,
+                                   interactive: true}).addTo(map);
+    } else {
+        homeMarker.setLatLng(ll);
+    }
+    homeMarker.bindTooltip('Home ' + lat.toFixed(6) + ', ' + lon.toFixed(6),
+                           {direction: 'top', offset: [0, -14]});
+}
+
+function clearHome() {
+    if (homeMarker !== null) {
+        map.removeLayer(homeMarker);
+        homeMarker = null;
+    }
+}
 
 // `sent` draws the muted version used for a mission already uploaded.
 // Numbering restarts at 1 for each mission because that is what the
@@ -1800,6 +1839,13 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
+
+    def set_home(self, lat: float, lon: float):
+        """Place (or move) the home marker."""
+        self.page().runJavaScript(f"setHome({float(lat)}, {float(lon)});")
+
+    def clear_home(self):
+        self.page().runJavaScript("clearHome();")
 
     def set_home_bearing(self, bearing_deg: float):
         """Which way home lies, for the compass arrow. Negative hides it."""

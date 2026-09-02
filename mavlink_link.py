@@ -126,6 +126,9 @@ class MavlinkLink(QThread):
     # is close enough that the bearing is meaningless.
     home_bearing_update = Signal(float)          # deg, or -1
 
+    # Where home actually is, for the map marker.
+    home_position_update = Signal(float, float)  # lat, lon
+
     def __init__(self, connection_string="udpin:0.0.0.0:14550", parent=None):
         """
         connection_string examples:
@@ -147,6 +150,9 @@ class MavlinkLink(QThread):
         # State for values MAVLink doesn't hand us directly - we compute
         # these ourselves from other messages (see run()).
         self._home_lat = None
+        # Arming is when ArduPilot sets home, so an arm is the cue to ask
+        # again rather than trust that the announcement reached us.
+        self._was_armed = False
         self._home_lon = None
         self._last_amsl_alt_m = None  # from GLOBAL_POSITION_INT.alt (AMSL)
         self._gps_fix_type = None  # from GPS_RAW_INT.fix_type, used by the EKF status color
@@ -519,8 +525,17 @@ class MavlinkLink(QThread):
                 self.wind_update.emit(direction_from, speed)
 
             elif mtype == "HOME_POSITION":
-                self._home_lat = msg.latitude / 1e7
-                self._home_lon = msg.longitude / 1e7
+                lat = msg.latitude / 1e7
+                lon = msg.longitude / 1e7
+                moved = (self._home_lat is None
+                         or abs(lat - self._home_lat) > 1e-7
+                         or abs(lon - self._home_lon) > 1e-7)
+                self._home_lat = lat
+                self._home_lon = lon
+                # Only on a real change: this arrives again every time it is
+                # re-requested, and redrawing an unmoved marker is noise.
+                if moved:
+                    self.home_position_update.emit(lat, lon)
 
             elif mtype == "GPS_RAW_INT":
                 sat_count = "--" if msg.satellites_visible == 255 else str(msg.satellites_visible)
@@ -686,6 +701,30 @@ class MavlinkLink(QThread):
                     msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
                 self.status_update.emit({"mode": mode, "armed": "YES" if armed else "no"})
+
+                # ArduPilot sets home at arming and announces it once. Once
+                # is not much of a guarantee over a radio link that drops
+                # packets, and missing it means no home marker for the whole
+                # flight - so ask directly on the transition.
+                if armed and not self._was_armed:
+                    self._request_home()
+                self._was_armed = armed
+
+    def _request_home(self):
+        """Ask the vehicle to send HOME_POSITION now."""
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.command_long_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    mavutil.mavlink.MAV_CMD_GET_HOME_POSITION,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                )
+        except Exception:
+            # Best effort: the marker simply waits for the next arm.
+            pass
 
     # Force-arm/disarm magic value per MAV_CMD_COMPONENT_ARM_DISARM's spec:
     # bypasses ArduPilot's pre-arm safety checks.

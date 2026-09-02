@@ -1954,6 +1954,9 @@ class MainWindow(QMainWindow):
     def on_home_bearing(self, bearing_deg):
         self.map_view.set_home_bearing(bearing_deg)
 
+    def on_home_position(self, lat, lon):
+        self.map_view.set_home(lat, lon)
+
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
         self.horizon.set_heading(heading)
@@ -2695,6 +2698,8 @@ class MainWindow(QMainWindow):
         # A new connection is a new flight: start with a clean trail rather
         # than drawing this one on top of the last one's.
         self.map_view.clear_trail()
+        # Home belongs to the vehicle we were talking to, not the next one.
+        self.map_view.clear_home()
         self.link = MavlinkLink(connection_string)
         self.link.attitude_update.connect(self.on_attitude)
         self.link.position_update.connect(self.on_position)
@@ -2702,6 +2707,7 @@ class MainWindow(QMainWindow):
         self.link.nav_target_update.connect(self.on_nav_target)
         self.link.turn_rate_update.connect(self.on_turn_rate)
         self.link.home_bearing_update.connect(self.on_home_bearing)
+        self.link.home_position_update.connect(self.on_home_position)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
         self.link.status_update.connect(self.on_status)
