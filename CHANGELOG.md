@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.17.5 - Centre of gravity indicator added.
+## V1.17.5 - Center of gravity indicator added.
 Bug fixes and improvements.
 
 ## V1.17.4 - Map caching on by default.
