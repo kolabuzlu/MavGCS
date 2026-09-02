@@ -390,6 +390,17 @@ class MavlinkLink(QThread):
                 lon = msg.lon / 1e7
                 alt = msg.relative_alt / 1000.0
                 heading = msg.hdg / 100.0 if msg.hdg != 65535 else 0.0
+
+                # AMSL first, deliberately. Both come out of this one
+                # message, but the flight track records a point the moment
+                # the position arrives and stamps it with whatever altitude
+                # it has at that instant. Emitted the other way round, the
+                # first point of every flight was stamped with no altitude
+                # at all. AMSL (not relative) because the terrain radar
+                # compares it against geoid-referenced elevation data.
+                self._last_amsl_alt_m = msg.alt / 1000.0
+                self.status_update.emit({"amsl_alt": f"{self._last_amsl_alt_m:.2f}"})
+
                 self.position_update.emit(lat, lon, alt, heading)
 
                 # vx/vy are ground velocity north/east in cm/s. Below a
@@ -401,11 +412,6 @@ class MavlinkLink(QThread):
                           if groundspeed >= 1.0 else -1.0)
                 self.ground_track_update.emit(course, groundspeed)
 
-                self._last_amsl_alt_m = msg.alt / 1000.0
-                # AMSL (not relative) altitude - needed to compare against
-                # Copernicus terrain elevation for the terrain radar, which
-                # is geoid-referenced (~= MSL), not relative-to-home.
-                self.status_update.emit({"amsl_alt": f"{self._last_amsl_alt_m:.2f}"})
                 if self._home_lat is not None:
                     dist_home = self._haversine_m(lat, lon, self._home_lat, self._home_lon)
                     self.status_update.emit({"dist_home": f"{dist_home:.2f}"})

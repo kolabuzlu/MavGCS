@@ -20,7 +20,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V1.17.2"
+APP_VERSION = "V1.17.3"
 
 import sys
 import os
@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QStackedWidget,
     QSizePolicy,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QMenu,
-    QFileDialog,
+    QFileDialog, QRadioButton, QButtonGroup,
 )
 
 from mavlink_link import MavlinkLink, PLANE_MODES
@@ -56,7 +56,7 @@ from tile_cache import TileCacheServer
 from fpv_view import FpvView
 from app_paths import data_dir, load_settings, resource_path, save_setting
 from update_check import UpdateChecker, UpdateDownloader, RELEASES_PAGE
-from kmz_export import write_kmz
+from track_export import write_track
 
 
 class TelemetryPanel(QFrame):
@@ -429,6 +429,66 @@ class FlightStats:
         return chr(10).join(lines)
 
 
+class TrackFormatDialog(QDialog):
+    """Which file format to save the flown track as.
+
+    Asked here rather than left to the save dialog's type list because the
+    three are not interchangeable - GPX in particular cannot express an
+    altitude measured from the ground - and a line of explanation beside
+    each is worth more than three extensions in a dropdown.
+    """
+
+    # (extension, label, what it is good for)
+    FORMATS = [
+        (".kmz", "KMZ - Google Earth",
+         "One compact file. Replays the flight with a time slider."),
+        (".kml", "KML - Google Earth (uncompressed)",
+         "The same document as KMZ, but plain text you can open and read."),
+        (".gpx", "GPX - GPS exchange format",
+         "Read by almost every mapping and GPS tool. Carries altitude only "
+         "when the vehicle reported it above sea level."),
+    ]
+
+    def __init__(self, current=".kmz", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Save Track")
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        heading = QLabel("Save the flown track as:")
+        heading.setStyleSheet("font-weight: bold;")
+        layout.addWidget(heading)
+
+        self._group = QButtonGroup(self)
+        for ext, label, blurb in self.FORMATS:
+            radio = QRadioButton(label)
+            radio.setChecked(ext == current)
+            self._group.addButton(radio)
+            radio.setProperty("ext", ext)
+            layout.addWidget(radio)
+
+            note = QLabel(blurb)
+            note.setWordWrap(True)
+            note.setStyleSheet("font-size: 11px; color: #aaa;")
+            note.setContentsMargins(22, 0, 0, 4)
+            layout.addWidget(note)
+
+        # Nothing matched the remembered value - fall back rather than
+        # showing a dialog with no selection at all.
+        if self._group.checkedButton() is None:
+            self._group.buttons()[0].setChecked(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Choose File...")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def chosen(self) -> str:
+        button = self._group.checkedButton()
+        return button.property("ext") if button else ".kmz"
+
+
 class FlightSummaryDialog(QDialog):
     """The post-flight report, shown once the vehicle disarms.
 
@@ -492,14 +552,15 @@ class FlightSummaryDialog(QDialog):
 
         buttons = QDialogButtonBox()
         copy_btn = buttons.addButton("Copy", QDialogButtonBox.ActionRole)
-        self._kmz_btn = buttons.addButton("Save KMZ...",
-                                          QDialogButtonBox.ActionRole)
-        self._kmz_btn.setToolTip(
-            "Save the flown track for Google Earth. It carries a timestamp "
-            "per point, so Google Earth can replay the flight.")
+        self._track_btn = buttons.addButton("Save Track...",
+                                            QDialogButtonBox.ActionRole)
+        self._track_btn.setToolTip(
+            "Save the flown track as KMZ, KML or GPX - pick the format in "
+            "the save dialog. Each point carries a timestamp, so Google "
+            "Earth can replay the flight rather than only draw it.")
         buttons.addButton(QDialogButtonBox.Close)
         copy_btn.clicked.connect(self._copy)
-        self._kmz_btn.clicked.connect(self._save_kmz)
+        self._track_btn.clicked.connect(self._save_track)
         buttons.rejected.connect(self.accept)
         layout.addWidget(buttons)
 
@@ -530,8 +591,17 @@ class FlightSummaryDialog(QDialog):
     def _copy(self):
         QApplication.clipboard().setText(self.current_stats().as_text())
 
-    def _save_kmz(self):
-        """Write the flown track where the user asks, for Google Earth.
+    # Offered in the save dialog's own type list, so choosing a format
+    # costs no space in the summary itself.
+    EXPORT_FILTERS = [
+        ("Google Earth KMZ (*.kmz)", ".kmz"),
+        ("Google Earth KML (*.kml)", ".kml"),
+        ("GPX track (*.gpx)", ".gpx"),
+    ]
+    SETTING_EXPORT_FORMAT = "flight_export_format"
+
+    def _save_track(self):
+        """Write the flown track where and how the user asks.
 
         Uses whichever flight the summary is currently showing, so ticking
         the merge box and then saving gives the whole sortie rather than
@@ -549,18 +619,32 @@ class FlightSummaryDialog(QDialog):
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
         folder = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
-        suggested = str(Path(folder) / f"MavGCS-flight-{stamp}.kmz")
+
+        # Ask the format here rather than in the file dialog's type list,
+        # so each option can say what it is for. Defaults to whatever was
+        # chosen last: the format is a habit, and re-picking it after every
+        # flight would be a small irritation.
+        remembered = load_settings().get(self.SETTING_EXPORT_FORMAT, ".kmz")
+        chooser = TrackFormatDialog(remembered, self)
+        if chooser.exec() != QDialog.Accepted:
+            return
+        ext = chooser.chosen()
+        save_setting(self.SETTING_EXPORT_FORMAT, ext)
+
+        label = next((f for f, e in self.EXPORT_FILTERS if e == ext),
+                     self.EXPORT_FILTERS[0][0])
+        suggested = str(Path(folder) / f"MavGCS-flight-{stamp}{ext}")
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save flight as KMZ", suggested,
-            "Google Earth (*.kmz);;All files (*)")
+            self, f"Save flight track as {ext.lstrip('.').upper()}",
+            suggested, label)
         if not path:
             return
-        if not path.lower().endswith(".kmz"):
-            path += ".kmz"
+        if not path.lower().endswith(ext):
+            path += ext
 
         try:
-            written = write_kmz(
+            written = write_track(
                 path, stats.track,
                 name=f"MavGCS flight {stamp}",
                 home=self._home,
@@ -568,15 +652,17 @@ class FlightSummaryDialog(QDialog):
             )
         except Exception as e:
             QMessageBox.warning(self, "Could not save",
-                                "Writing the KMZ failed: " + str(e))
+                                "Writing the track failed: " + str(e))
             return
 
+        opens_in = ("Google Earth" if ext in (".kmz", ".kml")
+                    else "any GPS or mapping tool that reads GPX")
         box = QMessageBox(self)
         box.setWindowTitle("Flight saved")
         box.setText(f"{len(stats.track)} track points written.")
         box.setInformativeText(
             f"{written}"
-            "\n\nOpen it in Google Earth to replay the flight.")
+            f"\n\nOpen it in {opens_in}.")
         open_btn = box.addButton("Open Folder", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Close)
         box.exec()
