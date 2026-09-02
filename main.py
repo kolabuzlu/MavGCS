@@ -20,7 +20,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V1.16.0"
+APP_VERSION = "V1.17.0"
 
 import sys
 import os
@@ -29,9 +29,12 @@ import html
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from PySide6.QtCore import Signal, QTimer, Qt
-from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap, QPen, QColor
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QSize
+from PySide6.QtGui import (QIcon, QImage, QPainter, QPixmap, QPen, QColor,
+                           QDesktopServices)
+from PySide6.QtCore import (QBuffer, QByteArray, QIODevice, QPoint, QPointF,
+                            QSize, QUrl, QStandardPaths)
 from PySide6.QtGui import QRegion
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -51,6 +54,7 @@ from adsb_provider import AdsbWorker
 from tile_cache import TileCacheServer
 from fpv_view import FpvView
 from app_paths import data_dir, load_settings, resource_path, save_setting
+from update_check import UpdateChecker, UpdateDownloader, RELEASES_PAGE
 
 
 class TelemetryPanel(QFrame):
@@ -1057,6 +1061,179 @@ class WaypointMissionPanel(QGroupBox):
         # Clear with nothing to clear is harmless.
 
 
+class UpdateDialog(QDialog):
+    """
+    One dialog for every outcome of an update check - already current, a
+    newer release available, or the check itself failed. Keeping the three
+    together means there is a single place that explains what happened, and
+    a single home for the "check at startup" preference, which otherwise
+    has nowhere to live in a window with no menu bar.
+    """
+
+    SETTING_AUTO = "check_updates_on_start"
+
+    def __init__(self, result, current_version, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MavGCS Updates")
+        self.setMinimumWidth(420)
+        self._result = result
+        self._downloader = None
+        self._saved_path = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        self.headline = QLabel()
+        self.headline.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(self.headline)
+
+        self.detail = QLabel()
+        self.detail.setWordWrap(True)
+        layout.addWidget(self.detail)
+
+        self.notes = QPlainTextEdit()
+        self.notes.setReadOnly(True)
+        self.notes.setMaximumHeight(120)
+        self.notes.setStyleSheet("font-size: 11px;")
+        layout.addWidget(self.notes)
+        self.notes.hide()
+
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(True)
+        layout.addWidget(self.bar)
+        self.bar.hide()
+
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet("font-size: 11px; color: #aaa;")
+        layout.addWidget(self.status)
+
+        self.auto_box = QCheckBox("Check for updates when MavGCS starts")
+        self.auto_box.setChecked(bool(load_settings().get(self.SETTING_AUTO, False)))
+        self.auto_box.toggled.connect(
+            lambda on: save_setting(self.SETTING_AUTO, bool(on)))
+        layout.addWidget(self.auto_box)
+
+        buttons = QHBoxLayout()
+        self.action_btn = QPushButton()
+        self.action_btn.clicked.connect(self._on_action)
+        self.page_btn = QPushButton("Release Page")
+        self.page_btn.clicked.connect(self._open_page)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.reject)
+        buttons.addWidget(self.action_btn)
+        buttons.addWidget(self.page_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(self.close_btn)
+        layout.addLayout(buttons)
+
+        self._render(current_version)
+
+    def _render(self, current_version):
+        r = self._result
+        if not r["ok"]:
+            self.headline.setText("Couldn't check for updates")
+            self.detail.setText(r["error"] or "Unknown error.")
+            self.action_btn.hide()
+            return
+        if not r["newer"]:
+            self.headline.setText(f"MavGCS {current_version} is up to date")
+            self.detail.setText(
+                f"The newest release on GitHub is {r['tag']}.")
+            self.action_btn.hide()
+            return
+
+        self.headline.setText(f"{r['tag']} is available")
+        self.detail.setText(
+            f"You are running {current_version}. "
+            + (f"The download is {r['asset_size'] / 1e6:.0f} MB."
+               if r["asset_size"] else "")
+        )
+        if r["notes"]:
+            self.notes.setPlainText(r["notes"])
+            self.notes.show()
+        if r["asset_url"]:
+            self.action_btn.setText("Download")
+            self.status.setText(
+                "Downloads the zip - it does not install over your current "
+                "copy. Unzip it and replace your MavGCS folder; your "
+                "settings and map caches are stored elsewhere and are left "
+                "alone."
+            )
+        else:
+            self.action_btn.hide()
+            self.status.setText("This release has no downloadable zip.")
+
+    def _open_page(self):
+        QDesktopServices.openUrl(QUrl(self._result.get("page_url")
+                                      or RELEASES_PAGE))
+
+    def _on_action(self):
+        if self._saved_path:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(Path(self._saved_path).parent)))
+            return
+        if self._downloader is not None:
+            self._downloader.cancel()
+            return
+        self._start_download()
+
+    def _start_download(self):
+        r = self._result
+        folder = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation) or str(Path.home())
+        dest = Path(folder) / (r["asset_name"] or "MavGCS-update.zip")
+
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.show()
+        self.status.setText(f"Downloading to {dest} ...")
+        self.action_btn.setText("Cancel")
+
+        self._downloader = UpdateDownloader(
+            r["asset_url"], dest, r["asset_size"], r["asset_sha256"], self)
+        self._downloader.progress.connect(self._on_progress)
+        self._downloader.finished_ok.connect(self._on_done)
+        self._downloader.failed.connect(self._on_failed)
+        self._downloader.start()
+
+    def _on_progress(self, received, total):
+        if total > 0:
+            self.bar.setRange(0, 100)
+            self.bar.setValue(int(received * 100 / total))
+            self.bar.setFormat(
+                f"{received / 1e6:.0f} / {total / 1e6:.0f} MB  (%p%)")
+        else:
+            self.bar.setRange(0, 0)   # unknown length: just show activity
+            self.bar.setFormat(f"{received / 1e6:.0f} MB")
+
+    def _on_done(self, path):
+        self._downloader = None
+        self._saved_path = path
+        self.bar.setRange(0, 100)
+        self.bar.setValue(100)
+        self.bar.setFormat("Done")
+        self.status.setText(
+            f"Saved and checksum verified:\n{path}\n\n"
+            "Close MavGCS, unzip this over a new folder, and run the new "
+            "MavGCS.exe. Your settings and caches are kept separately and "
+            "carry over."
+        )
+        self.action_btn.setText("Open Folder")
+
+    def _on_failed(self, message):
+        self._downloader = None
+        self.bar.hide()
+        self.status.setText(message)
+        self.action_btn.setText("Download")
+
+    def reject(self):
+        if self._downloader is not None:
+            self._downloader.cancel()
+            self._downloader.wait(3000)
+        super().reject()
+
+
 class ConnectionPanel(QGroupBox):
     """
     Mission Planner-style connection bar: protocol dropdown (Serial/TCP/
@@ -1083,8 +1260,12 @@ class ConnectionPanel(QGroupBox):
 
     connect_requested = Signal(str)
     disconnect_requested = Signal()
+    update_requested = Signal()
 
     FIELD_HEIGHT = 24
+    UPDATE_STYLE = "color: #aaa; font-size: 9px; padding: 2px 6px;"
+    UPDATE_FOUND_STYLE = ("color: #7ddc7d; font-weight: bold; "
+                          "font-size: 9px; padding: 2px 6px;")
 
     def __init__(self, default_protocol="TCP", default_host="127.0.0.1", default_port="5762", parent=None):
         super().__init__("Connection", parent)
@@ -1101,9 +1282,22 @@ class ConnectionPanel(QGroupBox):
         row.setSpacing(3)
         refresh_row = QHBoxLayout()
         refresh_row.setSpacing(3)
+        update_row = QHBoxLayout()
+        update_row.setSpacing(3)
         outer.addLayout(row)
         outer.addLayout(refresh_row)
-        outer.addStretch(1)  # keep both rows pinned to the top, don't stretch vertically
+        outer.addLayout(update_row)
+        outer.addStretch(1)  # keep the rows pinned to the top, don't stretch vertically
+
+        # Nothing to do with connecting to a vehicle, but this is the one
+        # group that is always on screen and never scrolls, and a window
+        # with no menu bar has nowhere else to put it.
+        self.update_btn = QPushButton("Check for Updates")
+        self.update_btn.setFixedHeight(self.FIELD_HEIGHT)
+        self.update_btn.setStyleSheet(self.UPDATE_STYLE)
+        self.update_btn.clicked.connect(self.update_requested)
+        update_row.addStretch(1)
+        update_row.addWidget(self.update_btn)
 
         self.protocol_combo = QComboBox()
         self.protocol_combo.addItems(self.PROTOCOLS)
@@ -1200,6 +1394,14 @@ class ConnectionPanel(QGroupBox):
         listening_udp = protocol == "UDP (listen)"
         self.host_edit.setEnabled(not listening_udp)
         self.host_edit.setPlaceholderText("(listening)" if listening_udp else "")
+
+    def set_update_state(self, text: str, found: bool = False, enabled: bool = True):
+        """Reflect a check in the button itself, so a waiting or successful
+        check is visible without a dialog being open."""
+        self.update_btn.setText(text)
+        self.update_btn.setEnabled(enabled)
+        self.update_btn.setStyleSheet(
+            self.UPDATE_FOUND_STYLE if found else self.UPDATE_STYLE)
 
     def _on_connect_clicked(self):
         protocol = self.protocol_combo.currentText()
@@ -1664,6 +1866,7 @@ class MainWindow(QMainWindow):
         self._set_link_status(False, "Not connected")
         self.connection_panel.connect_requested.connect(self.on_connect_requested)
         self.connection_panel.disconnect_requested.connect(self.on_disconnect_requested)
+        self.connection_panel.update_requested.connect(self.on_check_updates)
 
         self.map_view.fly_to_here.connect(self.on_fly_to_here)
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
@@ -1680,6 +1883,13 @@ class MainWindow(QMainWindow):
         self._tile_stats_timer.setInterval(2000)
         self._tile_stats_timer.timeout.connect(self._push_tile_cache_stats)
         self._tile_stats_timer.start()
+
+        self._update_checker = None
+        self._update_silent = False
+        if load_settings().get(UpdateDialog.SETTING_AUTO, False):
+            # After the window is up, so a slow or hanging request cannot
+            # delay the app appearing.
+            QTimer.singleShot(4000, lambda: self.on_check_updates(silent=True))
         self.waypoint_panel.mode_toggled.connect(self.on_waypoint_mode_toggled)
         self.waypoint_panel.start_requested.connect(self.on_start_mission)
         self.waypoint_panel.update_requested.connect(self.on_update_mission)
@@ -1807,6 +2017,44 @@ class MainWindow(QMainWindow):
             f"background-color: black; color: {color}; font-weight: bold; "
             "padding: 3px 12px; border-radius: 4px;"
         )
+
+    # ---- update checking ------------------------------------------------
+
+    def on_check_updates(self, silent: bool = False):
+        """Ask GitHub what the latest release is, off the GUI thread.
+
+        `silent` is used by the optional check at startup: it reports only
+        when there is something to report, so a launch with no network - or
+        no new version - passes without a dialog in the way.
+        """
+        if getattr(self, "_update_checker", None) is not None:
+            return          # one at a time
+        self._update_silent = silent
+        if not silent:
+            self.connection_panel.set_update_state("Checking...", enabled=False)
+        self._update_checker = UpdateChecker(APP_VERSION, self)
+        self._update_checker.result_ready.connect(self._on_update_result)
+        self._update_checker.finished.connect(self._clear_update_checker)
+        self._update_checker.start()
+
+    def _clear_update_checker(self):
+        self._update_checker = None
+
+    def _on_update_result(self, result):
+        found = bool(result.get("ok") and result.get("newer"))
+        if found:
+            self.connection_panel.set_update_state(
+                f"Update: {result['tag']}", found=True)
+        else:
+            self.connection_panel.set_update_state("Check for Updates")
+
+        # A startup check stays quiet unless there is genuinely something
+        # new - being told "no update" every launch is noise, and being
+        # told the network is down is the network's business, not the
+        # program's.
+        if getattr(self, "_update_silent", False) and not found:
+            return
+        UpdateDialog(result, APP_VERSION, self).exec()
 
     def _note_interval(self, attr, previous):
         """Rolling average of how often one message type arrives."""
