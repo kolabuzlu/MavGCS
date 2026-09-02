@@ -357,8 +357,8 @@ LEAFLET_HTML = """
         <!-- Where a balanced aircraft would sit, so the marker has
              something to be displaced from. -->
         <line id="cog-neutral" x1="70" y1="6" x2="70" y2="38"
-              stroke="rgba(255,255,255,0.35)" stroke-width="1"
-              stroke-dasharray="2 2"/>
+              stroke="#3dff85" stroke-width="1.4"
+              stroke-dasharray="3 2.5" opacity="0.95"/>
         <!-- The surveyor's centre-of-gravity symbol: a quartered circle.
              Recognisable to anyone who has balanced an aeroplane. -->
         <g id="cog-marker">
