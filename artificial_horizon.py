@@ -21,6 +21,7 @@ class ArtificialHorizon(QWidget):
         self.roll = 0.0   # radians
         self.pitch = 0.0  # radians
         self.airspeed = None   # m/s, None until first update
+        self.throttle = None   # percent, None until first update
         self.altitude = None   # m, None until first update
         self.heading = None    # degrees, None until first update
         self.wind_dir = None   # degrees (direction wind is coming FROM), None until first update
@@ -132,6 +133,11 @@ class ArtificialHorizon(QWidget):
         self.airspeed = airspeed
         self.update()
 
+    def set_throttle(self, percent):
+        """Throttle from VFR_HUD, as a percentage."""
+        self.throttle = percent
+        self.update()
+
     def set_altitude(self, altitude):
         self.altitude = altitude
         self.update()
@@ -157,6 +163,48 @@ class ArtificialHorizon(QWidget):
         self.wind_dir = direction_deg % 360 if direction_deg is not None else None
         self.wind_speed = speed_mps
         self.update()
+
+    def _draw_throttle(self, painter, rect):
+        """A vertical throttle bar, filling from the bottom.
+
+        Drawn even with no reading yet, so the airspeed box does not
+        appear to shift sideways when the first telemetry arrives.
+        """
+        painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+        painter.drawRect(rect)
+
+        if self.throttle is not None:
+            pct = max(0.0, min(100.0, float(self.throttle)))
+            filled = rect.height() * pct / 100.0
+            if filled > 0:
+                # Green through most of the range, amber high up: near the
+                # stops the autopilot has little left to give, which is
+                # worth seeing without reading the number.
+                colour = QColor(120, 200, 120) if pct <= 85 else QColor(255, 167, 38)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(colour))
+                painter.drawRect(QRectF(rect.x() + 1,
+                                        rect.bottom() - filled + 1,
+                                        rect.width() - 2, filled - 2))
+
+        # Quarter marks, so the eye can read a level without a scale.
+        painter.setPen(QPen(QColor(255, 255, 255, 110), 1))
+        for frac in (0.25, 0.5, 0.75):
+            y = rect.bottom() - rect.height() * frac
+            painter.drawLine(QPointF(rect.x(), y),
+                             QPointF(rect.x() + rect.width() * 0.45, y))
+
+        painter.setPen(QPen(Qt.white))
+        painter.setFont(QFont("Sans", 7))
+        # Labelled like the other readouts, which say IAS m/s and ALT m
+        # rather than leaving the reader to infer the unit. The box is
+        # wider than the bar so "100%" still centres on it; it sits below
+        # the airspeed caption, so the extra width collides with nothing.
+        text = f"{self.throttle:.0f}%" if self.throttle is not None else "--"
+        painter.drawText(
+            QRectF(rect.x() - 12, rect.bottom() + 2, rect.width() + 24, 12),
+            Qt.AlignHCenter, text)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -376,10 +424,20 @@ class ArtificialHorizon(QWidget):
         box_w = min(size * 0.24, w * 0.32)
         box_h = size * 0.16
 
+        # Throttle bar, outboard of the airspeed box. Narrow on purpose:
+        # the number matters less than seeing at a glance how much power
+        # is in, and how near the stops it is.
+        bar_w = max(7.0, min(12.0, w * 0.02))
+        bar_gap = 4.0
+        bar_h = min(box_h * 2.4, h - 2 * margin - 14)
+        bar_rect = QRectF(margin, cy - bar_h / 2, bar_w, bar_h)
+        self._draw_throttle(painter, bar_rect)
+
         painter.setFont(QFont("Sans", 11, QFont.Bold))
 
-        # Airspeed box - middle left
-        airspeed_rect = QRectF(margin, cy - box_h / 2, box_w, box_h)
+        # Airspeed box - middle left, moved inboard to clear the bar
+        airspeed_rect = QRectF(margin + bar_w + bar_gap, cy - box_h / 2,
+                               box_w, box_h)
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
         painter.drawRect(airspeed_rect)

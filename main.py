@@ -2827,6 +2827,7 @@ class MainWindow(QMainWindow):
             "t": time.monotonic(),
             "roll": h.roll, "pitch": h.pitch, "heading": h.heading,
             "airspeed": h.airspeed, "altitude": h.altitude,
+            "throttle": h.throttle,
             "lat": h.lat, "lon": h.lon,
         })
 
@@ -2875,6 +2876,7 @@ class MainWindow(QMainWindow):
                     "heading": self._blend_angle(a["heading"], b["heading"], u),
                     "airspeed": self._blend(a["airspeed"], b["airspeed"], u),
                     "altitude": self._blend(a["altitude"], b["altitude"], u),
+                    "throttle": self._blend(a["throttle"], b["throttle"], u),
                     "lat": self._blend(a["lat"], b["lat"], u),
                     "lon": self._blend(a["lon"], b["lon"], u),
                 }
@@ -2937,12 +2939,14 @@ class MainWindow(QMainWindow):
         # the HUD live made the lines lead the terrain by that much, which
         # showed up as the horizon levelling before the ground did.
         h = self.horizon
-        live = (h.roll, h.pitch, h.heading, h.airspeed, h.altitude, h.lat, h.lon)
+        live = (h.roll, h.pitch, h.heading, h.airspeed, h.altitude, h.lat,
+                h.lon, h.throttle)
         delayed = self._hud_state_at(time.monotonic() - self._playback_delay_ms() / 1000.0)
         if delayed is not None:
             h.roll, h.pitch = delayed["roll"], delayed["pitch"]
             h.heading, h.airspeed = delayed["heading"], delayed["airspeed"]
             h.altitude = delayed["altitude"]
+            h.throttle = delayed["throttle"]
             h.lat, h.lon = delayed["lat"], delayed["lon"]
 
         image = QImage(size, QImage.Format_ARGB32)
@@ -2958,7 +2962,7 @@ class MainWindow(QMainWindow):
             self.horizon.overlay_mode = False
             # The widget is shared with the 2D HUD, which must stay live.
             (h.roll, h.pitch, h.heading, h.airspeed,
-             h.altitude, h.lat, h.lon) = live
+             h.altitude, h.lat, h.lon, h.throttle) = live
 
         buf = QBuffer()
         buf.open(QIODevice.WriteOnly)
@@ -3019,6 +3023,8 @@ class MainWindow(QMainWindow):
         self.telemetry.set_value("groundspeed", f"{groundspeed:.2f}")
         self.telemetry.set_value("vspeed_mps", f"{climb:.2f}")
         self.horizon.set_airspeed(airspeed)
+        if throttle is not None:
+            self.horizon.set_throttle(throttle)
         self._last_groundspeed = groundspeed
         self._last_climb = climb
         self._flight_stats.on_vfr(airspeed, groundspeed, climb, throttle)
