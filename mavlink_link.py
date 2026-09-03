@@ -93,7 +93,7 @@ class MavlinkLink(QThread):
     # lat, lon (deg), relative altitude (m), heading (deg)
     position_update = Signal(float, float, float, float)
     # airspeed, groundspeed, climb rate (m/s)
-    vfr_update = Signal(float, float, float)
+    vfr_update = Signal(float, float, float, float)   # ..., throttle %
     # wind direction (deg, coming FROM), wind speed (m/s)
     wind_update = Signal(float, float)
     # generic dict for things like mode/armed/battery
@@ -146,6 +146,9 @@ class MavlinkLink(QThread):
     # autotrim alone, which is what the elevator reading above is for.
     # Needs GCS_PID_MASK bit 1, which is a vehicle-wide parameter.
     pitch_integrator_update = Signal(float)
+
+    # TRIM_THROTTLE, the cruise power this airframe was trimmed for.
+    trim_throttle_update = Signal(float)
 
     # Where home actually is, for the map marker.
     home_position_update = Signal(float, float)  # lat, lon
@@ -244,6 +247,7 @@ class MavlinkLink(QThread):
         self._elev_dir_override = "auto"
         self._elevator_trim = None
         self._servo_scan_seen = set()
+        self._trim_throttle = None
         self._full_telemetry = full_telemetry
         self._home_lat = None
         # Arming is when ArduPilot sets home, so an arm is the cue to ask
@@ -361,6 +365,7 @@ class MavlinkLink(QThread):
             if self._want_elevator:
                 self._scan_servo_functions()
                 self._request_pid_mask()
+                self._request_trim_throttle()
         except Exception as e:
             self.connection_status.emit(False, f"Connection failed: {e}")
             return
@@ -484,7 +489,8 @@ class MavlinkLink(QThread):
                     )
 
             elif mtype == "VFR_HUD":
-                self.vfr_update.emit(msg.airspeed, msg.groundspeed, msg.climb)
+                self.vfr_update.emit(msg.airspeed, msg.groundspeed, msg.climb,
+                                     float(msg.throttle))
 
             elif mtype == "MISSION_ACK":
                 if self._mission_state == "awaiting_clear_ack":
@@ -607,6 +613,9 @@ class MavlinkLink(QThread):
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
                     )
+                elif name == "TRIM_THROTTLE":
+                    self._trim_throttle = float(msg.param_value)
+                    self.trim_throttle_update.emit(self._trim_throttle)
                 elif name == "GCS_PID_MASK":
                     self._on_pid_mask(int(msg.param_value))
                 elif name.startswith("SERVO"):
@@ -887,6 +896,7 @@ class MavlinkLink(QThread):
         if self._want_elevator and not was:
             self._scan_servo_functions()
             self._request_pid_mask()
+            self._request_trim_throttle()
         elif self._pid_mask_current is not None:
             self._apply_pid_mask()
         self.apply_stream_rates()
@@ -908,6 +918,22 @@ class MavlinkLink(QThread):
                         self.master.target_system,
                         self.master.target_component,
                         f"SERVO{n}_FUNCTION".encode(), -1)
+        except Exception:
+            pass
+
+    def _request_trim_throttle(self):
+        """The cruise power the airframe was trimmed for.
+
+        Thrust line offset means throttle changes pitch, so the elevator
+        only says something about the balance at this power setting.
+        """
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_read_send(
+                    self.master.target_system, self.master.target_component,
+                    b"TRIM_THROTTLE", -1)
         except Exception:
             pass
 

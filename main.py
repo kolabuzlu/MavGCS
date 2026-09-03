@@ -150,6 +150,17 @@ class FlightStats:
     BALANCE_MODES = ("CRUISE", "FBWB", "AUTO")
     BALANCE_MAX_ROLL_DEG = 5.0
     BALANCE_MAX_CLIMB_MPS = 0.5
+    # The thrust line rarely passes through the centre of gravity, so
+    # power changes pitch and the elevator has to answer for it. Only at
+    # the cruise power the airframe was trimmed for does the elevator
+    # position speak about the balance alone.
+    #
+    # Measured in SITL cruise: 82% of samples sat within 5 points of
+    # TRIM_THROTTLE, and widening the window to 20 only reached 85 - the
+    # rest being excursions all the way to the throttle limits, which are
+    # exactly the moments worth throwing away. Ten points costs almost
+    # nothing here and leaves room for a windier day.
+    BALANCE_THROTTLE_TOL = 10.0
     # After a mode change the controller is still settling to its new
     # working point, and says more about the transition than the balance.
     BALANCE_SETTLE_S = 20.0
@@ -195,6 +206,9 @@ class FlightStats:
     MIN_REPORTABLE_S = 30.0
 
     def __init__(self):
+        # Belongs to the aircraft rather than the flight, so it is set
+        # here and not in reset(): a new flight must not forget it.
+        self.trim_throttle = None
         self.reset()
 
     def reset(self):
@@ -237,6 +251,7 @@ class FlightStats:
         self._climb = 0.0
         self._mode = None
         self._mode_since = None
+        self._throttle = None
         self._alt = 0.0
         self._gs = 0.0
 
@@ -374,11 +389,13 @@ class FlightStats:
         return self._gs >= self.AIRBORNE_SPEED_MPS or self._alt >= self.AIRBORNE_ALT_M
 
     # ---- sample feeds ---------------------------------------------------
-    def on_vfr(self, airspeed, groundspeed, climb):
+    def on_vfr(self, airspeed, groundspeed, climb, throttle=None):
         if not self.running:
             return
         self._gs = groundspeed
         self._climb = climb
+        if throttle is not None:
+            self._throttle = throttle
         if self._airborne:
             self.ever_airborne = True
             self._air_samples += 1
@@ -429,6 +446,10 @@ class FlightStats:
             return False
         if abs(self._climb) > self.BALANCE_MAX_CLIMB_MPS:
             return False
+        if (self.trim_throttle is not None and self._throttle is not None
+                and abs(self._throttle - self.trim_throttle)
+                > self.BALANCE_THROTTLE_TOL):
+            return False
         return True
 
     def on_pitch_integrator(self, value):
@@ -466,7 +487,7 @@ class FlightStats:
             # done. It can read over 100 otherwise - one signal can pass
             # the span while still holding too few samples to summarise.
             pct = max(0.0, min(99.0, span / self.BALANCE_MIN_SPAN_S * 100.0))
-            return ("sampling", f"Acquiring CG {pct:.0f}%", 0.0)
+            return ("sampling", f"Evaluating CG {pct:.0f}%", 0.0)
         headline, _, shift, number = verdict
         # The marker position is decided in balance_verdict, where it is
         # known WHICH signal answered: a unit of integrator and a
@@ -2333,6 +2354,7 @@ class MainWindow(QMainWindow):
         self._flight_stats = FlightStats()
         # Set by the link if this aircraft's elevator cannot be read.
         self._elevator_unavailable = ""
+        self._trim_throttle = None
         # Recent HUD state, so the overlay drawn over the 3D view can be
         # rendered at the moment that view is actually showing rather than
         # at the newest telemetry. Without this the instrument lines lead
@@ -2940,14 +2962,14 @@ class MainWindow(QMainWindow):
     def on_terrain_fan_ready(self, elevations, range_m, ang_cells, rad_cells):
         self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)
 
-    def on_vfr(self, airspeed, groundspeed, climb):
+    def on_vfr(self, airspeed, groundspeed, climb, throttle=None):
         self.telemetry.set_value("airspeed", f"{airspeed:.2f}")
         self.telemetry.set_value("groundspeed", f"{groundspeed:.2f}")
         self.telemetry.set_value("vspeed_mps", f"{climb:.2f}")
         self.horizon.set_airspeed(airspeed)
         self._last_groundspeed = groundspeed
         self._last_climb = climb
-        self._flight_stats.on_vfr(airspeed, groundspeed, climb)
+        self._flight_stats.on_vfr(airspeed, groundspeed, climb, throttle)
 
     def on_wind(self, direction, speed):
         self.horizon.set_wind(direction, speed)
@@ -3367,6 +3389,7 @@ class MainWindow(QMainWindow):
         self.link.elevator_update.connect(self._flight_stats.on_elevator)
         self.link.pitch_integrator_update.connect(
             self._flight_stats.on_pitch_integrator)
+        self.link.trim_throttle_update.connect(self._on_trim_throttle)
         self.link.elevator_status.connect(self._on_elevator_status)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
@@ -3425,6 +3448,15 @@ class MainWindow(QMainWindow):
         terrain_provider.set_cache_limit(terrain_mb * 1024 * 1024)
         self.map_view.show_cache_limits(map_mb, terrain_mb)
         self._push_tile_cache_stats()
+
+    def _on_trim_throttle(self, value):
+        """The cruise power this airframe was trimmed for.
+
+        Kept on the window as well as on the flight, because a new flight
+        starts a fresh FlightStats and would otherwise lose it.
+        """
+        self._trim_throttle = value
+        self._flight_stats.trim_throttle = value
 
     def _on_elevator_status(self, why):
         """The link saying whether it can read this aircraft's elevator.
@@ -3503,6 +3535,7 @@ class MainWindow(QMainWindow):
             self._flight_stats.suspend()
             self._suspended_flights.append(self._flight_stats)
             self._flight_stats = FlightStats()
+            self._flight_stats.trim_throttle = self._trim_throttle
             # Anything too old to be part of a current flight is just memory.
             cutoff = time.monotonic() - FlightStats.MERGE_WINDOW_S
             self._suspended_flights = [
