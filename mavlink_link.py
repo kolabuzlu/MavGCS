@@ -8,6 +8,7 @@ recv_match(blocking=True) would otherwise freeze your whole UI.
 
 import time
 import math
+import re
 import threading
 from PySide6.QtCore import QThread, Signal
 from pymavlink import mavutil
@@ -126,11 +127,18 @@ class MavlinkLink(QThread):
     # is close enough that the bearing is meaningless.
     home_bearing_update = Signal(float)          # deg, or -1
 
-    # The pitch controller's integrator - PIDP.I in the dataflash log. Held
-    # steadily above zero the aircraft is carrying up elevator to stay
-    # level, which is what a nose-heavy balance looks like; below zero,
-    # the reverse. Only arrives when GCS_PID_MASK asks for it.
-    pitch_integrator_update = Signal(float)
+    # Where the elevator is actually being held. In steady level flight
+    # that position IS the balance: a nose-heavy aircraft carries up
+    # elevator to stay level, a tail-heavy one carries down.
+    #
+    # This is read from the servo output rather than from the pitch
+    # controller's integrator (PIDP.I) because SERVO_AUTO_TRIM, which many
+    # ArduPilot aircraft fly with, slowly drains that integrator into the
+    # servo trim. The integrator then settles back to zero on an aircraft
+    # that is still out of balance, and reports nothing wrong. The servo
+    # output carries the offset whichever place it ended up living in.
+    elevator_update = Signal(float, float)   # us off centre, fraction of travel
+    elevator_status = Signal(str)            # '' if usable, else why not
 
     # Where home actually is, for the map marker.
     home_position_update = Signal(float, float)  # lat, lon
@@ -164,6 +172,17 @@ class MavlinkLink(QThread):
     # out the messages that matter, and the radio drops whatever overflows
     # without caring which. Measured on ArduPlane 4.8: these accounted for
     # roughly three quarters of the default stream.
+    # SRV_Channel::Aux_servo_function_t values.
+    SERVO_FUNCTION_ELEVATOR = 19
+    # Aircraft that mix pitch across a pair of surfaces: the pitch being
+    # held is the common mode of the two, not one channel's offset. Rather
+    # than report a number that means something else, these say so.
+    SERVO_FUNCTION_MIXED = {77: "elevon", 78: "elevon",
+                            79: "V-tail", 80: "V-tail"}
+    # A centred surface, and the reference the number is quoted against.
+    SERVO_NEUTRAL_US = 1500.0
+    SERVO_SCAN_CHANNELS = 16
+
     DISABLED_MESSAGES = (
         "SIMSTATE", "ESC_TELEMETRY_1_TO_4", "AOA_SSA", "AHRS", "AHRS2",
         "RAW_IMU", "SCALED_IMU2", "SCALED_IMU3", "SCALED_PRESSURE2",
@@ -194,13 +213,24 @@ class MavlinkLink(QThread):
         # these ourselves from other messages (see run()).
         self._attitude_hz = attitude_hz
         self._position_hz = position_hz
-        # GCS_PID_MASK is a vehicle-wide parameter, not a per-link stream
-        # rate: turning it on affects every ground station talking to this
-        # aircraft. So the value found on arrival is remembered and put back
-        # when the link closes, and only the pitch bit is ever touched.
-        self._want_pitch_pid = False
-        self._pid_mask_original = None
-        self._pid_mask_current = None
+        # Finding which output drives the elevator, and how it is set up.
+        # Every one of these is a parameter READ: unlike the PID mask this
+        # replaced, nothing about the vehicle's configuration is changed,
+        # so nothing has to be put back when the link closes.
+        self._want_elevator = False
+        self._elevator_ch = None            # 1-based servo output
+        self._elevator_half_us = 400.0      # (MAX-MIN)/2, refined on arrival
+        self._elevator_min = None
+        self._elevator_max = None
+        self._elevator_reversed = False
+        # "auto" trusts SERVOn_REVERSED. Measured against ArduPlane 4.8:
+        # with REVERSED=1 a nose-up demand comes out BELOW centre, with
+        # REVERSED=0 above it, so the parameter alone decides the sign.
+        # The override exists for an airframe wired in some way the
+        # parameter does not describe.
+        self._elev_dir_override = "auto"
+        self._elevator_trim = None
+        self._servo_scan_seen = set()
         self._full_telemetry = full_telemetry
         self._home_lat = None
         # Arming is when ArduPilot sets home, so an arm is the cue to ask
@@ -228,7 +258,6 @@ class MavlinkLink(QThread):
             # sending the reduced set with nothing left to explain why. Best
             # effort - on a link that has already dropped this goes nowhere,
             # and that is fine.
-            self._restore_pid_mask()
             self._restore_default_rates()
             # The thread owns the connection and closes it on its own way
             # out. Closing it from stop() instead meant the socket could be
@@ -315,8 +344,8 @@ class MavlinkLink(QThread):
                     0, 0, 0, 0, 0, 0, 0, 0,
                 )
             self.apply_stream_rates()
-            # Ask what it is now; the reply drives everything else.
-            self._request_pid_mask()
+            if self._want_elevator:
+                self._scan_servo_functions()
         except Exception as e:
             self.connection_status.emit(False, f"Connection failed: {e}")
             return
@@ -539,10 +568,12 @@ class MavlinkLink(QThread):
                     result_name = f"result {msg.result}"
                 self.command_feedback.emit(f"ACK: {cmd_name} -> {result_name}")
 
-            elif mtype == "PID_TUNING":
-                # axis 2 is pitch (PID_TUNING_PITCH).
-                if msg.axis == 2:
-                    self.pitch_integrator_update.emit(float(msg.I))
+            elif mtype == "SERVO_OUTPUT_RAW":
+                if self._elevator_ch is not None:
+                    raw = getattr(msg, f"servo{self._elevator_ch}_raw", None)
+                    reading = self._elevator_offset(raw)
+                    if reading is not None:
+                        self.elevator_update.emit(*reading)
 
             elif mtype == "PARAM_VALUE":
                 # Confirmation for change_loiter_radius() - a PARAM_SET is
@@ -556,8 +587,8 @@ class MavlinkLink(QThread):
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
                     )
-                elif name == "GCS_PID_MASK":
-                    self._on_pid_mask(int(msg.param_value))
+                elif name.startswith("SERVO"):
+                    self._on_servo_param(name, msg.param_value)
 
             elif mtype == "WIND":
                 # ArduPilot-specific message (id 168): direction is where
@@ -806,6 +837,12 @@ class MavlinkLink(QThread):
             intervals = {name: int(1_000_000 / hz) if hz > 0 else -1
                          for name, hz in wanted.items()}
             intervals.update({name: -1 for name in self.DISABLED_MESSAGES})
+            if self._want_elevator:
+                # The balance check reads the elevator output, so this one
+                # comes back off the disabled list while the check is on.
+                # 1 Hz is ample: no verdict is given on less than 30
+                # seconds of steady flight, and it costs about 33 B/s.
+                intervals["SERVO_OUTPUT_RAW"] = 1_000_000
 
         try:
             with self._send_lock:
@@ -817,67 +854,141 @@ class MavlinkLink(QThread):
         except Exception:
             pass
 
-    # Bit 1 (value 2) is pitch, per GCS_PID_MASK's own documentation.
-    PID_MASK_PITCH = 2
+    def set_cog_enabled(self, enabled: bool):
+        """Ask the vehicle for its elevator output, or stop asking.
 
-    def set_pitch_pid_enabled(self, enabled: bool):
-        """Ask the vehicle to report its pitch PID terms, or stop."""
-        self._want_pitch_pid = bool(enabled)
-        if self._pid_mask_current is not None:
-            self._apply_pid_mask()
+        Stream rates and parameter reads only. Nothing on the vehicle is
+        reconfigured, so switching this off leaves no trace to undo.
+        """
+        was = self._want_elevator
+        self._want_elevator = bool(enabled)
+        if self._want_elevator and not was:
+            self._scan_servo_functions()
+        self.apply_stream_rates()
 
-    def _request_pid_mask(self):
+    def _scan_servo_functions(self):
+        """Ask what each output does, to find the one driving the elevator.
+
+        One read per output, once, rather than a full parameter list: the
+        vehicle carries about 1500 parameters and we want four of them.
+        """
+        if self.master is None:
+            return
+        self._servo_scan_seen.clear()
+        self._elevator_ch = None
+        try:
+            with self._send_lock:
+                for n in range(1, self.SERVO_SCAN_CHANNELS + 1):
+                    self.master.mav.param_request_read_send(
+                        self.master.target_system,
+                        self.master.target_component,
+                        f"SERVO{n}_FUNCTION".encode(), -1)
+        except Exception:
+            pass
+
+    def _request_elevator_setup(self, ch):
+        """Travel and reversal for the output we settled on.
+
+        The travel sets what counts as a large offset - 40us means
+        something different on a 1000-2000 setup than on 1100-1900 - and
+        the reversal decides which way is up.
+        """
         if self.master is None:
             return
         try:
             with self._send_lock:
-                self.master.mav.param_request_read_send(
-                    self.master.target_system, self.master.target_component,
-                    b"GCS_PID_MASK", -1)
+                for suffix in ("MIN", "MAX", "REVERSED", "TRIM"):
+                    self.master.mav.param_request_read_send(
+                        self.master.target_system,
+                        self.master.target_component,
+                        f"SERVO{ch}_{suffix}".encode(), -1)
         except Exception:
             pass
 
-    def _on_pid_mask(self, value: int):
-        """The vehicle told us its current mask."""
-        if self._pid_mask_original is None:
-            self._pid_mask_original = value
-        self._pid_mask_current = value
-        self._apply_pid_mask()
+    def _elevator_offset(self, raw):
+        """(microseconds off centre, fraction of half travel) for one PWM.
 
-    def _apply_pid_mask(self):
-        """Set or clear only the pitch bit, leaving the rest as found."""
-        if self._pid_mask_current is None:
-            return
-        if self._want_pitch_pid:
-            wanted = self._pid_mask_current | self.PID_MASK_PITCH
+        Above centre is nose-up demand on a normal channel, which is the
+        up elevator a nose-heavy aircraft has to carry to stay level. A
+        reversed output means the same demand comes out the other side of
+        centre, so the sign follows SERVOn_REVERSED.
+        """
+        if not raw:
+            return None
+        offset = float(raw) - self.SERVO_NEUTRAL_US
+        if self.elevator_up_is_below():
+            offset = -offset
+        return offset, offset / self._elevator_half_us
+
+    def elevator_up_is_below(self) -> bool:
+        """Whether up elevator lies below centre on this aircraft."""
+        if self._elev_dir_override == "below":
+            return True
+        if self._elev_dir_override == "above":
+            return False
+        return self._elevator_reversed
+
+    def set_elevator_direction(self, mode: str):
+        """"auto", "below" or "above"."""
+        self._elev_dir_override = (
+            mode if mode in ("auto", "below", "above") else "auto")
+
+    def elevator_description(self) -> str:
+        """One line describing what was found, for the settings dialog.
+
+        Shown so that a wrong conclusion is caught on the ground, in
+        seconds, rather than by disbelieving a verdict after a flight.
+        """
+        if self._elevator_ch is None:
+            return ""
+        ch = self._elevator_ch
+        side = "below" if self.elevator_up_is_below() else "above"
+        bits = [f"Elevator on output {ch}, up is {side} 1500us"]
+        if self._elev_dir_override == "auto":
+            bits.append(f"(SERVO{ch}_REVERSED={int(self._elevator_reversed)})")
         else:
-            # Back to whatever the pitch bit was before we arrived, rather
-            # than simply clearing it - somebody may have wanted it on.
-            was_set = (self._pid_mask_original or 0) & self.PID_MASK_PITCH
-            wanted = ((self._pid_mask_current & ~self.PID_MASK_PITCH)
-                      | was_set)
-        if wanted != self._pid_mask_current:
-            self._set_pid_mask(wanted)
+            bits.append("(set by you)")
+        if self._elevator_trim is not None:
+            bits.append(f", trim {self._elevator_trim:.0f}us")
+        if self._elevator_min is not None and self._elevator_max is not None:
+            bits.append(f", travel {self._elevator_min:.0f}-"
+                        f"{self._elevator_max:.0f}us")
+        return " ".join(bits[:2]) + "".join(bits[2:])
 
-    def _restore_pid_mask(self):
-        """Put the mask back exactly as it was found."""
-        if (self._pid_mask_original is None
-                or self._pid_mask_current == self._pid_mask_original):
+    def _on_servo_param(self, name, value):
+        """One SERVOn_* parameter, while working out the elevator."""
+        m = re.fullmatch(r"SERVO(\d+)_(\w+)", name)
+        if not m:
             return
-        self._set_pid_mask(self._pid_mask_original)
+        ch, suffix = int(m.group(1)), m.group(2)
 
-    def _set_pid_mask(self, value: int):
-        if self.master is None:
+        if suffix == "FUNCTION":
+            func = int(value)
+            self._servo_scan_seen.add(ch)
+            mixed = self.SERVO_FUNCTION_MIXED.get(func)
+            if mixed is not None and self._elevator_ch is None:
+                self.elevator_status.emit(f"{mixed} mixing not supported")
+                return
+            if func == self.SERVO_FUNCTION_ELEVATOR:
+                self._elevator_ch = ch
+                self.elevator_status.emit("")
+                self._request_elevator_setup(ch)
+            elif (self._elevator_ch is None
+                    and len(self._servo_scan_seen) >= self.SERVO_SCAN_CHANNELS):
+                self.elevator_status.emit("no elevator output found")
             return
-        try:
-            with self._send_lock:
-                self.master.mav.param_set_send(
-                    self.master.target_system, self.master.target_component,
-                    b"GCS_PID_MASK", float(value),
-                    mavutil.mavlink.MAV_PARAM_TYPE_INT16)
-            self._pid_mask_current = value
-        except Exception:
-            pass
+
+        if self._elevator_ch != ch:
+            return
+        if suffix == "REVERSED":
+            self._elevator_reversed = bool(int(value))
+        elif suffix == "TRIM":
+            self._elevator_trim = float(value)
+        elif suffix in ("MIN", "MAX"):
+            setattr(self, f"_elevator_{suffix.lower()}", float(value))
+            lo, hi = self._elevator_min, self._elevator_max
+            if lo is not None and hi is not None and hi > lo:
+                self._elevator_half_us = (hi - lo) / 2.0
 
     def _restore_default_rates(self):
         """Put every message we touched back to the vehicle's own rate."""

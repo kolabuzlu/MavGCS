@@ -132,8 +132,16 @@ class FlightStats:
 
     # ---- balance, from the pitch integrator -----------------------------
     # ArduPilot's own guidance: a pitch integrator held consistently above
-    # zero means the aircraft is carrying up elevator to stay level, which
-    # is what nose-heavy looks like; consistently below means the reverse.
+    # centre means the aircraft is carrying up elevator to stay level,
+    # which is what nose-heavy looks like; below centre means the reverse.
+    #
+    # The elevator OUTPUT is read rather than the pitch integrator. Many
+    # ArduPilot aircraft fly with SERVO_AUTO_TRIM enabled, which slowly
+    # moves the servo trim to absorb whatever the integrator is holding.
+    # On those aircraft the integrator settles back to zero while the
+    # aircraft is still nose heavy - the offset has simply moved into the
+    # trim. The servo output includes the trim, so it stays true either
+    # way.
     #
     # That only holds in steady, hands-off, level flight, so a sample is
     # taken nowhere else. Averaging across turns, climbs and manual flying
@@ -142,21 +150,27 @@ class FlightStats:
     BALANCE_MODES = ("CRUISE", "FBWB", "AUTO")
     BALANCE_MAX_ROLL_DEG = 5.0
     BALANCE_MAX_CLIMB_MPS = 0.5
-    # After a mode change the integrator is still winding to its new
+    # After a mode change the controller is still settling to its new
     # working point, and says more about the transition than the balance.
     BALANCE_SETTLE_S = 20.0
     # Less steady flight than this is not evidence of anything.
     BALANCE_MIN_SPAN_S = 30.0
-    # The source describes a sign held CONSISTENTLY, so consistency is what
-    # is measured rather than the size of the average.
+    # What matters is an offset held CONSISTENTLY, so consistency is
+    # measured rather than just the size of the average. In turbulence the
+    # elevator is busy either side of where it is held, and a small offset
+    # inside that noise is correctly refused rather than called.
     BALANCE_AGREEMENT = 0.8
-    # Below this the integrator is doing so little that calling it either
-    # way would be reading noise.
-    BALANCE_DEADBAND = 0.05
-    # The integrator says which way the balance is out and roughly how
-    # much; it is not a centre-of-gravity measurement. This is only the
-    # value at which the indicator's marker reaches its travel stop.
-    BALANCE_FULL_SCALE = 1.0
+    # Both of these are fractions of half the elevator's travel, so they
+    # mean the same thing on a 1000-2000 setup as on 1100-1900. At the
+    # 1100-1900 the SITL flies, they work out at 10us and 60us.
+    #
+    # Below the deadband the elevator is close enough to centre that
+    # calling it either way would be reading linkage slop.
+    BALANCE_DEADBAND = 0.025
+    # Held elevator says which way the balance is out and roughly how far;
+    # it is not a centre-of-gravity measurement. This is only where the
+    # indicator's marker reaches its travel stop.
+    BALANCE_FULL_SCALE = 0.15
     # Below this a report is not worth showing - an arm/disarm on the bench
     # is not a flight.
     MIN_REPORTABLE_S = 30.0
@@ -198,7 +212,7 @@ class FlightStats:
         # flight at 2Hz is about 14,000 points, a few hundred kilobytes.
         self.track = []
         self._amsl = None
-        self.balance_samples = []   # (monotonic time, pitch integrator)
+        self.balance_samples = []   # (monotonic time, us off centre, fraction)
         self._roll_deg = 0.0
         self._climb = 0.0
         self._mode = None
@@ -375,8 +389,8 @@ class FlightStats:
         """Roll only - the balance check needs to know the wings are level."""
         self._roll_deg = roll_deg
 
-    def on_pitch_integrator(self, value):
-        """One PID_TUNING pitch sample, kept only if the flight is steady.
+    def on_elevator(self, offset_us, fraction):
+        """One elevator reading, kept only if the flight is steady.
 
         Every rejection here is deliberate: a sample taken in a turn, a
         climb, or a mode where the pilot is flying the elevator says
@@ -394,7 +408,8 @@ class FlightStats:
             return
         if abs(self._climb) > self.BALANCE_MAX_CLIMB_MPS:
             return
-        self.balance_samples.append((time.monotonic(), float(value)))
+        self.balance_samples.append(
+            (time.monotonic(), float(offset_us), float(fraction)))
 
     def balance_status(self):
         """(state, text, marker position) for the indicator on the map.
@@ -412,12 +427,11 @@ class FlightStats:
         if verdict is None:
             return ("sampling",
                     f"Sampling {span:.0f}/{self.BALANCE_MIN_SPAN_S:.0f}s", 0.0)
-        headline, _ = verdict
-        mean = sum(v for _, v in samples) / len(samples)
+        headline, _, mean, mean_us = verdict
         # Positive means up elevator is being held, which is nose heavy, so
         # the marker belongs forward - to the left, where the nose is drawn.
         shift = max(-1.0, min(1.0, -mean / self.BALANCE_FULL_SCALE))
-        return (headline, f"{headline} ({mean:+.2f})", shift)
+        return (headline, f"{headline} ({mean_us:+.0f}us)", shift)
 
     def balance_verdict(self):
         """(headline, detail), or None when there is not enough to say.
@@ -433,15 +447,21 @@ class FlightStats:
         if span < self.BALANCE_MIN_SPAN_S:
             return None
 
-        values = [v for _, v in samples]
-        mean = sum(values) / len(values)
-        agree = sum(1 for v in values if (v > 0) == (mean > 0)) / len(values)
-        detail = (f"{mean:+.3f} mean over {span:.0f}s level, "
-                  f"{agree * 100:.0f}% same sign")
+        # The verdict is decided on the fraction, so it reads the same on
+        # any servo travel; the microseconds are what gets shown, because
+        # that is the number checkable against Mission Planner.
+        fracs = [f for _, _, f in samples]
+        micros = [u for _, u, _ in samples]
+        mean = sum(fracs) / len(fracs)
+        mean_us = sum(micros) / len(micros)
+        agree = sum(1 for f in fracs if (f > 0) == (mean > 0)) / len(fracs)
+        detail = (f"{mean_us:+.0f}us mean over {span:.0f}s level, "
+                  f"{agree * 100:.0f}% same side")
 
         if abs(mean) < self.BALANCE_DEADBAND or agree < self.BALANCE_AGREEMENT:
-            return ("Balanced", detail)
-        return ("Nose heavy" if mean > 0 else "Tail heavy", detail)
+            return ("Balanced", detail, mean, mean_us)
+        return ("Nose heavy" if mean > 0 else "Tail heavy",
+                detail, mean, mean_us)
 
     def on_wind(self, speed_mps):
         if self.running:
@@ -1357,12 +1377,24 @@ class TelemetryRatesDialog(QDialog):
     SETTING_POSITION = "telemetry_position_hz"
     SETTING_FULL = "telemetry_full"
     SETTING_COG = "cog_check"
+    # Which side of centre is up elevator. "auto" trusts SERVOn_REVERSED,
+    # which is measured to decide the direction on any aircraft that
+    # flies; the two explicit settings are for the case where an airframe
+    # is wired in a way the parameter does not describe.
+    SETTING_ELEV_DIR = "cog_elevator_dir"
+    DEFAULT_ELEV_DIR = "auto"
     # On by default: it is a readout people ask for by name, and hiding it
     # behind a setting meant looking for something that was never switched
     # on. It costs about 40 B/s of telemetry and sets no flight parameter -
     # only whether the vehicle reports its pitch controller - and the link
     # puts that back as it found it on the way out.
     DEFAULT_COG = True
+
+    @classmethod
+    def elevator_direction(cls) -> str:
+        """"auto", "above" or "below" - which side of centre is up."""
+        value = load_settings().get(cls.SETTING_ELEV_DIR, cls.DEFAULT_ELEV_DIR)
+        return value if value in ("auto", "above", "below") else "auto"
 
     @classmethod
     def cog_enabled(cls) -> bool:
@@ -1439,11 +1471,31 @@ class TelemetryRatesDialog(QDialog):
         self.cog_box = QCheckBox("Estimate centre of gravity")
         self.cog_box.setChecked(self.cog_enabled())
         self.cog_box.setToolTip(
-            "Asks the vehicle to report its pitch controller, and reads the "
-            "balance from it during steady level flight. Reported after "
-            "landing. Unlike the rates above this sets a parameter on the "
-            "aircraft, so it is off unless you want it.")
+            "Reads where the elevator is held during steady level flight "
+            "and shows it on the map: up elevator means nose heavy. Works "
+            "with SERVO_AUTO_TRIM on, because the servo output includes "
+            "the trim. Costs about 33 B/s. Assumes the elevator is faired "
+            "at 1500us; elevon and V-tail aircraft are not supported.")
         layout.addWidget(self.cog_box)
+
+        # What the app worked out about this aircraft, so a wrong reading
+        # is caught on the ground rather than after a flight.
+        self.cog_detail = QLabel()
+        self.cog_detail.setWordWrap(True)
+        self.cog_detail.setStyleSheet("font-size: 11px; color: #8fd18f;")
+        layout.addWidget(self.cog_detail)
+
+        self.elev_combo = QComboBox()
+        self.elev_combo.addItem("Up elevator: detect automatically", "auto")
+        self.elev_combo.addItem("Up elevator: below 1500us", "below")
+        self.elev_combo.addItem("Up elevator: above 1500us", "above")
+        idx = self.elev_combo.findData(self.elevator_direction())
+        self.elev_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.elev_combo.setToolTip(
+            "Automatic reads SERVOn_REVERSED, which was measured against "
+            "ArduPlane to decide this correctly. Override it only if the "
+            "reading above disagrees with your aircraft.")
+        layout.addWidget(self.elev_combo)
 
         self.note = QLabel()
         self.note.setWordWrap(True)
@@ -1468,6 +1520,12 @@ class TelemetryRatesDialog(QDialog):
             "talking to the same vehicle keeps its own rates."
         )
 
+    def set_elevator_detail(self, text):
+        """Show what the link found, or why it found nothing."""
+        self.cog_detail.setText(text or "Elevator: not detected yet")
+        self.cog_detail.setStyleSheet(
+            "font-size: 11px; color: %s;" % ("#8fd18f" if text else "#aaa"))
+
     def values(self):
         return (self.attitude_combo.currentData(),
                 self.position_combo.currentData(),
@@ -1477,6 +1535,7 @@ class TelemetryRatesDialog(QDialog):
         att, pos, full = self.values()
         save_setting(self.SETTING_ATTITUDE, att)
         save_setting(self.SETTING_POSITION, pos)
+        save_setting(self.SETTING_ELEV_DIR, self.elev_combo.currentData())
         save_setting(self.SETTING_FULL, full)
         save_setting(self.SETTING_COG, self.cog_box.isChecked())
         return att, pos, full
@@ -2165,6 +2224,8 @@ class MainWindow(QMainWindow):
         self._flight_start = None
         # Accumulates the numbers reported after landing.
         self._flight_stats = FlightStats()
+        # Set by the link if this aircraft's elevator cannot be read.
+        self._elevator_unavailable = ""
         # Recent HUD state, so the overlay drawn over the 3D view can be
         # rendered at the moment that view is actually showing rather than
         # at the newest telemetry. Without this the instrument lines lead
@@ -2492,12 +2553,19 @@ class MainWindow(QMainWindow):
     def on_telemetry_settings(self):
         """Edit the requested rates, and push them to a live link at once."""
         dialog = TelemetryRatesDialog(self)
+        # Show what the link has worked out about this aircraft's elevator,
+        # so a wrong direction is visible before a flight rather than after.
+        dialog.set_elevator_detail(
+            self._elevator_unavailable
+            or (self.link.elevator_description() if self.link else ""))
         if dialog.exec() != QDialog.Accepted:
             return
         att, pos, full = dialog.save()
         if self.link is not None:
             self.link.set_stream_rates(att, pos, full)
-            self.link.set_pitch_pid_enabled(dialog.cog_box.isChecked())
+            self.link.set_elevator_direction(dialog.elev_combo.currentData())
+            self.link.set_cog_enabled(dialog.cog_box.isChecked())
+        self._push_cog_status()
 
     def on_check_updates(self, silent: bool = False):
         """Ask GitHub what the latest release is, off the GUI thread.
@@ -3179,7 +3247,9 @@ class MainWindow(QMainWindow):
                                 position_hz=pos, full_telemetry=full)
         # Off unless asked for: this one sets a parameter on the aircraft,
         # which every other ground station shares.
-        self.link.set_pitch_pid_enabled(TelemetryRatesDialog.cog_enabled())
+        self.link.set_elevator_direction(
+            TelemetryRatesDialog.elevator_direction())
+        self.link.set_cog_enabled(TelemetryRatesDialog.cog_enabled())
         self.link.attitude_update.connect(self.on_attitude)
         self.link.position_update.connect(self.on_position)
         self.link.ground_track_update.connect(self.on_ground_track)
@@ -3187,8 +3257,8 @@ class MainWindow(QMainWindow):
         self.link.turn_rate_update.connect(self.on_turn_rate)
         self.link.home_bearing_update.connect(self.on_home_bearing)
         self.link.home_position_update.connect(self.on_home_position)
-        self.link.pitch_integrator_update.connect(
-            self._flight_stats.on_pitch_integrator)
+        self.link.elevator_update.connect(self._flight_stats.on_elevator)
+        self.link.elevator_status.connect(self._on_elevator_status)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
         self.link.status_update.connect(self.on_status)
@@ -3247,10 +3317,26 @@ class MainWindow(QMainWindow):
         self.map_view.show_cache_limits(map_mb, terrain_mb)
         self._push_tile_cache_stats()
 
+    def _on_elevator_status(self, why):
+        """The link saying whether it can read this aircraft's elevator.
+
+        A property of the aircraft rather than of the flight, so it is
+        kept here: FlightStats.reset() runs every flight and would drop
+        it at the first takeoff.
+        """
+        self._elevator_unavailable = why
+        self._push_cog_status()
+
     def _push_cog_status(self):
         """Keep the map's balance readout current, or hide it."""
         if not TelemetryRatesDialog.cog_enabled():
             self.map_view.set_cog_status("off", "", 0.0)
+            return
+        if self._elevator_unavailable:
+            # Say why nothing is coming, rather than sit on "Waiting for
+            # level cruise" forever on an aircraft this cannot read.
+            self.map_view.set_cog_status(
+                "unavailable", self._elevator_unavailable, 0.0)
             return
         state, text, shift = self._flight_stats.balance_status()
         self.map_view.set_cog_status(state, text, shift)

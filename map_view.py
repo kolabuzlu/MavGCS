@@ -1024,10 +1024,9 @@ var COG_COLOURS = {
 };
 
 // How far the marker may slide from neutral, in SVG units. Bounded on
-// purpose: the pitch integrator says which way the balance is out and
-// roughly how much, not where the centre of gravity is in millimetres,
-// and a marker running off the tail would claim precision that is not
-// there.
+// purpose: held elevator says which way the balance is out and roughly
+// how far, not where the centre of gravity is in millimetres, and a
+// marker running off the tail would claim precision that is not there.
 var COG_MAX_SHIFT = 26;
 
 function setCogStatus(state, text, deflection) {
