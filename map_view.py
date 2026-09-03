@@ -371,8 +371,11 @@ LEAFLET_HTML = """
             <path d="M70,28.5 A6.5,6.5 0 0,1 63.5,22 L70,22 Z" fill="#111"/>
         </g>
     </svg>
+    <!-- Held to the width of the drawing so a longer verdict wraps onto
+         a second line rather than stretching the black panel sideways. -->
     <div id="cog-label" style="font-size: 10px; color: #cfd8e0;
-         text-align: center; margin-top: 1px;"></div>
+         text-align: center; margin-top: 1px; width: 108px;
+         line-height: 1.15;"></div>
 </div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
@@ -1020,6 +1023,11 @@ var homeBearing = null;   // deg to home, null until known
 var COG_COLOURS = {
     'Nose heavy': '#ffa726',
     'Tail heavy': '#ffa726',
+    // Paler, because these come from the elevator trim alone: the pitch
+    // integrator had nothing to say, so whatever is out is small enough
+    // that SERVO_AUTO_TRIM absorbed all of it.
+    'Slightly nose heavy': '#ffd08a',
+    'Slightly tail heavy': '#ffd08a',
     'Balanced': '#7ddc7d'
 };
 

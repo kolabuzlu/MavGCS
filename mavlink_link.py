@@ -140,6 +140,13 @@ class MavlinkLink(QThread):
     elevator_update = Signal(float, float)   # us off centre, fraction of travel
     elevator_status = Signal(str)            # '' if usable, else why not
 
+    # The pitch controller's integrator - PIDP.I in the dataflash log. This
+    # is consulted first: while it is holding elevator it states the
+    # balance directly. It goes quiet on an aircraft flying level on
+    # autotrim alone, which is what the elevator reading above is for.
+    # Needs GCS_PID_MASK bit 1, which is a vehicle-wide parameter.
+    pitch_integrator_update = Signal(float)
+
     # Where home actually is, for the map marker.
     home_position_update = Signal(float, float)  # lat, lon
 
@@ -218,6 +225,12 @@ class MavlinkLink(QThread):
         # replaced, nothing about the vehicle's configuration is changed,
         # so nothing has to be put back when the link closes.
         self._want_elevator = False
+        # GCS_PID_MASK is vehicle-wide, not a per-link stream rate: turning
+        # it on affects every ground station talking to this aircraft. The
+        # value found on arrival is remembered and put back when the link
+        # closes, and only the pitch bit is ever touched.
+        self._pid_mask_original = None
+        self._pid_mask_current = None
         self._elevator_ch = None            # 1-based servo output
         self._elevator_half_us = 400.0      # (MAX-MIN)/2, refined on arrival
         self._elevator_min = None
@@ -258,6 +271,7 @@ class MavlinkLink(QThread):
             # sending the reduced set with nothing left to explain why. Best
             # effort - on a link that has already dropped this goes nowhere,
             # and that is fine.
+            self._restore_pid_mask()
             self._restore_default_rates()
             # The thread owns the connection and closes it on its own way
             # out. Closing it from stop() instead meant the socket could be
@@ -346,6 +360,7 @@ class MavlinkLink(QThread):
             self.apply_stream_rates()
             if self._want_elevator:
                 self._scan_servo_functions()
+                self._request_pid_mask()
         except Exception as e:
             self.connection_status.emit(False, f"Connection failed: {e}")
             return
@@ -568,6 +583,11 @@ class MavlinkLink(QThread):
                     result_name = f"result {msg.result}"
                 self.command_feedback.emit(f"ACK: {cmd_name} -> {result_name}")
 
+            elif mtype == "PID_TUNING":
+                # axis 2 is pitch (PID_TUNING_PITCH).
+                if msg.axis == 2:
+                    self.pitch_integrator_update.emit(float(msg.I))
+
             elif mtype == "SERVO_OUTPUT_RAW":
                 if self._elevator_ch is not None:
                     raw = getattr(msg, f"servo{self._elevator_ch}_raw", None)
@@ -587,6 +607,8 @@ class MavlinkLink(QThread):
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
                     )
+                elif name == "GCS_PID_MASK":
+                    self._on_pid_mask(int(msg.param_value))
                 elif name.startswith("SERVO"):
                     self._on_servo_param(name, msg.param_value)
 
@@ -864,6 +886,9 @@ class MavlinkLink(QThread):
         self._want_elevator = bool(enabled)
         if self._want_elevator and not was:
             self._scan_servo_functions()
+            self._request_pid_mask()
+        elif self._pid_mask_current is not None:
+            self._apply_pid_mask()
         self.apply_stream_rates()
 
     def _scan_servo_functions(self):
@@ -989,6 +1014,62 @@ class MavlinkLink(QThread):
             lo, hi = self._elevator_min, self._elevator_max
             if lo is not None and hi is not None and hi > lo:
                 self._elevator_half_us = (hi - lo) / 2.0
+
+    # Bit 1 (value 2) is pitch, per GCS_PID_MASK's own documentation.
+    PID_MASK_PITCH = 2
+
+    def _request_pid_mask(self):
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_read_send(
+                    self.master.target_system, self.master.target_component,
+                    b"GCS_PID_MASK", -1)
+        except Exception:
+            pass
+
+    def _on_pid_mask(self, value: int):
+        """The vehicle told us its current mask."""
+        if self._pid_mask_original is None:
+            self._pid_mask_original = value
+        self._pid_mask_current = value
+        self._apply_pid_mask()
+
+    def _apply_pid_mask(self):
+        """Set or clear only the pitch bit, leaving the rest as found."""
+        if self._pid_mask_current is None:
+            return
+        if self._want_elevator:
+            wanted = self._pid_mask_current | self.PID_MASK_PITCH
+        else:
+            # Back to whatever the pitch bit was before we arrived, rather
+            # than simply clearing it - somebody may have wanted it on.
+            was_set = (self._pid_mask_original or 0) & self.PID_MASK_PITCH
+            wanted = ((self._pid_mask_current & ~self.PID_MASK_PITCH)
+                      | was_set)
+        if wanted != self._pid_mask_current:
+            self._set_pid_mask(wanted)
+
+    def _restore_pid_mask(self):
+        """Put the mask back exactly as it was found."""
+        if (self._pid_mask_original is None
+                or self._pid_mask_current == self._pid_mask_original):
+            return
+        self._set_pid_mask(self._pid_mask_original)
+
+    def _set_pid_mask(self, value: int):
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_set_send(
+                    self.master.target_system, self.master.target_component,
+                    b"GCS_PID_MASK", float(value),
+                    mavutil.mavlink.MAV_PARAM_TYPE_INT16)
+            self._pid_mask_current = value
+        except Exception:
+            pass
 
     def _restore_default_rates(self):
         """Put every message we touched back to the vehicle's own rate."""

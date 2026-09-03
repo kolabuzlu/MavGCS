@@ -160,17 +160,22 @@ class FlightStats:
     # elevator is busy either side of where it is held, and a small offset
     # inside that noise is correctly refused rather than called.
     BALANCE_AGREEMENT = 0.8
-    # Both of these are fractions of half the elevator's travel, so they
-    # mean the same thing on a 1000-2000 setup as on 1100-1900. At the
-    # 1100-1900 the SITL flies, they work out at 10us and 60us.
-    #
-    # Below the deadband the elevator is close enough to centre that
-    # calling it either way would be reading linkage slop.
-    BALANCE_DEADBAND = 0.025
-    # Held elevator says which way the balance is out and roughly how far;
-    # it is not a centre-of-gravity measurement. This is only where the
-    # indicator's marker reaches its travel stop.
-    BALANCE_FULL_SCALE = 0.15
+    # The integrator is asked first, and answers whenever it is holding
+    # elevator. Measured on ArduPlane 4.8 in settled cruise: PIDP.I sat at
+    # -11.8 with a spread of 1.3, so its working range is tens of units,
+    # not fractions of one. About 45 centidegrees of surface per unit, so
+    # a unit is roughly 5us of elevator on a 1000-2000 output.
+    BALANCE_I_DEADBAND = 2.0        # ~10us of elevator
+    BALANCE_I_FULL_SCALE = 20.0     # where the marker reaches its stop
+
+    # Second question, asked only when the integrator has gone quiet.
+    # SERVO_AUTO_TRIM can shift the elevator centre by about 100us either
+    # way and no further, so an imbalance it absorbed COMPLETELY - leaving
+    # the integrator at nothing - is bounded by that, and is reported as
+    # slight. Anything larger saturates the trim and the remainder goes
+    # back into the integrator, where the first question catches it.
+    BALANCE_AUTOTRIM_US = 100.0
+    BALANCE_ELEV_DEADBAND_US = 12.0
     # Below this a report is not worth showing - an arm/disarm on the bench
     # is not a flight.
     MIN_REPORTABLE_S = 30.0
@@ -213,6 +218,7 @@ class FlightStats:
         self.track = []
         self._amsl = None
         self.balance_samples = []   # (monotonic time, us off centre, fraction)
+        self.integrator_samples = []    # (monotonic time, PIDP.I)
         self._roll_deg = 0.0
         self._climb = 0.0
         self._mode = None
@@ -320,6 +326,7 @@ class FlightStats:
             m.distance_m += p.distance_m
             m.track.extend(p.track)
             m.balance_samples.extend(p.balance_samples)
+            m.integrator_samples.extend(p.integrator_samples)
             if p.amsl_max is not None:
                 m.amsl_max = p.amsl_max if m.amsl_max is None else max(m.amsl_max, p.amsl_max)
             if p.volt_start is not None and m.volt_start is None:
@@ -389,27 +396,37 @@ class FlightStats:
         """Roll only - the balance check needs to know the wings are level."""
         self._roll_deg = roll_deg
 
-    def on_elevator(self, offset_us, fraction):
-        """One elevator reading, kept only if the flight is steady.
+    def _steady(self):
+        """Whether right now is a moment worth sampling at all.
 
         Every rejection here is deliberate: a sample taken in a turn, a
         climb, or a mode where the pilot is flying the elevator says
         nothing about where the centre of gravity is.
         """
         if not self.running or not self.ever_airborne:
-            return
+            return False
         if self._mode not in self.BALANCE_MODES:
-            return
+            return False
         if self._mode_since is None:
-            return
+            return False
         if time.monotonic() - self._mode_since < self.BALANCE_SETTLE_S:
-            return
+            return False
         if abs(self._roll_deg) > self.BALANCE_MAX_ROLL_DEG:
-            return
+            return False
         if abs(self._climb) > self.BALANCE_MAX_CLIMB_MPS:
-            return
-        self.balance_samples.append(
-            (time.monotonic(), float(offset_us), float(fraction)))
+            return False
+        return True
+
+    def on_pitch_integrator(self, value):
+        """One PID_TUNING pitch sample, kept only if the flight is steady."""
+        if self._steady():
+            self.integrator_samples.append((time.monotonic(), float(value)))
+
+    def on_elevator(self, offset_us, fraction):
+        """One elevator reading, kept only if the flight is steady."""
+        if self._steady():
+            self.balance_samples.append(
+                (time.monotonic(), float(offset_us), float(fraction)))
 
     def balance_status(self):
         """(state, text, marker position) for the indicator on the map.
@@ -419,49 +436,88 @@ class FlightStats:
         broken, when in fact it is waiting for the level flight that makes
         the number mean anything.
         """
-        samples = self.balance_samples
-        if not samples:
+        # Progress comes from whichever signal has watched for longest:
+        # the integrator arrives ten times faster than the elevator, and
+        # on some aircraft one of the two never arrives at all.
+        spans = [s[-1][0] - s[0][0]
+                 for s in (self.integrator_samples, self.balance_samples) if s]
+        if not spans:
             return ("waiting", "Waiting for level cruise", 0.0)
-        span = samples[-1][0] - samples[0][0]
+        span = max(spans)
         verdict = self.balance_verdict()
         if verdict is None:
             return ("sampling",
                     f"Sampling {span:.0f}/{self.BALANCE_MIN_SPAN_S:.0f}s", 0.0)
-        headline, _, mean, mean_us = verdict
-        # Positive means up elevator is being held, which is nose heavy, so
-        # the marker belongs forward - to the left, where the nose is drawn.
-        shift = max(-1.0, min(1.0, -mean / self.BALANCE_FULL_SCALE))
-        return (headline, f"{headline} ({mean_us:+.0f}us)", shift)
+        headline, _, shift, number = verdict
+        # The marker position is decided in balance_verdict, where it is
+        # known WHICH signal answered: a unit of integrator and a
+        # microsecond of elevator are not the same size.
+        text = f"{headline} ({number})" if number else headline
+        return (headline, text, shift)
 
     def balance_verdict(self):
-        """(headline, detail), or None when there is not enough to say.
+        """(headline, detail, marker, number), or None if nothing to say.
+
+        Two questions in order, because the two signals fail in opposite
+        places. The pitch integrator states the balance directly, but goes
+        quiet on an aircraft that SERVO_AUTO_TRIM has trimmed level. The
+        elevator position keeps the offset either way, but is the coarser
+        read. So the integrator is asked first and the elevator only when
+        it has nothing to say.
 
         Returning None is a real answer: a flight with no settled level
         cruise cannot tell you anything about the balance, and should say
         so rather than average whatever it happened to see.
         """
-        samples = self.balance_samples
-        if len(samples) < 5:
+        # First question: is the integrator holding elevator? While it is,
+        # it states the balance directly and nothing else is needed.
+        i_span, i_mean, i_agree = self._summarise(
+            [(t, v) for t, v in self.integrator_samples])
+        if (i_span is not None and abs(i_mean) >= self.BALANCE_I_DEADBAND
+                and i_agree >= self.BALANCE_AGREEMENT):
+            detail = (f"integrator {i_mean:+.1f} over {i_span:.0f}s level, "
+                      f"{i_agree * 100:.0f}% same side")
+            shift = max(-1.0, min(1.0, -i_mean / self.BALANCE_I_FULL_SCALE))
+            return ("Nose heavy" if i_mean > 0 else "Tail heavy",
+                    detail, shift, f"{i_mean:+.1f}")
+
+        # Second question, and only now: the integrator has gone quiet, so
+        # either the aircraft is in balance or SERVO_AUTO_TRIM has taken
+        # the offset into the elevator centre. The elevator itself tells
+        # the two apart.
+        e_span, e_mean_us, e_agree = self._summarise(
+            [(t, us) for t, us, _ in self.balance_samples])
+        if (e_span is not None and abs(e_mean_us) >= self.BALANCE_ELEV_DEADBAND_US
+                and e_agree >= self.BALANCE_AGREEMENT):
+            detail = (f"elevator {e_mean_us:+.0f}us over {e_span:.0f}s level, "
+                      f"{e_agree * 100:.0f}% same side, integrator quiet")
+            shift = max(-1.0, min(1.0,
+                                  -e_mean_us / self.BALANCE_AUTOTRIM_US))
+            return ("Slightly nose heavy" if e_mean_us > 0
+                    else "Slightly tail heavy",
+                    detail, shift, f"{e_mean_us:+.0f}us")
+
+        # Neither is saying anything, which is what balance looks like.
+        span = i_span if i_span is not None else e_span
+        if span is None:
             return None
-        span = samples[-1][0] - samples[0][0]
+        return ("Balanced", f"nothing held over {span:.0f}s level", 0.0, "")
+
+    def _summarise(self, pairs):
+        """(span, mean, agreement) for one signal, or Nones if too thin.
+
+        Refusing to summarise is a real answer: a handful of samples over
+        a few seconds cannot show that anything is being held steadily.
+        """
+        if len(pairs) < 5:
+            return None, None, None
+        span = pairs[-1][0] - pairs[0][0]
         if span < self.BALANCE_MIN_SPAN_S:
-            return None
-
-        # The verdict is decided on the fraction, so it reads the same on
-        # any servo travel; the microseconds are what gets shown, because
-        # that is the number checkable against Mission Planner.
-        fracs = [f for _, _, f in samples]
-        micros = [u for _, u, _ in samples]
-        mean = sum(fracs) / len(fracs)
-        mean_us = sum(micros) / len(micros)
-        agree = sum(1 for f in fracs if (f > 0) == (mean > 0)) / len(fracs)
-        detail = (f"{mean_us:+.0f}us mean over {span:.0f}s level, "
-                  f"{agree * 100:.0f}% same side")
-
-        if abs(mean) < self.BALANCE_DEADBAND or agree < self.BALANCE_AGREEMENT:
-            return ("Balanced", detail, mean, mean_us)
-        return ("Nose heavy" if mean > 0 else "Tail heavy",
-                detail, mean, mean_us)
+            return None, None, None
+        values = [v for _, v in pairs]
+        mean = sum(values) / len(values)
+        agree = sum(1 for v in values if (v > 0) == (mean > 0)) / len(values)
+        return span, mean, agree
 
     def on_wind(self, speed_mps):
         if self.running:
@@ -3258,6 +3314,8 @@ class MainWindow(QMainWindow):
         self.link.home_bearing_update.connect(self.on_home_bearing)
         self.link.home_position_update.connect(self.on_home_position)
         self.link.elevator_update.connect(self._flight_stats.on_elevator)
+        self.link.pitch_integrator_update.connect(
+            self._flight_stats.on_pitch_integrator)
         self.link.elevator_status.connect(self._on_elevator_status)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
