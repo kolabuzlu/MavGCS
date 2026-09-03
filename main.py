@@ -2661,9 +2661,12 @@ class MainWindow(QMainWindow):
     ETA_MIN_DIST_M = 1.0
     # Past this the number is not telling anyone anything useful.
     ETA_MAX_S = 100 * 3600
-    # Circling a point is not going anywhere. The distance still reports,
-    # and dividing by it would count down to an arrival that never comes.
-    ETA_HOLDING_MODES = ("LOITER", "CIRCLE")
+    # Modes with no arrival to time. LOITER and CIRCLE hold a point.
+    # CRUISE holds a heading with the waypoint projected ahead of the
+    # aircraft, so it recedes exactly as fast as you fly at it. In all
+    # three the distance still reports, and dividing by it counts down to
+    # something that never arrives.
+    ETA_HOLDING_MODES = ("LOITER", "CIRCLE", "CRUISE")
     ETA_LABEL = "ETA to WP : "
 
     def on_nav_target(self, bearing_deg, distance_m):
