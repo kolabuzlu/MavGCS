@@ -1648,7 +1648,7 @@ class TelemetryRatesDialog(QDialog):
         self.full_box.toggled.connect(self._sync_enabled)
         layout.addWidget(self.full_box)
 
-        self.cog_box = QCheckBox("Estimate centre of gravity")
+        self.cog_box = QCheckBox("Estimate center of gravity")
         self.cog_box.setChecked(self.cog_enabled())
         self.cog_box.setToolTip(
             "Reads where the elevator is held during steady level flight "
