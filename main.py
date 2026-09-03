@@ -176,7 +176,10 @@ class FlightStats:
     # -11.8 with a spread of 1.3, so its working range is tens of units,
     # not fractions of one. About 45 centidegrees of surface per unit, so
     # a unit is roughly 5us of elevator on a 1000-2000 output.
-    BALANCE_I_DEADBAND = 2.0        # ~10us of elevator
+    # Widened 10% either side of centre on 2026-09-03, at the pilot's
+    # request: the balanced window read too narrow in flight, calling a
+    # trim that was near enough to centre slightly heavy.
+    BALANCE_I_DEADBAND = 2.2        # ~11us of elevator
 
     # Second question, asked only when the integrator has gone quiet.
     # SERVO_AUTO_TRIM can shift the elevator centre by about 100us either
@@ -185,7 +188,7 @@ class FlightStats:
     # slight. Anything larger saturates the trim and the remainder goes
     # back into the integrator, where the first question catches it.
     BALANCE_AUTOTRIM_US = 100.0
-    BALANCE_ELEV_DEADBAND_US = 12.0
+    BALANCE_ELEV_DEADBAND_US = 13.2
 
     # The marker is placed by the total elevator being held, in
     # microseconds, WHICHEVER signal chose the words. The words say which
