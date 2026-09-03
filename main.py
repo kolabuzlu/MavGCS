@@ -3242,6 +3242,17 @@ class MainWindow(QMainWindow):
         # worse than staying.
         if self._was_connected and not connected:
             self._leave_retro()
+            # The same clearing the Disconnect button does. It was only
+            # ever wired to the button, so a dropped radio left the panel
+            # reading ARMED in red for an aircraft out of contact - which
+            # is the very case _reset_vehicle_state was written for. It
+            # also closes the flight accumulator, which otherwise stays
+            # open and adds the next flight onto this one.
+            #
+            # On the transition only: a link that is down repeats this
+            # status, and "waiting for heartbeat" arrives before ever
+            # being connected.
+            self._reset_vehicle_state()
         self._was_connected = connected
         self._set_link_status(connected, message)
         # A failure reason is worth more than a tooltip - it is the thing
@@ -3700,6 +3711,13 @@ class MainWindow(QMainWindow):
                 seg for seg in self._suspended_flights if seg.end_time >= cutoff
             ]
         self._seen_disarmed = False   # nothing known about a link not yet up
+        # The last telemetry frame stays on screen, but the ETA is not
+        # part of it: altitude and position remain true of the moment the
+        # link died, where "arriving in 6:40" stops being true the instant
+        # it does. Nothing recomputes it either - it is pushed by incoming
+        # messages - so left alone it sits there indefinitely.
+        self._wp_dist = None
+        self.map_view.set_eta("")
         self.arm_panel.set_prearm_reason("")
         self.arm_panel.set_armed_state(None)
         self.mode_panel.set_active_mode(None)
