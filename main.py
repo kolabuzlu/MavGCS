@@ -460,8 +460,13 @@ class FlightStats:
         span = max(spans)
         verdict = self.balance_verdict()
         if verdict is None:
-            return ("sampling",
-                    f"Sampling {span:.0f}/{self.BALANCE_MIN_SPAN_S:.0f}s", 0.0)
+            # Progress towards the minimum span a verdict needs. Clamped
+            # below 100 because reaching it is what ends this state: a
+            # bar sitting at 100% would look stuck rather than nearly
+            # done. It can read over 100 otherwise - one signal can pass
+            # the span while still holding too few samples to summarise.
+            pct = max(0.0, min(99.0, span / self.BALANCE_MIN_SPAN_S * 100.0))
+            return ("sampling", f"Acquiring CG {pct:.0f}%", 0.0)
         headline, _, shift, number = verdict
         # The marker position is decided in balance_verdict, where it is
         # known WHICH signal answered: a unit of integrator and a
