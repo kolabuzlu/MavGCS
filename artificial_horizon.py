@@ -234,7 +234,13 @@ class ArtificialHorizon(QWidget):
         fm = painter.fontMetrics()
         tw = fm.horizontalAdvance(text) + 6.0
         th = fm.height() + 2.0
-        label = QRectF(rect.center().x() - tw / 2.0, rect.bottom() + 2, tw, th)
+        # Centred under the bar, but never allowed to touch the frame.
+        # How wide the text comes out depends on the font the platform
+        # picks and the display's DPI - the same string measured 6px wider
+        # under one Qt platform than another - so the group's margin alone
+        # cannot guarantee the clearance. This does.
+        left = max(rect.center().x() - tw / 2.0, 3.0)
+        label = QRectF(left, rect.bottom() + 2, tw, th)
         painter.setPen(Qt.NoPen)
         # The wind readout's black rather than the boxes' lighter one:
         # 170 alpha over snow or pale sand still comes out at luminance
