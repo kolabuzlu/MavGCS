@@ -7,11 +7,13 @@ invented, while everything that moves comes from telemetry. Groundspeed
 scrolls the river, roll steers, throttle fills the fuel gauge, altitude
 sizes the shadow. Nothing here commands the aircraft.
 
-The look comes from drawing into a small image - 128x160 pixels - and
-blitting it up with nearest-neighbour scaling. Drawing "big pixels"
-directly at the widget's own size never looks right: the shapes end up
-crisp where the era's hardware would have been blocky, and diagonals
-give the game away.
+The look comes from drawing into a small image - a grid about 150 rows
+tall, as many columns wide as the panel's shape calls for - and blitting
+it up with nearest-neighbour scaling. Drawing "big pixels" directly at
+the widget's own size never looks right: the shapes end up crisp where
+the era's hardware would have been blocky, and diagonals give the game
+away. The grid follows the panel rather than being a fixed shape inside
+it, so the picture fills the space with no black down the sides.
 
 It is pure QPainter. That matters on this project beyond taste: the 3D
 view drives Chromium's GPU path, which is what crashes on the Intel
@@ -52,9 +54,16 @@ class RetroView(QWidget):
     # Pressing and holding on it again asks to go back.
     exit_requested = Signal()
 
-    # The pixel grid everything is drawn on, then scaled up whole.
-    GRID_W = 128
-    GRID_H = 160
+    # How many pixel rows the scene is drawn in. The number of columns
+    # follows from the panel's shape, so the picture fills it exactly
+    # rather than being letterboxed inside a fixed grid.
+    #
+    # This is what decides how chunky it looks, and it has to be read
+    # against the space it lands in: the view is about 236px tall here,
+    # so 150 rows would make each pixel 1.6 screen pixels - a small
+    # drawing rather than a blocky one. 72 rows gives a bit over 3, which
+    # is where the aeroplane and the river read the way the original did.
+    ROWS = 72
 
     # World units per second at 1 m/s of groundspeed. Chosen so a typical
     # 22 m/s cruise scrolls at a speed that reads as flying rather than
@@ -69,7 +78,11 @@ class RetroView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(220, 220)
+        # Deliberately no minimum size. This shares a QStackedWidget with
+        # the HUD inside a scroll area, and a stack is as tall as its
+        # tallest page demands: asking for 220 here raised the column's
+        # minimum from 175 and put a scrollbar down the left of the whole
+        # program. A hidden view must cost the layout nothing.
         self.setMouseTracking(True)
 
         self.groundspeed = None     # m/s
@@ -83,7 +96,8 @@ class RetroView(QWidget):
         self._last = time.monotonic()
         self._seed = random.randrange(1 << 30)
 
-        self._image = QImage(self.GRID_W, self.GRID_H, QImage.Format_RGB32)
+        self._gw, self._gh = 120, self.ROWS      # refreshed to fit the panel
+        self._image = QImage(self._gw, self._gh, QImage.Format_RGB32)
 
         self._hold = QTimer(self)
         self._hold.setSingleShot(True)
@@ -132,7 +146,7 @@ class RetroView(QWidget):
         # moving across the river, so this is honest only as a feel: the
         # roll is real, where it takes you is not.
         self._x += math.sin(self.roll) * 46.0 * dt
-        cx, half = self._river(self._world + self.GRID_H)
+        cx, half = self._river(self._world + self._gh)
         self._x = max(-half + 6, min(half - 6, self._x))
         self.update()
 
@@ -145,10 +159,13 @@ class RetroView(QWidget):
         at any moment and must draw the same river every time, without
         keeping anything.
         """
-        cx = (self.GRID_W / 2
-              + 22.0 * math.sin(y / 71.0)
-              + 9.0 * math.sin(y / 23.0 + 1.7))
-        half = 26.0 + 7.0 * math.sin(y / 47.0 + 0.6)
+        # Everything is a fraction of the grid width, so a wide panel gets
+        # a wide river rather than the same river with more grass at the
+        # sides.
+        cx = (self._gw / 2
+              + self._gw * 0.172 * math.sin(y / 71.0)
+              + self._gw * 0.070 * math.sin(y / 23.0 + 1.7))
+        half = self._gw * (0.203 + 0.055 * math.sin(y / 47.0 + 0.6))
         return cx, half
 
     def _things_near(self, top, bottom):
@@ -176,7 +193,17 @@ class RetroView(QWidget):
 
     # ------------------------------------------------------------ drawing
 
+    def _fit_grid(self):
+        """Size the pixel grid to the panel, keeping the pixels square."""
+        w, h = max(1, self.width()), max(1, self.height())
+        cell = h / float(self.ROWS)
+        gw = max(40, int(round(w / cell)))
+        if (gw, self.ROWS) != (self._gw, self._gh):
+            self._gw, self._gh = gw, self.ROWS
+            self._image = QImage(gw, self.ROWS, QImage.Format_RGB32)
+
     def paintEvent(self, event):
+        self._fit_grid()
         img = self._image
         p = QPainter(img)
         self._draw_scene(p)
@@ -185,16 +212,13 @@ class RetroView(QWidget):
         out = QPainter(self)
         # No smoothing: the whole point is that the pixels stay square.
         out.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        side = min(self.width() / self.GRID_W, self.height() / self.GRID_H)
-        w = int(self.GRID_W * side)
-        h = int(self.GRID_H * side)
-        out.fillRect(self.rect(), INK)
-        out.drawImage(QRect((self.width() - w) // 2, (self.height() - h) // 2,
-                            w, h), img)
+        # Filled edge to edge - the grid was shaped to this rectangle, so
+        # there is nothing to letterbox.
+        out.drawImage(self.rect(), img)
         out.end()
 
     def _draw_scene(self, p):
-        W, H = self.GRID_W, self.GRID_H
+        W, H = self._gw, self._gh
         p.fillRect(0, 0, W, H, WATER)
         top = self._world
         p.setPen(Qt.NoPen)
@@ -239,9 +263,9 @@ class RetroView(QWidget):
         p.fillRect(x - r + 1, y - 5 - r, r * 2 - 2, 1, TREE)
 
     def _aircraft(self, p):
-        cx, _ = self._river(self._world + self.GRID_H)
+        cx, _ = self._river(self._world + self._gh)
         x = int(cx + self._x)
-        y = self.GRID_H - 34
+        y = self._gh - 34
 
         # A shadow that grows as you descend, which is the only altitude
         # cue the original had and still the clearest one.
@@ -260,30 +284,43 @@ class RetroView(QWidget):
         p.fillRect(x - 1, y + 1, 3, 2, PLANE_DK)               # canopy
 
     def _panel(self, p):
-        """The bottom strip: fuel from throttle, and distance as a score."""
-        W, H = self.GRID_W, self.GRID_H
-        p.fillRect(0, H - 16, W, 16, INK)
+        """The bottom strip: fuel from throttle, and distance as a score.
+
+        Everything here is a fraction of the grid, not a fixed number of
+        rows. Fixed at 16 rows it was a sixth of the picture at a fine
+        grid and a third of it at a coarse one.
+        """
+        W, H = self._gw, self._gh
+        strip = max(8, int(H * 0.115))
+        top = H - strip
+        p.fillRect(0, top, W, strip, INK)
 
         thr = self.throttle if self.throttle is not None else 0.0
-        gw, gh = 62, 9
-        gx, gy = (W - gw) // 2, H - 12
+        gw = max(28, int(W * 0.30))
+        gh = max(5, strip - 3)
+        gx, gy = (W - gw) // 2, top + (strip - gh) // 2
         p.fillRect(gx, gy, gw, gh, GAUGE_BG)
         p.fillRect(gx + 1, gy + 1, gw - 2, gh - 2, INK)
         fill = int((gw - 4) * max(0.0, min(100.0, thr)) / 100.0)
         p.fillRect(gx + 2, gy + 2, fill, gh - 4, GAUGE_BG)
 
-        f = QFont("Courier New", 6)
+        f = QFont("Courier New")
+        f.setPointSizeF(max(3.5, strip * 0.62))
         f.setBold(True)
         p.setFont(f)
         p.setPen(QPen(GAUGE_BG))
-        p.drawText(QRect(gx - 12, gy - 1, 12, gh), Qt.AlignRight, "E")
-        p.drawText(QRect(gx + gw, gy - 1, 14, gh), Qt.AlignLeft, "F")
-        p.setPen(QPen(GAUGE_BG))
-        p.drawText(QRect(0, H - 12, gx - 14, gh), Qt.AlignRight,
-                   f"{int(self._world / 40) % 100000:5d}")
+        pad = max(6, int(W * 0.02))
+        p.drawText(QRect(gx - pad - 8, top, 8, strip),
+                   Qt.AlignRight | Qt.AlignVCenter, "E")
+        p.drawText(QRect(gx + gw + pad, top, 10, strip),
+                   Qt.AlignLeft | Qt.AlignVCenter, "F")
+        p.drawText(QRect(0, top, gx - pad - 10, strip),
+                   Qt.AlignRight | Qt.AlignVCenter,
+                   f"{int(self._world / 40) % 100000:5d} ")
         spd = self.airspeed if self.airspeed is not None else 0.0
-        p.drawText(QRect(gx + gw + 16, H - 12, W - gx - gw - 16, gh),
-                   Qt.AlignLeft, f"{spd:0.0f}")
+        p.drawText(QRect(gx + gw + pad + 12, top,
+                         W - (gx + gw + pad + 12), strip),
+                   Qt.AlignLeft | Qt.AlignVCenter, f"{spd:0.0f}")
 
     # ------------------------------------------------------------- input
 
