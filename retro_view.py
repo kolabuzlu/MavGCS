@@ -46,8 +46,7 @@ ROOF_ALT = QColor(40, 60, 160)
 TREE = QColor(24, 104, 24)
 PLANE = QColor(248, 248, 248)
 PLANE_DK = QColor(32, 40, 64)
-GAUGE_BG = QColor(240, 224, 32)
-INK = QColor(16, 16, 16)
+CAPTION = QColor(240, 224, 32)          # the NO FIX notice
 
 # Metres per degree. Good enough for scenery; this is not a survey.
 M_PER_DEG_LAT = 110540.0
@@ -116,10 +115,7 @@ class RetroView(QWidget):
         self.lon = None
         self.heading = 0.0          # degrees, where the nose points
         self.roll = 0.0
-        self.throttle = None
         self.altitude = None
-        self.airspeed = None
-        self.groundspeed = None
 
         self._gw, self._gh = 120, self.ROWS
         self._image = QImage(self._gw, self._gh, QImage.Format_RGB32)
@@ -136,20 +132,19 @@ class RetroView(QWidget):
 
     # ---------------------------------------------------------- telemetry
 
-    def set_state(self, groundspeed=None, roll=None, throttle=None,
-                  altitude=None, airspeed=None, heading=None,
+    def set_state(self, roll=None, altitude=None, heading=None,
                   lat=None, lon=None):
-        """Whatever is known right now. Any of it may be None."""
-        if groundspeed is not None:
-            self.groundspeed = groundspeed
+        """Whatever is known right now. Any of it may be None.
+
+        Only what is actually drawn: where the aircraft is, which way it
+        points, how it is banked and how high. The speeds and throttle
+        went with the readout strip - carrying telemetry nothing draws
+        would only invite someone to wonder where it had gone.
+        """
         if roll is not None:
             self.roll = roll
-        if throttle is not None:
-            self.throttle = throttle
         if altitude is not None:
             self.altitude = altitude
-        if airspeed is not None:
-            self.airspeed = airspeed
         if heading is not None:
             self.heading = heading
         if lat is not None:
@@ -245,7 +240,6 @@ class RetroView(QWidget):
             self._plots(p, box)
             p.restore()
             self._aircraft(p)
-        self._panel(p)
 
     def _fields(self, p, box):
         """Blocks of slightly different green, so the ground has grain."""
@@ -358,46 +352,8 @@ class RetroView(QWidget):
         f.setPointSizeF(max(4.0, H * 0.10))
         f.setBold(True)
         p.setFont(f)
-        p.setPen(QPen(GAUGE_BG))
+        p.setPen(QPen(CAPTION))
         p.drawText(QRect(0, 0, W, H), Qt.AlignCenter, "NO FIX")
-
-    def _panel(self, p):
-        """The bottom strip: fuel from throttle, groundspeed, altitude.
-
-        Everything is a fraction of the grid, not a fixed number of rows,
-        so it stays the same slice of the picture at any panel shape.
-        """
-        W, H = self._gw, self._gh
-        strip = max(8, int(H * 0.115))
-        top = H - strip
-        p.fillRect(0, top, W, strip, INK)
-
-        thr = self.throttle if self.throttle is not None else 0.0
-        gw = max(28, int(W * 0.30))
-        gh = max(5, strip - 3)
-        gx, gy = (W - gw) // 2, top + (strip - gh) // 2
-        p.fillRect(gx, gy, gw, gh, GAUGE_BG)
-        p.fillRect(gx + 1, gy + 1, gw - 2, gh - 2, INK)
-        fill = int((gw - 4) * max(0.0, min(100.0, thr)) / 100.0)
-        p.fillRect(gx + 2, gy + 2, fill, gh - 4, GAUGE_BG)
-
-        f = QFont("Courier New")
-        f.setPointSizeF(max(3.5, strip * 0.62))
-        f.setBold(True)
-        p.setFont(f)
-        p.setPen(QPen(GAUGE_BG))
-        pad = max(6, int(W * 0.02))
-        p.drawText(QRect(gx - pad - 8, top, 8, strip),
-                   Qt.AlignRight | Qt.AlignVCenter, "E")
-        p.drawText(QRect(gx + gw + pad, top, 10, strip),
-                   Qt.AlignLeft | Qt.AlignVCenter, "F")
-        gs = self.groundspeed if self.groundspeed is not None else 0.0
-        p.drawText(QRect(0, top, gx - pad - 10, strip),
-                   Qt.AlignRight | Qt.AlignVCenter, f"{gs:0.0f} ")
-        alt = self.altitude if self.altitude is not None else 0.0
-        p.drawText(QRect(gx + gw + pad + 12, top,
-                         W - (gx + gw + pad + 12), strip),
-                   Qt.AlignLeft | Qt.AlignVCenter, f"{alt:0.0f}")
 
     # ------------------------------------------------------------- input
 

@@ -3058,8 +3058,6 @@ class MainWindow(QMainWindow):
         self.horizon.set_airspeed(airspeed)
         if throttle is not None:
             self.horizon.set_throttle(throttle)
-        self.retro_view.set_state(groundspeed=groundspeed, airspeed=airspeed,
-                                  throttle=throttle)
         self._last_groundspeed = groundspeed
         self._last_climb = climb
         self._flight_stats.on_vfr(airspeed, groundspeed, climb, throttle)
