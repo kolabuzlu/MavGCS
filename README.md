@@ -1,6 +1,6 @@
 # MavGCS - Ground Control Station for MAVLink
 
-![MavGCS screenshot](screenshot.png)
+![MavGCS screenshot](mavgcs17r6.png)
 
 A ground control station software for MAVLink protocol.
 
