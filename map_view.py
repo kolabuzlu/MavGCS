@@ -1059,14 +1059,21 @@ var COG_COLOURS = {
 // marker running off the tail would claim precision that is not there.
 var COG_MAX_SHIFT = 26;
 
-function setEta(text) {
+function setEta(label, value) {
     var el = document.getElementById('eta-readout');
     if (!el) { return; }
-    // An empty string means there is nothing worth saying - no waypoint,
+    // An empty label means there is nothing worth saying - no waypoint,
     // or not moving - and the box goes away rather than showing a dash.
-    if (!text) { el.style.display = 'none'; return; }
+    if (!label) { el.style.display = 'none'; return; }
     el.style.display = '';
-    el.textContent = text;
+    // Built as nodes rather than assembled into innerHTML: the value is
+    // only ever a time from this program, but a readout that parses
+    // whatever it is handed as markup is a habit worth not forming.
+    el.textContent = '';
+    el.appendChild(document.createTextNode(label));
+    var b = document.createElement('b');
+    b.textContent = value;
+    el.appendChild(b);
 }
 
 function setCogStatus(state, text, deflection) {
@@ -2066,13 +2073,15 @@ class MapView(QWebEngineView):
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
 
-    def set_eta(self, text: str):
+    def set_eta(self, label: str, value: str = ""):
         """Time to the next waypoint, above the balance indicator.
 
-        An empty string hides the box: no waypoint, or too slow for the
-        arithmetic to mean anything.
+        The label is plain and the value is bold, which is why they
+        arrive separately. An empty label hides the box: no waypoint, or
+        too slow for the arithmetic to mean anything.
         """
-        self.page().runJavaScript(f"setEta({json.dumps(text)});")
+        self.page().runJavaScript(
+            f"setEta({json.dumps(label)}, {json.dumps(value)});")
 
     def set_cog_status(self, state: str, text: str, deflection: float = 0.0):
         """The live balance indicator above the credit line.

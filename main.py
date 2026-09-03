@@ -2663,7 +2663,8 @@ class MainWindow(QMainWindow):
     ETA_MAX_S = 100 * 3600
     # Circling a point is not going anywhere. The distance still reports,
     # and dividing by it would count down to an arrival that never comes.
-    ETA_HOLDING_MODES = ("LOITER",)
+    ETA_HOLDING_MODES = ("LOITER", "CIRCLE")
+    ETA_LABEL = "ETA to WP : "
 
     def on_nav_target(self, bearing_deg, distance_m):
         self.map_view.set_nav_target(bearing_deg, distance_m)
@@ -2682,7 +2683,7 @@ class MainWindow(QMainWindow):
         # would look like a fault, where a dash says plainly that there
         # is no arrival to time.
         if getattr(self, "_mode", None) in self.ETA_HOLDING_MODES:
-            self.map_view.set_eta("ETA to WP: --")
+            self.map_view.set_eta(self.ETA_LABEL, "--")
             return
         dist = getattr(self, "_wp_dist", None)
         gs = self._last_groundspeed
@@ -2694,7 +2695,7 @@ class MainWindow(QMainWindow):
         if seconds > self.ETA_MAX_S:
             self.map_view.set_eta("")
             return
-        self.map_view.set_eta(f"ETA to WP: {self._hms(seconds)}")
+        self.map_view.set_eta(self.ETA_LABEL, self._hms(seconds))
 
     @staticmethod
     def _hms(seconds: float) -> str:
