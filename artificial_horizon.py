@@ -67,9 +67,12 @@ class ArtificialHorizon(QWidget):
     WIND_BOX_MARGIN = 6
 
     # Height of the strip Cesium prints its credit into, along the bottom
-    # of the 3D view. Measured off a screenshot at 1916x1016: the credit
-    # begins 63px above the view's lower edge.
-    FPV_CREDIT_H = 64.0
+    # of the 3D view. The rules in fpv_view.py put the logo at bottom:28px
+    # capped at 14px, which suggests 42 - but measured in the running page
+    # its container reaches 47px, because the inline element's line box is
+    # taller than the image inside it. 50 takes that plus slack. Change
+    # the logo size or its offset and this has to be measured again.
+    FPV_CREDIT_H = 50.0
     # Breathing room at each end of the strip the bar is centred in.
     FPV_BAND_GAP = 4.0
 

@@ -87,7 +87,11 @@ CESIUM_HTML = """
          going below 0 here would crop the logo rather than move it. */
       left: 0; bottom: 28px;
   }
-  .cesium-credit-logoContainer img { max-height: 24px; width: auto; }
+  /* As small as it can be while still being a legible attribution,
+     which is what the licence asks for. Rendered at 1x and read at
+     each size: 16px is comfortable, 14px is the floor where both
+     words still resolve, and by 12px "ion" has gone to mush. */
+  .cesium-credit-logoContainer img { max-height: 14px; width: auto; }
   .cesium-credit-textContainer, .cesium-credit-expand-link {
       display: block !important; position: absolute !important;
       right: 8px; text-align: right; padding-left: 0;
