@@ -176,18 +176,17 @@ class FlightStats:
     # -11.8 with a spread of 1.3, so its working range is tens of units,
     # not fractions of one. About 45 centidegrees of surface per unit, so
     # a unit is roughly 5us of elevator on a 1000-2000 output.
-    # Flown and narrowed on 2026-09-03: the balanced window was
-    # swallowing real offsets, so the slight verdicts now appear much
-    # earlier. Both deadbands are set to the same physical deflection -
-    # about 5us of elevator, or half a degree of surface - using the
-    # measured 5us per integrator unit.
+    # Set from flight on 2026-09-03: 15us of elevator either side of
+    # centre, about 1.4 degrees of surface. Both deadbands describe the
+    # same physical deflection, using the measured 5us per integrator
+    # unit, so neither tier is more eager than the other.
     #
     # This can go lower safely. Noise cannot manufacture a verdict at any
     # deadband, because the agreement test independently requires the
     # offset to sit on one side for 80% of a 30 second window; measured
     # SITL cruise scatter is about +-6us, which over 30 samples leaves
     # the mean good to around 1us.
-    BALANCE_I_DEADBAND = 1.0        # ~5us of elevator
+    BALANCE_I_DEADBAND = 3.0        # ~15us of elevator
 
     # Second question, asked only when the integrator has gone quiet.
     # SERVO_AUTO_TRIM can shift the elevator centre by about 100us either
@@ -196,7 +195,7 @@ class FlightStats:
     # slight. Anything larger saturates the trim and the remainder goes
     # back into the integrator, where the first question catches it.
     BALANCE_AUTOTRIM_US = 100.0
-    BALANCE_ELEV_DEADBAND_US = 5.0
+    BALANCE_ELEV_DEADBAND_US = 15.0
 
     # The marker is placed by the total elevator being held, in
     # microseconds, WHICHEVER signal chose the words. The words say which
@@ -599,7 +598,17 @@ class FlightStats:
             return None, None, None
         values = [v for _, v in pairs]
         mean = sum(values) / len(values)
-        agree = sum(1 for v in values if (v > 0) == (mean > 0)) / len(values)
+        # A sample sitting exactly on neutral is on neither side, so it
+        # votes for neither. Writing this as (v > 0) == (mean > 0) over
+        # every sample silently handed those to the negative side - zero
+        # is not greater than zero, and neither is a negative mean - so
+        # they counted against a nose-heavy verdict and for a tail-heavy
+        # one. PWM is whole microseconds, so an elevator near centre sits
+        # exactly on 1500 often, and a nose-heavy trim could read
+        # Balanced while its mirror image read tail heavy.
+        signed = [v for v in values if v != 0.0]
+        agree = (sum(1 for v in signed if (v > 0) == (mean > 0)) / len(signed)
+                 if signed else 0.0)
         return span, mean, agree
 
     def on_wind(self, speed_mps):
