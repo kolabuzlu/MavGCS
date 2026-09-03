@@ -60,6 +60,9 @@ class ArtificialHorizon(QWidget):
 
     # Exposed so anything overlaid on the HUD can keep clear of the battery
     # box rather than guessing at where it sits.
+    # How far the throttle bar rises in FPV, to clear Cesium's credit.
+    FPV_BAR_LIFT = 22.0
+
     BATTERY_BOX_W = 104
     BATTERY_BOX_H = 44
     BATTERY_MARGIN = 6
@@ -430,7 +433,15 @@ class ArtificialHorizon(QWidget):
         bar_w = max(7.0, min(12.0, w * 0.02))
         bar_gap = 4.0
         bar_h = min(box_h * 2.4, h - 2 * margin - 14)
-        bar_rect = QRectF(margin, cy - bar_h / 2, bar_w, bar_h)
+        # Over the 3D view, Cesium prints its attribution across the
+        # bottom left and the bar's caption ran into it. Lift the bar
+        # clear there and only there - the 2D HUD has nothing in that
+        # corner, so it stays exactly where it was. A fixed lift rather
+        # than a proportional one, because the logo it is dodging is a
+        # fixed size whatever the view is scaled to.
+        lift = self.FPV_BAR_LIFT if self.overlay_mode else 0.0
+        lift = min(lift, max(0.0, (cy - bar_h / 2) - margin))
+        bar_rect = QRectF(margin, cy - bar_h / 2 - lift, bar_w, bar_h)
         self._draw_throttle(painter, bar_rect)
 
         painter.setFont(QFont("Sans", 11, QFont.Bold))
