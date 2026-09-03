@@ -12,7 +12,7 @@ The trick behind every AI (attitude indicator) widget:
 import math
 from PySide6.QtWidgets import QWidget, QComboBox
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QFont
-from PySide6.QtCore import Qt, QPointF, QRect, QRectF
+from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QTimer, Signal
 
 
 class ArtificialHorizon(QWidget):
@@ -31,6 +31,13 @@ class ArtificialHorizon(QWidget):
         # When True the sky/ground fill is skipped so this widget can be
         # rendered as a transparent overlay on the 3D FPV view.
         self.overlay_mode = False
+        # What the instruments occupy, refreshed on every repaint. Used
+        # only to tell whether a press landed on bare sky or ground.
+        self._boxes = []
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(self.HOLD_MS)
+        self._hold_timer.timeout.connect(self.held_on_empty.emit)
         self.lat = None  # deg, None until first GLOBAL_POSITION_INT
         self.lon = None  # deg, None until first GLOBAL_POSITION_INT
         self.ekf_color = "white"   # "white" | "yellow" | "red"
@@ -92,6 +99,13 @@ class ArtificialHorizon(QWidget):
 
     TAPE_TOP = 4
     TAPE_H = 26
+
+    # How long a press on bare sky or ground opens the hidden view. Three
+    # seconds is far longer than any accidental click.
+    HOLD_MS = 3000
+
+    # Emitted when such a hold completes.
+    held_on_empty = Signal()
 
     @classmethod
     def heading_tape_rect_for(cls, w, h):
@@ -189,6 +203,54 @@ class ArtificialHorizon(QWidget):
         self.wind_dir = direction_deg % 360 if direction_deg is not None else None
         self.wind_speed = speed_mps
         self.update()
+
+    def empty_at(self, pos) -> bool:
+        """Is this point on bare sky or ground, clear of every instrument?
+
+        The rectangles come from the last repaint rather than being
+        recomputed here, so this cannot drift out of step with what is
+        actually on screen.
+        """
+        if not self.rect().contains(pos):
+            return False
+        for box in self._boxes:
+            if box.adjusted(-2, -2, 2, 2).contains(QPointF(pos)):
+                return False
+        for child in self.children():
+            if isinstance(child, QWidget) and child.isVisible():
+                if child.geometry().adjusted(-2, -2, 2, 2).contains(pos):
+                    return False
+        # The aeroplane symbol and pitch ladder live in the middle; leave
+        # them alone so the hold cannot be started on the instrument the
+        # eye is actually using.
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        if abs(pos.x() - cx) < self.width() * 0.18 and abs(pos.y() - cy) < 40:
+            return False
+        return True
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.empty_at(
+                event.position().toPoint()):
+            self._hold_press = event.position().toPoint()
+            self._hold_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # A press that wanders is a drag, not a hold.
+        if self._hold_timer.isActive():
+            start = getattr(self, "_hold_press", None)
+            if start is None or (event.position().toPoint()
+                                 - start).manhattanLength() > 12:
+                self._hold_timer.stop()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._hold_timer.stop()
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        self._hold_timer.stop()
+        super().leaveEvent(event)
 
     def _draw_throttle(self, painter, rect, scale=1.0):
         """A vertical throttle bar, filling from the bottom.
@@ -324,6 +386,7 @@ class ArtificialHorizon(QWidget):
         # strip sitting above the attitude ball.
         heading = self.heading if self.heading is not None else 0.0
         tape_rect = self.heading_tape_rect_for(w, h)
+        self._boxes = [tape_rect, self.battery_box_rect_for(w, h)]
         tape_w, tape_h = tape_rect.width(), tape_rect.height()
 
         painter.setPen(QPen(Qt.white, 1))
@@ -385,6 +448,7 @@ class ArtificialHorizon(QWidget):
                            wind_box_w, wind_box_h)
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        self._boxes.append(wind_rect)
         painter.drawRect(wind_rect)
 
         arrow_cx = wind_rect.left() + 18
@@ -480,6 +544,7 @@ class ArtificialHorizon(QWidget):
         scale = self.FPV_BAR_SCALE if self.overlay_mode else 1.0
         bar_rect = QRectF(self.LEFT_GROUP_MARGIN, cy - bar_h * scale / 2.0,
                           bar_w * scale, bar_h * scale)
+        self._boxes.append(bar_rect)
         self._draw_throttle(painter, bar_rect, scale)
 
         painter.setFont(QFont("Sans", 11, QFont.Bold))
@@ -516,6 +581,7 @@ class ArtificialHorizon(QWidget):
         # Altitude box - middle right
         painter.setFont(QFont("Sans", 11, QFont.Bold))
         altitude_rect = QRectF(w - margin - box_w, cy - box_h / 2, box_w, box_h)
+        self._boxes.extend([airspeed_rect, altitude_rect])
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
         painter.drawRect(altitude_rect)
@@ -552,6 +618,7 @@ class ArtificialHorizon(QWidget):
             w - latlon_margin - latlon_box_w, h - latlon_margin - latlon_box_h,
             latlon_box_w, latlon_box_h,
         )
+        self._boxes.extend([lat_rect, lon_rect])
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
         painter.drawRect(lat_rect)
@@ -579,6 +646,7 @@ class ArtificialHorizon(QWidget):
             cx + status_gap / 2, h - latlon_margin - status_box_h,
             status_box_w, status_box_h,
         )
+        self._boxes.extend([ekf_rect, vibe_rect])
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
         painter.drawRect(ekf_rect)

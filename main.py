@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
+from retro_view import RetroView
 from map_view import MapView
 import terrain_provider
 from terrain_provider import TerrainRadarWorker
@@ -2406,6 +2407,7 @@ class MainWindow(QMainWindow):
         self._flight_stats = FlightStats()
         # Set by the link if this aircraft's elevator cannot be read.
         self._elevator_unavailable = ""
+        self._was_connected = False
         self._trim_throttle = None
         # Recent HUD state, so the overlay drawn over the 3D view can be
         # rendered at the moment that view is actually showing rather than
@@ -2518,6 +2520,12 @@ class MainWindow(QMainWindow):
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(self.horizon)   # index 0
         self.view_stack.addWidget(self.fpv_view)  # index 1
+        # Index 2 is not reachable from any button. Press and hold on bare
+        # sky or ground in the HUD to find it, and again to leave.
+        self.retro_view = RetroView()
+        self.view_stack.addWidget(self.retro_view)
+        self.horizon.held_on_empty.connect(self._enter_retro)
+        self.retro_view.exit_requested.connect(self._leave_retro)
 
         # The toggle floats over the view rather than sitting in its own
         # row: an extra row costs vertical space in this column, which on a
@@ -2618,6 +2626,7 @@ class MainWindow(QMainWindow):
 
     def on_attitude(self, roll, pitch, yaw):
         self.horizon.set_attitude(roll, pitch, yaw)
+        self.retro_view.set_state(roll=roll)
         self.telemetry.set_value("roll_deg", f"{math.degrees(roll):.2f}")
         self.telemetry.set_value("pitch_deg", f"{math.degrees(pitch):.2f}")
         # ATTITUDE.yaw is in radians over -pi..+pi (MAVLink spec), so a
@@ -2657,6 +2666,7 @@ class MainWindow(QMainWindow):
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
+        self.retro_view.set_state(altitude=alt)
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
         self._flight_stats.on_position(lat, lon, alt)
@@ -2993,6 +3003,26 @@ class MainWindow(QMainWindow):
         self.fpv_view.set_token(token)
         return True
 
+    RETRO_INDEX = 2
+
+    def _enter_retro(self):
+        """The hidden view. Only ever reached from the HUD."""
+        if self.view_stack.currentIndex() != 0:
+            return
+        self.view_area.release(self.horizon)
+        self.view_toggle_btn.hide()
+        self.view_stack.setCurrentIndex(self.RETRO_INDEX)
+        self.retro_view.start()
+
+    def _leave_retro(self):
+        """Back to the HUD, which is where it was entered from."""
+        if self.view_stack.currentIndex() != self.RETRO_INDEX:
+            return
+        self.retro_view.stop()
+        self.view_stack.setCurrentIndex(0)
+        self.view_toggle_btn.show()
+        self.view_area.set_label("FPV")
+
     def on_toggle_view(self):
         showing_fpv = self.view_stack.currentIndex() == 1
         if not showing_fpv and not self._ensure_ion_token():
@@ -3025,6 +3055,8 @@ class MainWindow(QMainWindow):
         self.horizon.set_airspeed(airspeed)
         if throttle is not None:
             self.horizon.set_throttle(throttle)
+        self.retro_view.set_state(groundspeed=groundspeed, airspeed=airspeed,
+                                  throttle=throttle)
         self._last_groundspeed = groundspeed
         self._last_climb = climb
         self._flight_stats.on_vfr(airspeed, groundspeed, climb, throttle)
@@ -3143,6 +3175,14 @@ class MainWindow(QMainWindow):
         self.status_label.setToolTip(detail)
 
     def on_connection_status(self, connected, message):
+        # Losing the aircraft while in the hidden view puts you back on the
+        # HUD, where the arm state and the messages are. Only on the
+        # transition: a disconnected link repeats this, and being thrown
+        # out over and over while poking about on the bench would be
+        # worse than staying.
+        if self._was_connected and not connected:
+            self._leave_retro()
+        self._was_connected = connected
         self._set_link_status(connected, message)
         # A failure reason is worth more than a tooltip - it is the thing
         # you need when nothing will connect, so put it on the line below,
