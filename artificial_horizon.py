@@ -60,8 +60,18 @@ class ArtificialHorizon(QWidget):
 
     # Exposed so anything overlaid on the HUD can keep clear of the battery
     # box rather than guessing at where it sits.
-    # How far the throttle bar rises in FPV, to clear Cesium's credit.
-    FPV_BAR_LIFT = 22.0
+    # The wind readout, top left. Named because the throttle bar has to
+    # know where it ends.
+    WIND_BOX_W = 92
+    WIND_BOX_H = 40
+    WIND_BOX_MARGIN = 6
+
+    # Height of the strip Cesium prints its credit into, along the bottom
+    # of the 3D view. Measured off a screenshot at 1916x1016: the credit
+    # begins 63px above the view's lower edge.
+    FPV_CREDIT_H = 64.0
+    # Breathing room at each end of the strip the bar is centred in.
+    FPV_BAND_GAP = 4.0
 
     BATTERY_BOX_W = 104
     BATTERY_BOX_H = 44
@@ -337,9 +347,10 @@ class ArtificialHorizon(QWidget):
         # rotating arrow (pointing toward where the wind is coming FROM,
         # matching the WIND message's own convention) plus numeric
         # direction and speed.
-        wind_box_w = 92
-        wind_box_h = 40
-        wind_rect = QRectF(6, 6, wind_box_w, wind_box_h)
+        wind_box_w = self.WIND_BOX_W
+        wind_box_h = self.WIND_BOX_H
+        wind_rect = QRectF(self.WIND_BOX_MARGIN, self.WIND_BOX_MARGIN,
+                           wind_box_w, wind_box_h)
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
         painter.drawRect(wind_rect)
@@ -433,15 +444,25 @@ class ArtificialHorizon(QWidget):
         bar_w = max(7.0, min(12.0, w * 0.02))
         bar_gap = 4.0
         bar_h = min(box_h * 2.4, h - 2 * margin - 14)
-        # Over the 3D view, Cesium prints its attribution across the
-        # bottom left and the bar's caption ran into it. Lift the bar
-        # clear there and only there - the 2D HUD has nothing in that
-        # corner, so it stays exactly where it was. A fixed lift rather
-        # than a proportional one, because the logo it is dodging is a
-        # fixed size whatever the view is scaled to.
-        lift = self.FPV_BAR_LIFT if self.overlay_mode else 0.0
-        lift = min(lift, max(0.0, (cy - bar_h / 2) - margin))
-        bar_rect = QRectF(margin, cy - bar_h / 2 - lift, bar_w, bar_h)
+        # In the 2D HUD the bar sits on the centreline beside the
+        # airspeed box. Over the 3D view that strip is taken at both ends
+        # - the wind readout above, Cesium's credit below - so there the
+        # bar is centred in what is left between them, caption included.
+        # Both bounds are fixed sizes, not fractions of the view, so this
+        # is arithmetic on pixels rather than on the widget's scale.
+        caption_h = 14.0
+        if self.overlay_mode:
+            band_top = (self.WIND_BOX_MARGIN + self.WIND_BOX_H
+                        + self.FPV_BAND_GAP)
+            band_bottom = h - self.FPV_CREDIT_H - self.FPV_BAND_GAP
+            band = band_bottom - band_top
+            # A short view can leave less room than the bar wants; give up
+            # length rather than overlap either neighbour.
+            bar_h = max(24.0, min(bar_h, band - caption_h))
+            bar_y = band_top + (band - (bar_h + caption_h)) / 2.0
+        else:
+            bar_y = cy - bar_h / 2
+        bar_rect = QRectF(margin, bar_y, bar_w, bar_h)
         self._draw_throttle(painter, bar_rect)
 
         painter.setFont(QFont("Sans", 11, QFont.Bold))
