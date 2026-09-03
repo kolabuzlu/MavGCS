@@ -77,6 +77,15 @@ class ArtificialHorizon(QWidget):
     FPV_CREDIT_H = 50.0          # what the credit occupies, for the check
     FPV_BAR_SCALE = 0.9
 
+    # The throttle caption's plinth is centred on the bar and is wider
+    # than it, so at "100%" it reached 2.8px PAST the widget's left edge
+    # and was clipped. The whole left group - bar, caption, airspeed box -
+    # sits this far in, which leaves the widest caption a 4px gap. Moving
+    # the group keeps the caption centred under the bar it belongs to;
+    # nudging the caption alone would have left it visibly off-centre.
+    # The altitude box on the right keeps the original 6px margin.
+    LEFT_GROUP_MARGIN = 13.0
+
     BATTERY_BOX_W = 104
     BATTERY_BOX_H = 44
     BATTERY_MARGIN = 6
@@ -463,7 +472,7 @@ class ArtificialHorizon(QWidget):
         bar_h = min(box_h * 2.4, h - 2 * margin - 14)
         # Same centreline in both views; only the size differs.
         scale = self.FPV_BAR_SCALE if self.overlay_mode else 1.0
-        bar_rect = QRectF(margin, cy - bar_h * scale / 2.0,
+        bar_rect = QRectF(self.LEFT_GROUP_MARGIN, cy - bar_h * scale / 2.0,
                           bar_w * scale, bar_h * scale)
         self._draw_throttle(painter, bar_rect, scale)
 
@@ -472,8 +481,8 @@ class ArtificialHorizon(QWidget):
         # Airspeed box - middle left, moved inboard to clear the bar.
         # Offset by the bar's UNSCALED width, so shrinking the bar in the
         # 3D overlay does not drag the airspeed box sideways with it.
-        airspeed_rect = QRectF(margin + bar_w + bar_gap, cy - box_h / 2,
-                               box_w, box_h)
+        airspeed_rect = QRectF(self.LEFT_GROUP_MARGIN + bar_w + bar_gap,
+                               cy - box_h / 2, box_w, box_h)
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
         painter.drawRect(airspeed_rect)
