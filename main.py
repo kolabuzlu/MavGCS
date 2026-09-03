@@ -2407,6 +2407,7 @@ class MainWindow(QMainWindow):
         self._flight_stats = FlightStats()
         # Set by the link if this aircraft's elevator cannot be read.
         self._elevator_unavailable = ""
+        self._wp_dist = None
         self._was_connected = False
         self._trim_throttle = None
         # Recent HUD state, so the overlay drawn over the 3D view can be
@@ -2651,8 +2652,49 @@ class MainWindow(QMainWindow):
         the gap between the two is the crab angle."""
         self.map_view.set_ground_track(course_deg, groundspeed)
 
+    # Below this the aircraft is not really going anywhere, and
+    # distance/speed turns into hours that change every second.
+    ETA_MIN_GS_MPS = 1.0
+    # ArduPilot reports a distance of zero when there is no waypoint to
+    # steer to, which is not the same as having arrived.
+    ETA_MIN_DIST_M = 1.0
+    # Past this the number is not telling anyone anything useful.
+    ETA_MAX_S = 100 * 3600
+
     def on_nav_target(self, bearing_deg, distance_m):
         self.map_view.set_nav_target(bearing_deg, distance_m)
+        self._wp_dist = distance_m
+        self._push_eta()
+
+    def _push_eta(self):
+        """Time to the waypoint, from distance and groundspeed.
+
+        Deliberately blank rather than approximate in the cases where the
+        arithmetic runs away: standing still divides by nothing, and no
+        waypoint reports zero distance, which reads as "arrived" if you
+        let it.
+        """
+        dist = getattr(self, "_wp_dist", None)
+        gs = self._last_groundspeed
+        if (dist is None or dist < self.ETA_MIN_DIST_M
+                or gs is None or gs < self.ETA_MIN_GS_MPS):
+            self.map_view.set_eta("")
+            return
+        seconds = dist / gs
+        if seconds > self.ETA_MAX_S:
+            self.map_view.set_eta("")
+            return
+        self.map_view.set_eta(f"ETA to WP  {self._hms(seconds)}")
+
+    @staticmethod
+    def _hms(seconds: float) -> str:
+        """m:ss under an hour, h:mm:ss over it."""
+        total = int(round(seconds))
+        h, rem = divmod(total, 3600)
+        m, sec = divmod(rem, 60)
+        if h:
+            return f"{h}:{m:02d}:{sec:02d}"
+        return f"{m}:{sec:02d}"
 
     def on_turn_rate(self, deg_per_s):
         self.map_view.set_turn_rate(deg_per_s)
@@ -3059,6 +3101,7 @@ class MainWindow(QMainWindow):
         if throttle is not None:
             self.horizon.set_throttle(throttle)
         self._last_groundspeed = groundspeed
+        self._push_eta()
         self._last_climb = climb
         self._flight_stats.on_vfr(airspeed, groundspeed, climb, throttle)
 

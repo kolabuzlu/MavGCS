@@ -326,6 +326,17 @@ LEAFLET_HTML = """
     </div>
   </div>
 </div>
+<div id="eta-readout" style="
+    /* Directly above the balance indicator, which is 63px tall and sits
+       at 40, so this clears it with a 6px gap. Same left edge and the
+       same black as the credit line, so the corner reads as one stack
+       rather than three unrelated labels. */
+    position: absolute; bottom: 109px; left: 8px;
+    background: rgba(0,0,0,0.6); color: #cfd8e0;
+    padding: 4px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 11px; white-space: nowrap;
+    z-index: 1000; pointer-events: none; display: none;
+"></div>
 <div id="cog-readout" style="
     /* Directly above the credit line, same styling, so the two read as one
        corner rather than two competing labels. */
@@ -1047,6 +1058,16 @@ var COG_COLOURS = {
 // how far, not where the centre of gravity is in millimetres, and a
 // marker running off the tail would claim precision that is not there.
 var COG_MAX_SHIFT = 26;
+
+function setEta(text) {
+    var el = document.getElementById('eta-readout');
+    if (!el) { return; }
+    // An empty string means there is nothing worth saying - no waypoint,
+    // or not moving - and the box goes away rather than showing a dash.
+    if (!text) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.textContent = text;
+}
 
 function setCogStatus(state, text, deflection) {
     var el = document.getElementById('cog-readout');
@@ -2044,6 +2065,14 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
+
+    def set_eta(self, text: str):
+        """Time to the next waypoint, above the balance indicator.
+
+        An empty string hides the box: no waypoint, or too slow for the
+        arithmetic to mean anything.
+        """
+        self.page().runJavaScript(f"setEta({json.dumps(text)});")
 
     def set_cog_status(self, state: str, text: str, deflection: float = 0.0):
         """The live balance indicator above the credit line.
