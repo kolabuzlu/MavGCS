@@ -176,10 +176,18 @@ class FlightStats:
     # -11.8 with a spread of 1.3, so its working range is tens of units,
     # not fractions of one. About 45 centidegrees of surface per unit, so
     # a unit is roughly 5us of elevator on a 1000-2000 output.
-    # Widened 10% either side of centre on 2026-09-03, at the pilot's
-    # request: the balanced window read too narrow in flight, calling a
-    # trim that was near enough to centre slightly heavy.
-    BALANCE_I_DEADBAND = 2.2        # ~11us of elevator
+    # Flown and narrowed on 2026-09-03: the balanced window was
+    # swallowing real offsets, so the slight verdicts now appear much
+    # earlier. Both deadbands are set to the same physical deflection -
+    # about 5us of elevator, or half a degree of surface - using the
+    # measured 5us per integrator unit.
+    #
+    # This can go lower safely. Noise cannot manufacture a verdict at any
+    # deadband, because the agreement test independently requires the
+    # offset to sit on one side for 80% of a 30 second window; measured
+    # SITL cruise scatter is about +-6us, which over 30 samples leaves
+    # the mean good to around 1us.
+    BALANCE_I_DEADBAND = 1.0        # ~5us of elevator
 
     # Second question, asked only when the integrator has gone quiet.
     # SERVO_AUTO_TRIM can shift the elevator centre by about 100us either
@@ -188,7 +196,7 @@ class FlightStats:
     # slight. Anything larger saturates the trim and the remainder goes
     # back into the integrator, where the first question catches it.
     BALANCE_AUTOTRIM_US = 100.0
-    BALANCE_ELEV_DEADBAND_US = 13.2
+    BALANCE_ELEV_DEADBAND_US = 5.0
 
     # The marker is placed by the total elevator being held, in
     # microseconds, WHICHEVER signal chose the words. The words say which
