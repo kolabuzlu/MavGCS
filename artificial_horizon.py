@@ -66,15 +66,16 @@ class ArtificialHorizon(QWidget):
     WIND_BOX_H = 40
     WIND_BOX_MARGIN = 6
 
-    # Height of the strip Cesium prints its credit into, along the bottom
-    # of the 3D view. The rules in fpv_view.py put the logo at bottom:28px
-    # capped at 14px, which suggests 42 - but measured in the running page
-    # its container reaches 47px, because the inline element's line box is
-    # taller than the image inside it. 50 takes that plus slack. Change
-    # the logo size or its offset and this has to be measured again.
-    FPV_CREDIT_H = 50.0
-    # Breathing room at each end of the strip the bar is centred in.
-    FPV_BAND_GAP = 4.0
+    # Over the 3D view the bar is drawn a tenth smaller, and nothing
+    # else about it changes: same place, same alignment with the airspeed
+    # box, so switching views does not shuffle the instruments about.
+    #
+    # It can stay put because Cesium's credit is now 14px rather than 24.
+    # Its container tops out 47px above the view's lower edge, measured in
+    # the running page, and the caption ends clear of that. Enlarge the
+    # logo again and that clearance is what gets eaten.
+    FPV_CREDIT_H = 50.0          # what the credit occupies, for the check
+    FPV_BAR_SCALE = 0.9
 
     BATTERY_BOX_W = 104
     BATTERY_BOX_H = 44
@@ -180,7 +181,7 @@ class ArtificialHorizon(QWidget):
         self.wind_speed = speed_mps
         self.update()
 
-    def _draw_throttle(self, painter, rect):
+    def _draw_throttle(self, painter, rect, scale=1.0):
         """A vertical throttle bar, filling from the bottom.
 
         Drawn even with no reading yet, so the airspeed box does not
@@ -217,7 +218,9 @@ class ArtificialHorizon(QWidget):
         # underneath can be any brightness, and white on pale ground was
         # hard to read. Sized to the text so the plinth is no wider than
         # it needs to be.
-        painter.setFont(QFont("Sans", 7))
+        font = QFont("Sans")
+        font.setPointSizeF(7.0 * scale)
+        painter.setFont(font)
         text = f"{self.throttle:.0f}%" if self.throttle is not None else "--"
         fm = painter.fontMetrics()
         tw = fm.horizontalAdvance(text) + 6.0
@@ -458,31 +461,17 @@ class ArtificialHorizon(QWidget):
         bar_w = max(7.0, min(12.0, w * 0.02))
         bar_gap = 4.0
         bar_h = min(box_h * 2.4, h - 2 * margin - 14)
-        # In the 2D HUD the bar sits on the centreline beside the
-        # airspeed box. Over the 3D view that strip is taken at both ends
-        # - the wind readout above, Cesium's credit below - so there the
-        # bar is centred in what is left between them, caption included.
-        # Both bounds are fixed sizes, not fractions of the view, so this
-        # is arithmetic on pixels rather than on the widget's scale.
-        caption_h = 14.0
-        if self.overlay_mode:
-            band_top = (self.WIND_BOX_MARGIN + self.WIND_BOX_H
-                        + self.FPV_BAND_GAP)
-            band_bottom = h - self.FPV_CREDIT_H - self.FPV_BAND_GAP
-            band = band_bottom - band_top
-            # The bar is never shortened: it has to read the same in both
-            # views, and a gauge that changes length between them is worse
-            # than one that sits a little low. Where the gap cannot hold
-            # it, it hangs below rather than shrinking.
-            bar_y = band_top + max(0.0, (band - (bar_h + caption_h)) / 2.0)
-        else:
-            bar_y = cy - bar_h / 2
-        bar_rect = QRectF(margin, bar_y, bar_w, bar_h)
-        self._draw_throttle(painter, bar_rect)
+        # Same centreline in both views; only the size differs.
+        scale = self.FPV_BAR_SCALE if self.overlay_mode else 1.0
+        bar_rect = QRectF(margin, cy - bar_h * scale / 2.0,
+                          bar_w * scale, bar_h * scale)
+        self._draw_throttle(painter, bar_rect, scale)
 
         painter.setFont(QFont("Sans", 11, QFont.Bold))
 
-        # Airspeed box - middle left, moved inboard to clear the bar
+        # Airspeed box - middle left, moved inboard to clear the bar.
+        # Offset by the bar's UNSCALED width, so shrinking the bar in the
+        # 3D overlay does not drag the airspeed box sideways with it.
         airspeed_rect = QRectF(margin + bar_w + bar_gap, cy - box_h / 2,
                                box_w, box_h)
         painter.setPen(QPen(Qt.white, 1))
