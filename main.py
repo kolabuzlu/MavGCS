@@ -166,7 +166,6 @@ class FlightStats:
     # not fractions of one. About 45 centidegrees of surface per unit, so
     # a unit is roughly 5us of elevator on a 1000-2000 output.
     BALANCE_I_DEADBAND = 2.0        # ~10us of elevator
-    BALANCE_I_FULL_SCALE = 20.0     # where the marker reaches its stop
 
     # Second question, asked only when the integrator has gone quiet.
     # SERVO_AUTO_TRIM can shift the elevator centre by about 100us either
@@ -176,6 +175,21 @@ class FlightStats:
     # back into the integrator, where the first question catches it.
     BALANCE_AUTOTRIM_US = 100.0
     BALANCE_ELEV_DEADBAND_US = 12.0
+
+    # The marker is placed by the total elevator being held, in
+    # microseconds, WHICHEVER signal chose the words. The words say which
+    # signal spoke; the position says how much elevator the aeroplane is
+    # actually carrying, so the two cannot contradict each other and the
+    # scale runs smoothly from one end to the other.
+    #
+    # Half deflection falls exactly where SERVO_AUTO_TRIM runs out of
+    # authority, so a marker past halfway means the trim is saturated and
+    # the controller is making up the rest.
+    BALANCE_MARKER_FULL_US = 2 * BALANCE_AUTOTRIM_US
+    # Only for placing the marker when the elevator could not be read at
+    # all. A unit of PIDP.I is about 45 centidegrees of surface, roughly
+    # 5us on a 1000-2000 output.
+    BALANCE_US_PER_I = 5.0
     # Below this a report is not worth showing - an arm/disarm on the bench
     # is not a flight.
     MIN_REPORTABLE_S = 30.0
@@ -469,39 +483,71 @@ class FlightStats:
         cruise cannot tell you anything about the balance, and should say
         so rather than average whatever it happened to see.
         """
-        # First question: is the integrator holding elevator? While it is,
-        # it states the balance directly and nothing else is needed.
+        # Both signals are summarised up front. The words come from
+        # whichever answers first, but the marker is placed from the
+        # elevator in either case, so it has to be in hand either way.
         i_span, i_mean, i_agree = self._summarise(
             [(t, v) for t, v in self.integrator_samples])
+        e_span, e_mean_us, e_agree = self._summarise(
+            [(t, us) for t, us, _ in self.balance_samples])
+
+        # First question: is the integrator holding elevator? While it is,
+        # it states the balance directly and nothing else is needed.
         if (i_span is not None and abs(i_mean) >= self.BALANCE_I_DEADBAND
                 and i_agree >= self.BALANCE_AGREEMENT):
             detail = (f"integrator {i_mean:+.1f} over {i_span:.0f}s level, "
                       f"{i_agree * 100:.0f}% same side")
-            shift = max(-1.0, min(1.0, -i_mean / self.BALANCE_I_FULL_SCALE))
-            return ("Nose heavy" if i_mean > 0 else "Tail heavy",
-                    detail, shift, f"{i_mean:+.1f}")
+            return ("Nose heavy" if i_mean > 0 else "Tail heavy", detail,
+                    self._marker(e_mean_us, i_mean, 1 if i_mean > 0 else -1),
+                    f"{i_mean:+.1f}")
 
         # Second question, and only now: the integrator has gone quiet, so
         # either the aircraft is in balance or SERVO_AUTO_TRIM has taken
         # the offset into the elevator centre. The elevator itself tells
         # the two apart.
-        e_span, e_mean_us, e_agree = self._summarise(
-            [(t, us) for t, us, _ in self.balance_samples])
         if (e_span is not None and abs(e_mean_us) >= self.BALANCE_ELEV_DEADBAND_US
                 and e_agree >= self.BALANCE_AGREEMENT):
             detail = (f"elevator {e_mean_us:+.0f}us over {e_span:.0f}s level, "
                       f"{e_agree * 100:.0f}% same side, integrator quiet")
-            shift = max(-1.0, min(1.0,
-                                  -e_mean_us / self.BALANCE_AUTOTRIM_US))
             return ("Slightly nose heavy" if e_mean_us > 0
-                    else "Slightly tail heavy",
-                    detail, shift, f"{e_mean_us:+.0f}us")
+                    else "Slightly tail heavy", detail,
+                    self._marker(e_mean_us, i_mean,
+                                 1 if e_mean_us > 0 else -1),
+                    f"{e_mean_us:+.0f}us")
 
         # Neither is saying anything, which is what balance looks like.
         span = i_span if i_span is not None else e_span
         if span is None:
             return None
         return ("Balanced", f"nothing held over {span:.0f}s level", 0.0, "")
+
+    def _marker(self, e_mean_us, i_mean, verdict_sign):
+        """Where the marker sits, on one scale whoever answered.
+
+        Held elevator in microseconds is the honest common quantity: the
+        servo output already contains the trim AND whatever the
+        controller is adding, so it measures the same physical thing in
+        both cases. Placing one verdict by integrator units and the other
+        by microseconds made a small nose-heavy verdict sit closer to
+        centre than a larger slight one, which is nonsense to look at.
+
+        If the elevator contradicts the signal that chose the words - it
+        can, briefly, while autotrim is still catching up - the deciding
+        signal places the marker instead. A caption saying nose heavy
+        beside a marker sitting aft is worse than either alone.
+        """
+        us = None
+        if e_mean_us is not None and (e_mean_us > 0) == (verdict_sign > 0):
+            us = e_mean_us
+        elif i_mean is not None:
+            us = i_mean * self.BALANCE_US_PER_I
+        elif e_mean_us is not None:
+            us = e_mean_us
+        if us is None:
+            return 0.0
+        # Positive is up elevator, which is nose heavy, and the nose is
+        # drawn to the left - so the marker moves the other way.
+        return max(-1.0, min(1.0, -us / self.BALANCE_MARKER_FULL_US))
 
     def _summarise(self, pairs):
         """(span, mean, agreement) for one signal, or Nones if too thin.
