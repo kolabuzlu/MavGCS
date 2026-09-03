@@ -456,10 +456,11 @@ class ArtificialHorizon(QWidget):
                         + self.FPV_BAND_GAP)
             band_bottom = h - self.FPV_CREDIT_H - self.FPV_BAND_GAP
             band = band_bottom - band_top
-            # A short view can leave less room than the bar wants; give up
-            # length rather than overlap either neighbour.
-            bar_h = max(24.0, min(bar_h, band - caption_h))
-            bar_y = band_top + (band - (bar_h + caption_h)) / 2.0
+            # The bar is never shortened: it has to read the same in both
+            # views, and a gauge that changes length between them is worse
+            # than one that sits a little low. Where the gap cannot hold
+            # it, it hangs below rather than shrinking.
+            bar_y = band_top + max(0.0, (band - (bar_h + caption_h)) / 2.0)
         else:
             bar_y = cy - bar_h / 2
         bar_rect = QRectF(margin, bar_y, bar_w, bar_h)
