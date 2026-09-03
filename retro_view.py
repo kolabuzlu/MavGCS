@@ -1,116 +1,127 @@
 """
-A hidden 8-bit river-flying view, driven by the real aircraft.
+A hidden 8-bit map view, flown by the real aircraft.
 
 Reached by pressing and holding on bare sky or ground in the HUD, and
-left the same way. It is a toy, but it is an honest one: the scenery is
-invented, while everything that moves comes from telemetry. Groundspeed
-scrolls the river; the aeroplane's place across it is the crosstrack
-error, so the river is the track it is meant to be on; throttle fills
-the fuel gauge; altitude sizes the shadow. Nothing here commands the
-aircraft, and nothing here moves unless the aircraft did.
+left the same way.
 
-The look comes from drawing into a small image - a grid about 150 rows
-tall, as many columns wide as the panel's shape calls for - and blitting
-it up with nearest-neighbour scaling. Drawing "big pixels" directly at
-the widget's own size never looks right: the shapes end up crisp where
-the era's hardware would have been blocky, and diagonals give the game
-away. The grid follows the panel rather than being a fixed shape inside
-it, so the picture fills the space with no black down the sides.
+It is a map, not a game. The countryside is invented - there is no river
+where this draws one - but it is pinned to real latitude and longitude
+and it stays where it is put. Nothing scrolls on a timer. The picture
+moves only because the aircraft moved, by as much as the aircraft moved,
+and turns only because the aircraft turned. Fly a circuit and the same
+houses come round again; sit on the ground and nothing happens at all.
 
-It is pure QPainter. That matters on this project beyond taste: the 3D
-view drives Chromium's GPU path, which is what crashes on the Intel
-driver here, and this deliberately stays out of it.
+The aeroplane is drawn fixed, pointing up, with the world turned under
+it so its heading is towards the top of the screen - the same track-up
+convention as the moving map. Its place on screen never changes, because
+on a map the aircraft is the fixed thing and the ground is what moves.
+
+The look comes from drawing into a small image - about 72 rows tall, as
+many columns as the panel's shape calls for - and blitting it up with
+smoothing off. Drawing "big pixels" at the widget's own size never looks
+right: the shapes come out crisp where the era's hardware was blocky.
+
+It is pure QPainter. That matters here beyond taste: the 3D view drives
+Chromium's GPU path, which is what crashes on the Intel driver on this
+machine, and this deliberately stays out of it.
 """
 
 import math
-import random
-import time
 
 from PySide6.QtWidgets import QWidget
-from PySide6.QtGui import QPainter, QImage, QColor, QFont, QPen, QBrush
-from PySide6.QtCore import Qt, QTimer, QRect, Signal
+from PySide6.QtGui import (QPainter, QImage, QColor, QFont, QPen, QBrush,
+                           QPolygonF, QTransform)
+from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, Signal
 
 
 # The palette, kept small on purpose - an eight bit machine had no more.
 WATER = QColor(48, 80, 216)
 WATER_DK = QColor(29, 95, 168)
 LAND = QColor(56, 160, 56)
-LAND_DK = QColor(30, 110, 30)
-LAND_EDGE = QColor(20, 60, 130)
-ROAD = QColor(160, 160, 160)
-ROAD_LINE = QColor(240, 224, 32)
+LAND_ALT = QColor(74, 176, 66)
+LAND_DRY = QColor(150, 156, 72)
 HOUSE = QColor(240, 240, 240)
 ROOF = QColor(208, 32, 32)
 ROOF_ALT = QColor(40, 60, 160)
 TREE = QColor(24, 104, 24)
-TREE_DK = QColor(16, 72, 16)
 PLANE = QColor(248, 248, 248)
 PLANE_DK = QColor(32, 40, 64)
 GAUGE_BG = QColor(240, 224, 32)
 INK = QColor(16, 16, 16)
 
+# Metres per degree. Good enough for scenery; this is not a survey.
+M_PER_DEG_LAT = 110540.0
+M_PER_DEG_LON = 111320.0
+
+
+def _hash(a, b):
+    """A stable number for a pair of world cells."""
+    h = (int(a) * 73856093) ^ (int(b) * 19349663)
+    h = (h ^ (h >> 13)) * 1274126177
+    return (h ^ (h >> 16)) & 0xFFFFFFFF
+
+
+def river_centre(y):
+    """Where the invented river runs, at this northing. Metres.
+
+    A closed form, so the same stretch is drawn every time it comes into
+    view, with nothing stored between frames or between flights.
+    """
+    # Wound tighter than a real river would be. With a long meander the
+    # water sat a kilometre off to one side and was almost never in view,
+    # and this is meant to be a river flight.
+    return (620.0 * math.sin(y / 2100.0)
+            + 260.0 * math.sin(y / 780.0 + 1.3)
+            + 90.0 * math.sin(y / 310.0 + 0.7))
+
+
+def river_half_width(y):
+    return 95.0 + 30.0 * math.sin(y / 900.0 + 0.4)
+
 
 class RetroView(QWidget):
-    """The hidden view. Give it telemetry; it flies itself."""
+    """The hidden map. Give it position and heading; it draws the rest."""
 
-    # Pressing and holding on it again asks to go back.
     exit_requested = Signal()
 
-    # How many pixel rows the scene is drawn in. The number of columns
-    # follows from the panel's shape, so the picture fills it exactly
-    # rather than being letterboxed inside a fixed grid.
-    #
-    # This is what decides how chunky it looks, and it has to be read
-    # against the space it lands in: the view is about 236px tall here,
-    # so 150 rows would make each pixel 1.6 screen pixels - a small
-    # drawing rather than a blocky one. 72 rows gives a bit over 3, which
-    # is where the aeroplane and the river read the way the original did.
+    # Pixel rows the scene is drawn in; the columns follow the panel's
+    # shape. This decides how chunky it looks: the view is about 236px
+    # tall here, so 72 rows puts each drawn pixel a bit over 3 real ones.
     ROWS = 72
 
-    # World units per second at 1 m/s of groundspeed. Chosen so a typical
-    # 22 m/s cruise scrolls at a speed that reads as flying rather than
-    # as a slideshow.
-    SCROLL_PER_MPS = 2.6
-    # With no aircraft attached it still drifts, so the thing is worth
-    # looking at on the bench.
-    IDLE_SCROLL = 26.0
+    # Metres of ground per drawn pixel. About 900m across the panel -
+    # close enough to see the aeroplane move, wide enough that a circuit
+    # is not a blur.
+    M_PER_CELL = 4.0
 
-    # Crosstrack error that puts the aeroplane at the river bank. Beyond
-    # this it simply stays there rather than flying over the grass.
-    XTRACK_FULL_M = 60.0
-    # Below this the autopilot is not really navigating - nothing is
-    # steering to a track - and the number is not worth reading.
-    XTRACK_LIVE_M = 0.5
-    # How quickly the drawn position catches up with the real one. A lag,
-    # not an integrator: it always converges on the measurement, so it
-    # cannot wander off on its own the way the old roll integration did.
-    FOLLOW_PER_S = 3.0
+    # Where the aeroplane sits down the screen. Low, so most of the
+    # picture is the ground ahead of it.
+    ANCHOR_Y = 0.66
+
+    # The world grid scenery is scattered on, in metres.
+    PLOT_M = 70.0
 
     HOLD_MS = 3000
-    FPS = 20                    # deliberately modest: this is scenery
+    FPS = 15                # scenery, and the ground does not race past
 
     def __init__(self, parent=None):
         super().__init__(parent)
         # Deliberately no minimum size. This shares a QStackedWidget with
         # the HUD inside a scroll area, and a stack is as tall as its
-        # tallest page demands: asking for 220 here raised the column's
-        # minimum from 175 and put a scrollbar down the left of the whole
-        # program. A hidden view must cost the layout nothing.
+        # tallest page demands: asking for one here raised the column's
+        # minimum and put a scrollbar down the side of the whole program.
         self.setMouseTracking(True)
 
-        self.groundspeed = None     # m/s
-        self.roll = 0.0             # radians
-        self.throttle = None        # percent
-        self.altitude = None        # m
+        self.lat = None
+        self.lon = None
+        self.heading = 0.0          # degrees, where the nose points
+        self.roll = 0.0
+        self.throttle = None
+        self.altitude = None
         self.airspeed = None
-        self.xtrack = None          # m, signed: positive is right of track
+        self.groundspeed = None
 
-        self._world = 0.0           # how far the river has scrolled
-        self._x = 0.0               # the aeroplane's place across the river
-        self._last = time.monotonic()
-        self._seed = random.randrange(1 << 30)
-
-        self._gw, self._gh = 120, self.ROWS      # refreshed to fit the panel
+        self._gw, self._gh = 120, self.ROWS
         self._image = QImage(self._gw, self._gh, QImage.Format_RGB32)
 
         self._hold = QTimer(self)
@@ -118,16 +129,17 @@ class RetroView(QWidget):
         self._hold.setInterval(self.HOLD_MS)
         self._hold.timeout.connect(self.exit_requested.emit)
 
+        # Repaints so the picture keeps up with telemetry. It draws the
+        # same thing every time until the aircraft actually moves.
         self._tick = QTimer(self)
-        self._tick.timeout.connect(self._advance)
+        self._tick.timeout.connect(self.update)
 
     # ---------------------------------------------------------- telemetry
 
     def set_state(self, groundspeed=None, roll=None, throttle=None,
-                  altitude=None, airspeed=None, xtrack=None):
+                  altitude=None, airspeed=None, heading=None,
+                  lat=None, lon=None):
         """Whatever is known right now. Any of it may be None."""
-        if xtrack is not None:
-            self.xtrack = xtrack
         if groundspeed is not None:
             self.groundspeed = groundspeed
         if roll is not None:
@@ -138,96 +150,67 @@ class RetroView(QWidget):
             self.altitude = altitude
         if airspeed is not None:
             self.airspeed = airspeed
-
-    # ------------------------------------------------------------ running
+        if heading is not None:
+            self.heading = heading
+        if lat is not None:
+            self.lat = lat
+        if lon is not None:
+            self.lon = lon
 
     def start(self):
-        self._last = time.monotonic()
         self._tick.start(int(1000 / self.FPS))
 
     def stop(self):
         self._tick.stop()
         self._hold.stop()
 
-    def _advance(self):
-        now = time.monotonic()
-        dt = min(0.25, now - self._last)     # a stall must not teleport it
-        self._last = now
+    # -------------------------------------------------------------- world
 
-        speed = (self.groundspeed * self.SCROLL_PER_MPS
-                 if self.groundspeed else self.IDLE_SCROLL)
-        self._world += speed * dt
+    def world_xy(self):
+        """The aircraft in metres east and north, straight from lat/lon.
 
-        cx, half = self._river(self._world + self._gh)
-        target = self._lateral_target(half)
-        # Ease towards where the aircraft actually is. Because the target
-        # is recomputed from telemetry every frame this converges and
-        # stays; integrating roll, as this did before, meant any small
-        # standing bank slid the aeroplane across the screen by itself.
-        self._x += (target - self._x) * min(1.0, dt * self.FOLLOW_PER_S)
-        self.update()
-
-    def _lateral_target(self, half):
-        """Where across the river the aeroplane belongs, from telemetry.
-
-        The river is the track it is meant to be flying, so its place in
-        the river is its crosstrack error - genuinely where it is, not a
-        game. Nothing is navigating in MANUAL or a hand-flown cruise
-        though, and then crosstrack reads zero and means nothing, so bank
-        stands in: a wing down puts it to that side, wings level centres
-        it. Neither can drift, because both are read fresh each frame.
+        Absolute, rather than relative to wherever the view happened to be
+        opened, so the countryside is pinned to the ground: fly a circuit
+        and the same houses come round again.
         """
-        travel = max(2.0, half - 6.0)
-        if self.xtrack is not None and abs(self.xtrack) >= self.XTRACK_LIVE_M:
-            frac = max(-1.0, min(1.0, self.xtrack / self.XTRACK_FULL_M))
-            return frac * travel
-        return max(-1.0, min(1.0, math.sin(self.roll) * 1.6)) * travel * 0.85
+        if self.lat is None or self.lon is None:
+            return None
+        y = self.lat * M_PER_DEG_LAT
+        x = self.lon * M_PER_DEG_LON * math.cos(math.radians(self.lat))
+        return x, y
 
-    # ------------------------------------------------------------- world
+    def _view_transform(self):
+        """World metres -> drawn pixels: track up, aircraft on the anchor."""
+        pos = self.world_xy()
+        if pos is None:
+            return None
+        wx, wy = pos
+        t = QTransform()
+        t.translate(self._gw / 2.0, self._gh * self.ANCHOR_Y)
+        # Turn the world the opposite way to the heading, so the nose
+        # points up the screen.
+        t.rotate(-self.heading)
+        # Metres to pixels, and the y flip that puts north up.
+        t.scale(1.0 / self.M_PER_CELL, -1.0 / self.M_PER_CELL)
+        t.translate(-wx, -wy)
+        return t
 
-    def _river(self, y):
-        """Centre and half-width of the river at this distance downstream.
-
-        A closed form rather than stored terrain: the view can be entered
-        at any moment and must draw the same river every time, without
-        keeping anything.
-        """
-        # Everything is a fraction of the grid width, so a wide panel gets
-        # a wide river rather than the same river with more grass at the
-        # sides.
-        cx = (self._gw / 2
-              + self._gw * 0.172 * math.sin(y / 71.0)
-              + self._gw * 0.070 * math.sin(y / 23.0 + 1.7))
-        half = self._gw * (0.203 + 0.055 * math.sin(y / 47.0 + 0.6))
-        return cx, half
-
-    def _things_near(self, top, bottom):
-        """Houses and trees whose slot falls in this stretch of river.
-
-        Each slot's contents come from its own number, so scenery is
-        stable as it scrolls rather than flickering into existence.
-        """
-        out = []
-        step = 14
-        first = int(top // step) - 1
-        last = int(bottom // step) + 1
-        for slot in range(first, last + 1):
-            h = (slot * 2654435761 + self._seed) & 0xFFFFFFFF
-            if (h >> 3) % 5 == 0:
-                continue                     # a gap, so it is not a parade
-            y = slot * step + (h % step)
-            cx, half = self._river(y)
-            side = -1 if (h >> 7) & 1 else 1
-            off = half + 6 + ((h >> 9) % 16)
-            x = cx + side * off
-            kind = "house" if ((h >> 5) & 3) == 0 else "tree"
-            out.append((x, y, kind, h))
-        return out
+    def _visible_world(self, t):
+        """An axis-aligned world box covering everything on screen."""
+        inv, ok = t.inverted()
+        if not ok:
+            return None
+        pts = [inv.map(QPointF(x, y))
+               for x, y in ((0, 0), (self._gw, 0),
+                            (0, self._gh), (self._gw, self._gh))]
+        xs = [p.x() for p in pts]
+        ys = [p.y() for p in pts]
+        pad = self.PLOT_M * 2
+        return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
 
     # ------------------------------------------------------------ drawing
 
     def _fit_grid(self):
-        """Size the pixel grid to the panel, keeping the pixels square."""
         w, h = max(1, self.width()), max(1, self.height())
         cell = h / float(self.ROWS)
         gw = max(40, int(round(w / cell)))
@@ -237,91 +220,152 @@ class RetroView(QWidget):
 
     def paintEvent(self, event):
         self._fit_grid()
-        img = self._image
-        p = QPainter(img)
-        self._draw_scene(p)
+        p = QPainter(self._image)
+        self._draw(p)
         p.end()
 
         out = QPainter(self)
-        # No smoothing: the whole point is that the pixels stay square.
         out.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        # Filled edge to edge - the grid was shaped to this rectangle, so
-        # there is nothing to letterbox.
-        out.drawImage(self.rect(), img)
+        out.drawImage(self.rect(), self._image)
         out.end()
 
-    def _draw_scene(self, p):
-        W, H = self._gw, self._gh
-        p.fillRect(0, 0, W, H, WATER)
-        top = self._world
-        p.setPen(Qt.NoPen)
-
-        # Banks, a row at a time. Cheap at this size, and it lets the
-        # river edge be genuinely ragged rather than a smooth curve.
-        for row in range(H):
-            y = top + (H - row)
-            cx, half = self._river(y)
-            left = int(cx - half)
-            right = int(cx + half)
-            jag = ((int(y) * 2246822519) >> 13) % 3
-            p.fillRect(0, row, max(0, left - jag), 1, LAND)
-            p.fillRect(right + jag, row, max(0, W - right - jag), 1, LAND)
-            p.fillRect(max(0, left - jag), row, 2, 1, LAND_EDGE)
-            p.fillRect(right + jag - 1, row, 2, 1, LAND_EDGE)
-            if int(y) % 23 == 0:
-                p.fillRect(max(0, left - jag - 3), row, 3, 1, LAND_DK)
-
-        for x, y, kind, h in self._things_near(top, top + H):
-            row = int(H - (y - top))
-            if not (-8 <= row <= H + 8):
-                continue
-            if kind == "house":
-                self._house(p, int(x), row, h)
-            else:
-                self._tree(p, int(x), row, h)
-
-        self._aircraft(p)
+    def _draw(self, p):
+        p.fillRect(0, 0, self._gw, self._gh, LAND)
+        t = self._view_transform()
+        if t is None:
+            self._no_fix(p)
+        else:
+            box = self._visible_world(t)
+            p.save()
+            p.setTransform(t)
+            p.setPen(Qt.NoPen)
+            self._fields(p, box)
+            self._ponds(p, box)
+            self._river(p, box)
+            self._plots(p, box)
+            p.restore()
+            self._aircraft(p)
         self._panel(p)
 
-    def _house(self, p, x, y, h):
-        w = 7 + (h % 3)
-        p.fillRect(x - w // 2, y - 4, w, 5, HOUSE)
-        p.fillRect(x - w // 2, y - 6, w, 2, ROOF if (h >> 11) & 1 else ROOF_ALT)
-        p.fillRect(x - 1, y - 2, 2, 3, INK)          # a door
+    def _fields(self, p, box):
+        """Blocks of slightly different green, so the ground has grain."""
+        x0, y0, x1, y1 = box
+        step = self.PLOT_M * 3
+        for gx in range(int(math.floor(x0 / step)),
+                        int(math.floor(x1 / step)) + 1):
+            for gy in range(int(math.floor(y0 / step)),
+                            int(math.floor(y1 / step)) + 1):
+                h = _hash(gx, gy * 3 + 1)
+                if h % 3 == 0:
+                    continue
+                colour = LAND_ALT if h % 3 == 1 else LAND_DRY
+                p.fillRect(QRectF(gx * step, gy * step, step, step), colour)
 
-    def _tree(self, p, x, y, h):
-        p.fillRect(x - 1, y - 1, 2, 3, TREE_DK)      # trunk
-        r = 2 + (h % 2)
-        p.fillRect(x - r, y - 4 - r, r * 2, r * 2, TREE)
-        p.fillRect(x - r + 1, y - 5 - r, r * 2 - 2, 1, TREE)
+    def _river(self, p, box):
+        """The invented river, as a band along its centreline."""
+        x0, y0, x1, y1 = box
+        step = 60.0
+        first = math.floor(y0 / step) * step
+        n = int((y1 - first) / step) + 2
+        left, right = [], []
+        for i in range(n):
+            y = first + i * step
+            c = river_centre(y)
+            hw = river_half_width(y)
+            left.append(QPointF(c - hw, y))
+            right.append(QPointF(c + hw, y))
+        if len(left) < 2:
+            return
+        p.setBrush(QBrush(WATER))
+        p.drawPolygon(QPolygonF(left + list(reversed(right))))
+
+    def _ponds(self, p, box):
+        """Standing water, so the ground is not all field between rivers."""
+        x0, y0, x1, y1 = box
+        step = self.PLOT_M * 4
+        p.setBrush(QBrush(WATER))
+        for gx in range(int(math.floor(x0 / step)),
+                        int(math.floor(x1 / step)) + 1):
+            for gy in range(int(math.floor(y0 / step)),
+                            int(math.floor(y1 / step)) + 1):
+                h = _hash(gx * 7 + 3, gy * 11 + 5)
+                if h % 7 != 0:
+                    continue
+                wx = gx * step + (h % 120)
+                wy = gy * step + ((h >> 7) % 120)
+                w = 60.0 + (h >> 15) % 90
+                d = 40.0 + (h >> 21) % 70
+                p.fillRect(QRectF(wx, wy, w, d), WATER)
+
+    def _plots(self, p, box):
+        """Houses and trees on a world grid, and never in the water."""
+        x0, y0, x1, y1 = box
+        step = self.PLOT_M
+        for gx in range(int(math.floor(x0 / step)),
+                        int(math.floor(x1 / step)) + 1):
+            for gy in range(int(math.floor(y0 / step)),
+                            int(math.floor(y1 / step)) + 1):
+                h = _hash(gx, gy)
+                if h % 5 < 2:
+                    continue                    # most plots are empty
+                wx = gx * step + (h % 40)
+                wy = gy * step + ((h >> 6) % 40)
+                if abs(wx - river_centre(wy)) < river_half_width(wy) + 12:
+                    continue                    # nothing stands in a river
+                if (h >> 11) % 4 == 0:
+                    self._house(p, wx, wy, h)
+                else:
+                    self._tree(p, wx, wy, h)
+
+    def _house(self, p, wx, wy, h):
+        m = self.M_PER_CELL
+        w = m * (6 + h % 3)
+        d = m * 5
+        p.fillRect(QRectF(wx, wy, w, d), HOUSE)
+        p.fillRect(QRectF(wx, wy + d * 0.55, w, d * 0.45),
+                   ROOF if (h >> 13) & 1 else ROOF_ALT)
+
+    def _tree(self, p, wx, wy, h):
+        m = self.M_PER_CELL
+        r = m * (2 + h % 2)
+        p.fillRect(QRectF(wx, wy, r * 2, r * 2), TREE)
 
     def _aircraft(self, p):
-        cx, _ = self._river(self._world + self._gh)
-        x = int(cx + self._x)
-        y = self._gh - 34
+        """Fixed, pointing up. On a map the aircraft is the fixed thing."""
+        x = int(self._gw / 2)
+        y = int(self._gh * self.ANCHOR_Y)
 
-        # A shadow that grows as you descend, which is the only altitude
-        # cue the original had and still the clearest one.
         alt = self.altitude if self.altitude is not None else 120.0
         near = max(0.0, min(1.0, 1.0 - alt / 260.0))
         if near > 0.05:
-            off = int(2 + near * 5)
-            p.fillRect(x - 4 + off, y + 6 + off, 9, 3, WATER_DK)
+            off = int(1 + near * 4)
+            p.fillRect(x - 4 + off, y - 1 + off, 9, 3, WATER_DK)
 
-        bank = math.sin(self.roll)
-        tilt = int(round(bank * 2))
-        p.fillRect(x - 1, y - 6, 3, 14, PLANE)                 # fuselage
-        p.fillRect(x - 8, y + tilt, 17, 3, PLANE)              # main wing
-        p.fillRect(x - 4, y + 8 - abs(tilt), 9, 2, PLANE)      # tailplane
-        p.fillRect(x - 1, y - 7, 3, 2, PLANE_DK)               # nose
-        p.fillRect(x - 1, y + 1, 3, 2, PLANE_DK)               # canopy
+        # Bank shows in the wing, which is the only place it can show
+        # when the aeroplane itself never turns on screen.
+        tilt = int(round(math.sin(self.roll) * 2))
+        p.fillRect(x - 1, y - 6, 3, 13, PLANE)              # fuselage
+        p.fillRect(x - 8, y + tilt, 17, 3, PLANE)           # main wing
+        p.fillRect(x - 4, y + 7 - abs(tilt), 9, 2, PLANE)   # tailplane
+        p.fillRect(x - 1, y - 7, 3, 2, PLANE_DK)            # nose
+        p.fillRect(x - 1, y + 1, 3, 2, PLANE_DK)            # canopy
+
+    def _no_fix(self, p):
+        """No position, nothing to place. Say so rather than invent one."""
+        W, H = self._gw, self._gh
+        p.fillRect(0, 0, W, H, WATER_DK)
+        f = QFont("Courier New")
+        f.setPointSizeF(max(4.0, H * 0.10))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QPen(GAUGE_BG))
+        p.drawText(QRect(0, 0, W, H), Qt.AlignCenter, "NO FIX")
 
     def _panel(self, p):
-        """The bottom strip: fuel from throttle, and distance as a score.
+        """The bottom strip: fuel from throttle, groundspeed, altitude.
 
-        Everything here is a fraction of the grid, not a fixed number of
-        rows. Fixed at 16 rows it was a sixth of the picture at a fine
-        grid and a third of it at a coarse one.
+        Everything is a fraction of the grid, not a fixed number of rows,
+        so it stays the same slice of the picture at any panel shape.
         """
         W, H = self._gw, self._gh
         strip = max(8, int(H * 0.115))
@@ -347,13 +391,13 @@ class RetroView(QWidget):
                    Qt.AlignRight | Qt.AlignVCenter, "E")
         p.drawText(QRect(gx + gw + pad, top, 10, strip),
                    Qt.AlignLeft | Qt.AlignVCenter, "F")
+        gs = self.groundspeed if self.groundspeed is not None else 0.0
         p.drawText(QRect(0, top, gx - pad - 10, strip),
-                   Qt.AlignRight | Qt.AlignVCenter,
-                   f"{int(self._world / 40) % 100000:5d} ")
-        spd = self.airspeed if self.airspeed is not None else 0.0
+                   Qt.AlignRight | Qt.AlignVCenter, f"{gs:0.0f} ")
+        alt = self.altitude if self.altitude is not None else 0.0
         p.drawText(QRect(gx + gw + pad + 12, top,
                          W - (gx + gw + pad + 12), strip),
-                   Qt.AlignLeft | Qt.AlignVCenter, f"{spd:0.0f}")
+                   Qt.AlignLeft | Qt.AlignVCenter, f"{alt:0.0f}")
 
     # ------------------------------------------------------------- input
 

@@ -120,11 +120,6 @@ class MavlinkLink(QThread):
     # bearings in the same message.
     nav_target_update = Signal(float, float)     # bearing deg, distance m
 
-    # How far the aircraft actually is from the track it is meant to be
-    # on, signed: positive is right of track. Reported in the same
-    # message, and only meaningful while something is navigating.
-    xtrack_update = Signal(float)                # metres
-
     # Yaw rate, for drawing where the current turn leads.
     turn_rate_update = Signal(float)             # deg/s
 
@@ -725,7 +720,6 @@ class MavlinkLink(QThread):
                 # waypoint without downloading the mission.
                 self.nav_target_update.emit(float(msg.target_bearing),
                                             float(msg.wp_dist))
-                self.xtrack_update.emit(float(msg.xtrack_error))
 
             elif mtype == "RANGEFINDER":
                 self.status_update.emit({"rangefinder_m": f"{msg.distance:.2f}"})

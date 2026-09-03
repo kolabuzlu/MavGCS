@@ -2666,7 +2666,10 @@ class MainWindow(QMainWindow):
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
-        self.retro_view.set_state(altitude=alt)
+        # The hidden map is flown by position and heading, so it moves
+        # only when the aircraft does.
+        self.retro_view.set_state(altitude=alt, lat=lat, lon=lon,
+                                  heading=heading)
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
         self._flight_stats.on_position(lat, lon, alt)
@@ -3488,8 +3491,6 @@ class MainWindow(QMainWindow):
         self.link.pitch_integrator_update.connect(
             self._flight_stats.on_pitch_integrator)
         self.link.trim_throttle_update.connect(self._on_trim_throttle)
-        self.link.xtrack_update.connect(
-            lambda m: self.retro_view.set_state(xtrack=m))
         self.link.elevator_status.connect(self._on_elevator_status)
         self.link.vfr_update.connect(self.on_vfr)
         self.link.wind_update.connect(self.on_wind)
