@@ -4,8 +4,10 @@ A hidden 8-bit river-flying view, driven by the real aircraft.
 Reached by pressing and holding on bare sky or ground in the HUD, and
 left the same way. It is a toy, but it is an honest one: the scenery is
 invented, while everything that moves comes from telemetry. Groundspeed
-scrolls the river, roll steers, throttle fills the fuel gauge, altitude
-sizes the shadow. Nothing here commands the aircraft.
+scrolls the river; the aeroplane's place across it is the crosstrack
+error, so the river is the track it is meant to be on; throttle fills
+the fuel gauge; altitude sizes the shadow. Nothing here commands the
+aircraft, and nothing here moves unless the aircraft did.
 
 The look comes from drawing into a small image - a grid about 150 rows
 tall, as many columns wide as the panel's shape calls for - and blitting
@@ -73,6 +75,17 @@ class RetroView(QWidget):
     # looking at on the bench.
     IDLE_SCROLL = 26.0
 
+    # Crosstrack error that puts the aeroplane at the river bank. Beyond
+    # this it simply stays there rather than flying over the grass.
+    XTRACK_FULL_M = 60.0
+    # Below this the autopilot is not really navigating - nothing is
+    # steering to a track - and the number is not worth reading.
+    XTRACK_LIVE_M = 0.5
+    # How quickly the drawn position catches up with the real one. A lag,
+    # not an integrator: it always converges on the measurement, so it
+    # cannot wander off on its own the way the old roll integration did.
+    FOLLOW_PER_S = 3.0
+
     HOLD_MS = 3000
     FPS = 20                    # deliberately modest: this is scenery
 
@@ -90,6 +103,7 @@ class RetroView(QWidget):
         self.throttle = None        # percent
         self.altitude = None        # m
         self.airspeed = None
+        self.xtrack = None          # m, signed: positive is right of track
 
         self._world = 0.0           # how far the river has scrolled
         self._x = 0.0               # the aeroplane's place across the river
@@ -110,8 +124,10 @@ class RetroView(QWidget):
     # ---------------------------------------------------------- telemetry
 
     def set_state(self, groundspeed=None, roll=None, throttle=None,
-                  altitude=None, airspeed=None):
+                  altitude=None, airspeed=None, xtrack=None):
         """Whatever is known right now. Any of it may be None."""
+        if xtrack is not None:
+            self.xtrack = xtrack
         if groundspeed is not None:
             self.groundspeed = groundspeed
         if roll is not None:
@@ -142,13 +158,30 @@ class RetroView(QWidget):
                  if self.groundspeed else self.IDLE_SCROLL)
         self._world += speed * dt
 
-        # Bank to steer, as the original did. The aeroplane is not really
-        # moving across the river, so this is honest only as a feel: the
-        # roll is real, where it takes you is not.
-        self._x += math.sin(self.roll) * 46.0 * dt
         cx, half = self._river(self._world + self._gh)
-        self._x = max(-half + 6, min(half - 6, self._x))
+        target = self._lateral_target(half)
+        # Ease towards where the aircraft actually is. Because the target
+        # is recomputed from telemetry every frame this converges and
+        # stays; integrating roll, as this did before, meant any small
+        # standing bank slid the aeroplane across the screen by itself.
+        self._x += (target - self._x) * min(1.0, dt * self.FOLLOW_PER_S)
         self.update()
+
+    def _lateral_target(self, half):
+        """Where across the river the aeroplane belongs, from telemetry.
+
+        The river is the track it is meant to be flying, so its place in
+        the river is its crosstrack error - genuinely where it is, not a
+        game. Nothing is navigating in MANUAL or a hand-flown cruise
+        though, and then crosstrack reads zero and means nothing, so bank
+        stands in: a wing down puts it to that side, wings level centres
+        it. Neither can drift, because both are read fresh each frame.
+        """
+        travel = max(2.0, half - 6.0)
+        if self.xtrack is not None and abs(self.xtrack) >= self.XTRACK_LIVE_M:
+            frac = max(-1.0, min(1.0, self.xtrack / self.XTRACK_FULL_M))
+            return frac * travel
+        return max(-1.0, min(1.0, math.sin(self.roll) * 1.6)) * travel * 0.85
 
     # ------------------------------------------------------------- world
 
