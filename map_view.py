@@ -333,12 +333,21 @@ LEAFLET_HTML = """
     background: rgba(0,0,0,0.6);
     padding: 4px 6px 3px 6px; border-radius: 4px;
     font-family: sans-serif;
+    /* Fixed to the widest caption the app can produce, measured at this
+       font: Slightly nose heavy (+100us) comes to 129px. The gauge must
+       not resize as the verdict changes - a box that grows and shrinks
+       in the corner of the map is a distraction, and the aeroplane
+       inside would shift with it. No quote marks in here: this is a
+       double-quoted HTML attribute, and one would end it early and
+       silently drop everything after it. */
+    width: 134px;
     z-index: 1000; pointer-events: none; display: none;
 ">
     <!-- Rendered at 90% of the space it is drawn in, and cropped to the
          aeroplane: the coordinates below, and the marker's travel, stay
          as written while the black behind them stops at the wingtips. -->
-    <svg id="cog-svg" width="108" height="39.6" viewBox="16 0 120 44">
+    <svg id="cog-svg" width="108" height="39.6" viewBox="16 0 120 44"
+         style="display: block; margin: 0 auto;">
         <!-- Plan view, nose to the left, so fore and aft run the way the
              marker slides. Drawn once; only the marker moves. -->
         <g id="cog-plane" fill="#8f9aa3">
@@ -371,11 +380,13 @@ LEAFLET_HTML = """
             <path d="M70,28.5 A6.5,6.5 0 0,1 63.5,22 L70,22 Z" fill="#111"/>
         </g>
     </svg>
-    <!-- Held to the width of the drawing so a longer verdict wraps onto
-         a second line rather than stretching the black panel sideways. -->
+    <!-- One line, always. nowrap keeps the longest verdict on a single
+         row; the ellipsis is a backstop so that even an unforeseen
+         caption truncates instead of resizing the gauge. -->
     <div id="cog-label" style="font-size: 10px; color: #cfd8e0;
-         text-align: center; margin-top: 1px; width: 108px;
-         line-height: 1.15;"></div>
+         text-align: center; margin-top: 1px; line-height: 1.15;
+         white-space: nowrap; overflow: hidden;
+         text-overflow: ellipsis;"></div>
 </div>
 <div id="credit" style="
     position: absolute; bottom: 8px; left: 8px;
