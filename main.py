@@ -166,6 +166,21 @@ class FlightStats:
     BALANCE_SETTLE_S = 20.0
     # Less steady flight than this is not evidence of anything.
     BALANCE_MIN_SPAN_S = 30.0
+    # Only the most recent stretch of level flight is averaged. The
+    # centre of gravity is not a constant of the flight - fuel burns off,
+    # payload shifts, and on a test rig it is moved deliberately - so
+    # averaging everything since takeoff would take longer and longer to
+    # notice a change and eventually never notice one at all.
+    #
+    # Measured from the newest sample rather than from the clock, because
+    # sampling only happens in steady cruise: a few circuits in between
+    # should not empty the window.
+    #
+    # 45s rather than 60: the verdict settles a third quicker after the
+    # balance shifts, and there is still half again the minimum span to
+    # average over. At the measured +-6us of cruise scatter, 45 samples
+    # pin the mean to under 1us, so nothing is given away for the speed.
+    BALANCE_WINDOW_S = 45.0
     # What matters is an offset held CONSISTENTLY, so consistency is
     # measured rather than just the size of the average. In turbulence the
     # elevator is busy either side of where it is held, and a small offset
@@ -466,12 +481,14 @@ class FlightStats:
         """One PID_TUNING pitch sample, kept only if the flight is steady."""
         if self._steady():
             self.integrator_samples.append((time.monotonic(), float(value)))
+            self._trim_window(self.integrator_samples)
 
     def on_elevator(self, offset_us, fraction):
         """One elevator reading, kept only if the flight is steady."""
         if self._steady():
             self.balance_samples.append(
                 (time.monotonic(), float(offset_us), float(fraction)))
+            self._trim_window(self.balance_samples)
 
     def balance_status(self):
         """(state, text, marker position) for the indicator on the map.
@@ -522,6 +539,10 @@ class FlightStats:
         # Both signals are summarised up front. The words come from
         # whichever answers first, but the marker is placed from the
         # elevator in either case, so it has to be in hand either way.
+        # Merged flights can carry more than the window, so trim here
+        # too: this is the point where correctness actually matters.
+        self._trim_window(self.integrator_samples)
+        self._trim_window(self.balance_samples)
         i_span, i_mean, i_agree = self._summarise(
             [(t, v) for t, v in self.integrator_samples])
         e_span, e_mean_us, e_agree = self._summarise(
@@ -584,6 +605,17 @@ class FlightStats:
         # Positive is up elevator, which is nose heavy, and the nose is
         # drawn to the left - so the marker moves the other way.
         return max(-1.0, min(1.0, -us / self.BALANCE_MARKER_FULL_US))
+
+    def _trim_window(self, samples):
+        """Drop whatever has aged out of the trailing window."""
+        if not samples:
+            return
+        cutoff = samples[-1][0] - self.BALANCE_WINDOW_S
+        i = 0
+        while i < len(samples) and samples[i][0] < cutoff:
+            i += 1
+        if i:
+            del samples[:i]
 
     def _summarise(self, pairs):
         """(span, mean, agreement) for one signal, or Nones if too thin.
