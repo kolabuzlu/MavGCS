@@ -208,16 +208,27 @@ class ArtificialHorizon(QWidget):
             painter.drawLine(QPointF(rect.x(), y),
                              QPointF(rect.x() + rect.width() * 0.45, y))
 
-        painter.setPen(QPen(Qt.white))
-        painter.setFont(QFont("Sans", 7))
         # Labelled like the other readouts, which say IAS m/s and ALT m
-        # rather than leaving the reader to infer the unit. The box is
-        # wider than the bar so "100%" still centres on it; it sits below
-        # the airspeed caption, so the extra width collides with nothing.
+        # rather than leaving the reader to infer the unit, and on the
+        # same black ground they use - over the 3D view the terrain
+        # underneath can be any brightness, and white on pale ground was
+        # hard to read. Sized to the text so the plinth is no wider than
+        # it needs to be.
+        painter.setFont(QFont("Sans", 7))
         text = f"{self.throttle:.0f}%" if self.throttle is not None else "--"
-        painter.drawText(
-            QRectF(rect.x() - 12, rect.bottom() + 2, rect.width() + 24, 12),
-            Qt.AlignHCenter, text)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 6.0
+        th = fm.height() + 2.0
+        label = QRectF(rect.center().x() - tw / 2.0, rect.bottom() + 2, tw, th)
+        painter.setPen(Qt.NoPen)
+        # The wind readout's black rather than the boxes' lighter one:
+        # 170 alpha over snow or pale sand still comes out at luminance
+        # 80-odd, which is not enough behind small white text. This is
+        # the ground the HUD already uses where text must carry.
+        painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        painter.drawRect(label)
+        painter.setPen(QPen(Qt.white))
+        painter.drawText(label, Qt.AlignCenter, text)
 
     def paintEvent(self, event):
         painter = QPainter(self)
