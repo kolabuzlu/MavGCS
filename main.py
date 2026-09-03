@@ -2408,6 +2408,7 @@ class MainWindow(QMainWindow):
         # Set by the link if this aircraft's elevator cannot be read.
         self._elevator_unavailable = ""
         self._wp_dist = None
+        self._mode = None
         self._was_connected = False
         self._trim_throttle = None
         # Recent HUD state, so the overlay drawn over the 3D view can be
@@ -2660,6 +2661,9 @@ class MainWindow(QMainWindow):
     ETA_MIN_DIST_M = 1.0
     # Past this the number is not telling anyone anything useful.
     ETA_MAX_S = 100 * 3600
+    # Circling a point is not going anywhere. The distance still reports,
+    # and dividing by it would count down to an arrival that never comes.
+    ETA_HOLDING_MODES = ("LOITER",)
 
     def on_nav_target(self, bearing_deg, distance_m):
         self.map_view.set_nav_target(bearing_deg, distance_m)
@@ -2674,6 +2678,12 @@ class MainWindow(QMainWindow):
         waypoint reports zero distance, which reads as "arrived" if you
         let it.
         """
+        # Holding says so rather than vanishing: the box disappearing
+        # would look like a fault, where a dash says plainly that there
+        # is no arrival to time.
+        if getattr(self, "_mode", None) in self.ETA_HOLDING_MODES:
+            self.map_view.set_eta("ETA to WP: --")
+            return
         dist = getattr(self, "_wp_dist", None)
         gs = self._last_groundspeed
         if (dist is None or dist < self.ETA_MIN_DIST_M
@@ -2684,7 +2694,7 @@ class MainWindow(QMainWindow):
         if seconds > self.ETA_MAX_S:
             self.map_view.set_eta("")
             return
-        self.map_view.set_eta(f"ETA to WP  {self._hms(seconds)}")
+        self.map_view.set_eta(f"ETA to WP: {self._hms(seconds)}")
 
     @staticmethod
     def _hms(seconds: float) -> str:
@@ -3159,6 +3169,8 @@ class MainWindow(QMainWindow):
         self._flight_stats.on_status(status_dict)
         if "mode" in status_dict:
             self.mode_panel.set_active_mode(status_dict["mode"])
+            self._mode = status_dict["mode"]
+            self._push_eta()
         if "armed" in status_dict:
             armed = status_dict["armed"] == "YES"
             self._armed = armed
