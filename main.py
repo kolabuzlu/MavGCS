@@ -3240,19 +3240,11 @@ class MainWindow(QMainWindow):
         # transition: a disconnected link repeats this, and being thrown
         # out over and over while poking about on the bench would be
         # worse than staying.
+        # On the transition only: a link that is down repeats this
+        # status, and "waiting for heartbeat" arrives before ever being
+        # connected, neither of which should clear anything.
         if self._was_connected and not connected:
-            self._leave_retro()
-            # The same clearing the Disconnect button does. It was only
-            # ever wired to the button, so a dropped radio left the panel
-            # reading ARMED in red for an aircraft out of contact - which
-            # is the very case _reset_vehicle_state was written for. It
-            # also closes the flight accumulator, which otherwise stays
-            # open and adds the next flight onto this one.
-            #
-            # On the transition only: a link that is down repeats this
-            # status, and "waiting for heartbeat" arrives before ever
-            # being connected.
-            self._reset_vehicle_state()
+            self._on_link_gone()
         self._was_connected = connected
         self._set_link_status(connected, message)
         # A failure reason is worth more than a tooltip - it is the thing
@@ -3593,7 +3585,7 @@ class MainWindow(QMainWindow):
         self.command_label.setText("")
         self._link_message_shown = False
         self.ack_label.setText("")
-        self._reset_vehicle_state()
+        self._on_link_gone()
 
     def on_tile_cache_limit(self, megabytes):
         self.tile_server.set_size_limit(int(megabytes) * 1024 * 1024)
@@ -3673,6 +3665,19 @@ class MainWindow(QMainWindow):
         self.map_view.update_terrain_cache_stats(
             t_tiles, t_used, terrain_provider.cache_limit_bytes()
         )
+
+    def _on_link_gone(self):
+        """Everything that must happen when the aircraft is no longer there.
+
+        Deliberately one body shared by both ways of losing it - a link
+        error and the Disconnect button - because they had drifted apart
+        twice already. Each addition went to whichever path was in hand
+        and the other quietly fell behind: a dropped radio left the panel
+        reading ARMED, and the button left you stranded in the hidden
+        view with its own toggle hidden and no way out on screen.
+        """
+        self._leave_retro()
+        self._reset_vehicle_state()
 
     def _reset_vehicle_state(self):
         """
