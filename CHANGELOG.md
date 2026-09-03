@@ -1,7 +1,6 @@
 # MavGCS Changelog
 
-## V1.17.6 - Center of gravity indicator reworked.
-Bug fixes and improvements.
+## V1.17.6 - Bug fixes and improvements.
 
 ## V1.17.5 - Center of gravity indicator added.
 Bug fixes and improvements.
