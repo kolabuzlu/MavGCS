@@ -96,8 +96,12 @@ LEAFLET_HTML = """
      pixels. */
   #compass .cp-home-shaft { stroke: #6ee787; stroke-width: 4; stroke-linecap: round; }
   #compass .cp-home-head { fill: #6ee787; }
-  #compass .cp-wind-shaft { stroke: #4fc3f7; stroke-width: 4; stroke-linecap: round; }
-  #compass .cp-wind-head { fill: #4fc3f7; }
+  /* A darker blue than the wind speed text below it. Same hue, so the
+     two still read as one instrument; darker, so the arrow sitting out
+     on the card is told apart at a glance from the number in the middle
+     rather than the eye having to work out which blue is which. */
+  #compass .cp-wind-shaft { stroke: #1e9fd6; stroke-width: 4; stroke-linecap: round; }
+  #compass .cp-wind-head { fill: #1e9fd6; }
   #terrain-radar {
     position: absolute; bottom: 26px; right: 8px;
     width: 200px; height: 200px;
