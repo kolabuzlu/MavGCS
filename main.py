@@ -2661,12 +2661,26 @@ class MainWindow(QMainWindow):
     ETA_MIN_DIST_M = 1.0
     # Past this the number is not telling anyone anything useful.
     ETA_MAX_S = 100 * 3600
-    # Modes with no arrival to time. LOITER and CIRCLE hold a point.
-    # CRUISE holds a heading with the waypoint projected ahead of the
-    # aircraft, so it recedes exactly as fast as you fly at it. In all
-    # three the distance still reports, and dividing by it counts down to
-    # something that never arrives.
-    ETA_HOLDING_MODES = ("LOITER", "CIRCLE", "CRUISE")
+    # The modes that actually fly to a waypoint, and so have an arrival
+    # worth timing. Everything else shows a dash.
+    #
+    # This was the other way round once - a list of modes to suppress,
+    # holding LOITER, CIRCLE and CRUISE - and every mode nobody had
+    # thought of fell straight through it. Hand-flying in MANUAL or FBWA,
+    # ArduPlane goes on reporting the distance to whatever waypoint it
+    # was last steering to, so the box counted down towards a waypoint
+    # the aircraft was not flying to and nothing was going to reach.
+    # STABILIZE, ACRO, FBWB, TRAINING, AUTOTUNE and the quadplane hover
+    # modes all did the same, as would any mode added to ArduPlane after
+    # this was written. Naming what does navigate fails the safe way: a
+    # mode this does not know about shows a dash rather than a number
+    # that means nothing.
+    #
+    # TAKEOFF is deliberately left out. It climbs along the runway
+    # heading to a target altitude rather than to a place, so its
+    # distance recedes as you fly at it - the same reason CRUISE is not
+    # in the list.
+    ETA_NAV_MODES = ("AUTO", "GUIDED", "RTL", "AUTOLAND", "QRTL")
     ETA_LABEL = "ETA to WP : "
 
     def on_nav_target(self, bearing_deg, distance_m):
@@ -2682,10 +2696,10 @@ class MainWindow(QMainWindow):
         waypoint reports zero distance, which reads as "arrived" if you
         let it.
         """
-        # Holding says so rather than vanishing: the box disappearing
-        # would look like a fault, where a dash says plainly that there
-        # is no arrival to time.
-        if getattr(self, "_mode", None) in self.ETA_HOLDING_MODES:
+        # Not navigating says so rather than vanishing: the box
+        # disappearing would look like a fault, where a dash says plainly
+        # that there is no arrival to time.
+        if getattr(self, "_mode", None) not in self.ETA_NAV_MODES:
             self.map_view.set_eta(self.ETA_LABEL, "--")
             return
         dist = getattr(self, "_wp_dist", None)
