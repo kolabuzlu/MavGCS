@@ -315,6 +315,35 @@ LEAFLET_HTML = """
            title="Ground track, nose heading, bearing to waypoint and the current turn"
            >Vectors</label>
 </div>
+<div id="fence-control" style="
+    /* Directly under the trail controls, same left edge and the same
+       black, so the two read as one column rather than two floating
+       boxes. 42px is that box's height plus a 6px gap. */
+    position: absolute; top: 42px; left: 622px;
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 4px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 12px;
+    z-index: 1000; display: flex; align-items: center; gap: 4px;
+">
+    <input type="checkbox" id="fence-checkbox"
+           onchange="setFenceDrawing(this.checked);"
+           style="margin: 0; cursor: pointer;">
+    <label for="fence-checkbox" style="cursor: pointer; user-select: none;"
+           title="Click the map to place fence corners, then Done"
+           >Geofence</label>
+    <button id="fence-done" onclick="finishFence();" disabled
+            title="Send the fence and switch it on, with RTL on breach"
+            style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   margin-left: 6px; cursor: pointer;">Done</button>
+    <button id="fence-clear" onclick="clearFence();"
+            title="Discard the drawing and switch the fence off"
+            style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   cursor: pointer;">Clear</button>
+</div>
 <div id="tilecache-control">
   <div class="tc-cols">
     <div class="tc-col">
@@ -1475,9 +1504,98 @@ function setFollow(v) {
 }
 function clearTrail() { path.setLatLngs([]); }
 
+// ---- geofence -------------------------------------------------------
+// Corners are collected here while drawing and handed to Python whole on
+// Done. Nothing is sent to the aircraft until then: a half-drawn polygon
+// is not a fence, and uploading one corner at a time would leave the
+// vehicle holding a shape nobody asked for.
+var fenceDrawing = false;
+var fencePoints = [];
+var fenceMarkers = [];
+var fenceShape = null;      // the polygon while being drawn
+var fenceLive = null;       // the polygon the aircraft has been given
+
+function fenceCornerIcon(n) {
+    return L.divIcon({
+        className: 'fence-corner',
+        html: '<div style="width:12px;height:12px;border-radius:50%;' +
+              'background:#ff9800;border:2px solid #fff;"></div>',
+        iconSize: [12, 12], iconAnchor: [6, 6],
+    });
+}
+
+function setFenceDrawing(on) {
+    fenceDrawing = !!on;
+    var cb = document.getElementById('fence-checkbox');
+    if (cb) { cb.checked = fenceDrawing; }
+    // Drawing a fence and queueing waypoints both want map clicks, so
+    // turning one on turns the other off rather than letting a click
+    // mean two things.
+    if (fenceDrawing && waypointMode) { setWaypointMode(false); }
+    refreshFenceButtons();
+}
+
+function refreshFenceButtons() {
+    var done = document.getElementById('fence-done');
+    if (done) { done.disabled = fencePoints.length < 3; }
+}
+
+function addFenceCorner(lat, lon) {
+    fencePoints.push([lat, lon]);
+    var mk = L.marker([lat, lon], {icon: fenceCornerIcon()}).addTo(map);
+    fenceMarkers.push(mk);
+    if (fenceShape) { map.removeLayer(fenceShape); }
+    // Shown as a polygon from three corners on, and as a plain line
+    // before that - two points do not enclose anything, and drawing them
+    // as a filled shape would suggest they did.
+    fenceShape = (fencePoints.length >= 3
+        ? L.polygon(fencePoints, {color: '#ff9800', weight: 2,
+                                  fillOpacity: 0.06, dashArray: '5,5'})
+        : L.polyline(fencePoints, {color: '#ff9800', weight: 2,
+                                   dashArray: '5,5'})).addTo(map);
+    refreshFenceButtons();
+}
+
+function finishFence() {
+    if (fencePoints.length < 3) { return; }
+    bridge.fenceRequested(JSON.stringify(fencePoints));
+    setFenceDrawing(false);
+}
+
+function clearFence() {
+    for (var i = 0; i < fenceMarkers.length; i++) { map.removeLayer(fenceMarkers[i]); }
+    fenceMarkers = [];
+    fencePoints = [];
+    if (fenceShape) { map.removeLayer(fenceShape); fenceShape = null; }
+    if (fenceLive) { map.removeLayer(fenceLive); fenceLive = null; }
+    setFenceDrawing(false);
+    bridge.fenceCleared();
+}
+
+// Called once the aircraft has accepted it: the dashed drawing becomes a
+// solid shape, so what is on the vehicle looks different from what is
+// merely sketched on the screen.
+function setFenceAccepted(pts) {
+    for (var i = 0; i < fenceMarkers.length; i++) { map.removeLayer(fenceMarkers[i]); }
+    fenceMarkers = [];
+    if (fenceShape) { map.removeLayer(fenceShape); fenceShape = null; }
+    if (fenceLive) { map.removeLayer(fenceLive); fenceLive = null; }
+    if (pts && pts.length >= 3) {
+        fenceLive = L.polygon(pts, {color: '#ff9800', weight: 2,
+                                    fillOpacity: 0.05}).addTo(map);
+    }
+    fencePoints = [];
+    refreshFenceButtons();
+}
+
 map.on('click', function(e) {
     var lat = e.latlng.lat;
     var lon = e.latlng.lng;
+
+    if (fenceDrawing) {
+        addFenceCorner(lat, lon);
+        return;
+    }
 
     if (waypointMode) {
         var m = L.marker([lat, lon], {icon: waypointIcon(waypointMarkers.length + 1)}).addTo(map);
@@ -2210,6 +2328,8 @@ class Bridge(QObject):
     tile_cache_clear_requested = Signal()
     terrain_cache_limit_changed = Signal(int)
     terrain_cache_clear_requested = Signal()
+    fence_requested = Signal(list)
+    fence_cleared = Signal()
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
@@ -2222,6 +2342,24 @@ class Bridge(QObject):
     @Slot(int, float)
     def waypointAltChanged(self, wp_id, alt):
         self.waypoint_alt_changed.emit(wp_id, alt)
+
+    @Slot(str)
+    def fenceRequested(self, points_json):
+        """The drawn corners, as JSON, once Done is pressed.
+
+        JSON rather than a nested array: QWebChannel flattens those on
+        the way across, and a fence is exactly a nested array.
+        """
+        try:
+            pts = json.loads(points_json)
+        except (ValueError, TypeError):
+            return
+        self.fence_requested.emit(
+            [(float(a), float(b)) for a, b in pts if a is not None])
+
+    @Slot()
+    def fenceCleared(self):
+        self.fence_cleared.emit()
 
     @Slot(bool)
     def adsbToggled(self, enabled):
@@ -2258,6 +2396,8 @@ class MapView(QWebEngineView):
     tile_cache_clear_requested = Signal()
     terrain_cache_limit_changed = Signal(int)
     terrain_cache_clear_requested = Signal()
+    fence_requested = Signal(list)
+    fence_cleared = Signal()
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
@@ -2267,6 +2407,8 @@ class MapView(QWebEngineView):
         self._bridge.fly_to_here.connect(self.fly_to_here)
         self._bridge.waypoint_added.connect(self.waypoint_added)
         self._bridge.waypoint_alt_changed.connect(self.waypoint_alt_changed)
+        self._bridge.fence_requested.connect(self.fence_requested)
+        self._bridge.fence_cleared.connect(self.fence_cleared)
         self._bridge.adsb_toggled.connect(self.adsb_toggled)
         self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
         self._bridge.tile_cache_limit_changed.connect(self.tile_cache_limit_changed)
@@ -2402,6 +2544,12 @@ class MapView(QWebEngineView):
     def mark_mission_sent(self):
         """The vehicle has accepted the mission: edited altitudes are live."""
         self.page().runJavaScript("markMissionSent();")
+
+    def set_fence_accepted(self, points):
+        """The aircraft has taken this fence: draw it as real, not drawn."""
+        self.page().runJavaScript(
+            "setFenceAccepted(%s);"
+            % json.dumps([[float(a), float(b)] for a, b in points]))
 
     def set_leg_clearances(self, legs):
         """Worst ground clearance along each leg, as [(from, to, metres)].

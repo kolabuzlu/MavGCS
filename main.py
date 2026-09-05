@@ -2973,6 +2973,8 @@ class MainWindow(QMainWindow):
         # waypoint's relative altitude into something the terrain can be
         # compared against.
         self._home_alt_amsl = None
+        # Corners handed to the aircraft but not yet acknowledged.
+        self._pending_fence = []
         # Remembered so the same warning is not announced on every recheck.
         self._last_terrain_warning = ([], [])
         self._last_amsl_alt = 0.0
@@ -3119,6 +3121,8 @@ class MainWindow(QMainWindow):
         self.map_view.fly_to_here.connect(self.on_fly_to_here)
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
         self.map_view.waypoint_alt_changed.connect(self.on_waypoint_alt_changed)
+        self.map_view.fence_requested.connect(self.on_fence_requested)
+        self.map_view.fence_cleared.connect(self.on_fence_cleared)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
@@ -4051,6 +4055,35 @@ class MainWindow(QMainWindow):
         if stripped.startswith("PreArm:") or stripped.startswith("Arm:"):
             self.arm_panel.set_prearm_reason(stripped)
 
+    def on_fence_requested(self, points):
+        """Corners drawn on the map, on their way to the aircraft.
+
+        Held until the vehicle acknowledges: only then is the shape drawn
+        as a real fence, so what is on screen and what is on the aircraft
+        cannot drift apart.
+        """
+        link = self._require_link()
+        if not link:
+            return
+        self._pending_fence = list(points)
+        link.upload_fence(points)
+
+    def on_fence_cleared(self):
+        """The fence is discarded on the map, so switch it off as well."""
+        self._pending_fence = []
+        link = self._require_link()
+        if link:
+            link.set_fence_enabled(False)
+
+    def on_fence_uploaded(self):
+        """Accepted by the vehicle: enable it, and draw it as real."""
+        link = self._require_link()
+        if link:
+            link.set_fence_enabled(True)
+        if self._pending_fence:
+            self.map_view.set_fence_accepted(self._pending_fence)
+            self._pending_fence = []
+
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
 
@@ -4226,6 +4259,7 @@ class MainWindow(QMainWindow):
         self.link.status_text_update.connect(self.messages_panel.add_message)
         self.link.sensor_health_update.connect(self.sensor_panel.set_health)
         self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
+        self.link.fence_uploaded.connect(self.on_fence_uploaded)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
