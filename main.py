@@ -4257,6 +4257,18 @@ class MainWindow(QMainWindow):
             self._pending_fence = []
             self._recheck_fence_containment()
 
+    def on_fence_enabled(self, enabled):
+        """What the aircraft says its fence is doing.
+
+        The only word on this that is worth anything. A PARAM_SET draws
+        no acknowledgement, so until this arrives the fence has only been
+        asked for - which is why the map draws it differently until the
+        aircraft agrees.
+        """
+        self.on_command_feedback(
+            "Aircraft confirms geofence %s" % ("ON" if enabled else "OFF"))
+        self.map_view.set_fence_armed(enabled)
+
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
 
@@ -4436,6 +4448,7 @@ class MainWindow(QMainWindow):
         self.link.sensor_health_update.connect(self.sensor_panel.set_health)
         self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
         self.link.fence_uploaded.connect(self.on_fence_uploaded)
+        self.link.fence_enabled_update.connect(self.on_fence_enabled)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
@@ -4633,6 +4646,18 @@ class MainWindow(QMainWindow):
         self.wp_terrain_worker.stop()
         self.adsb_worker.stop()
         self.tile_server.stop()
+        # The update check is a child of this window and gives GitHub
+        # fifteen seconds to answer. Quitting inside that window - which
+        # is exactly what happens with no network, since the automatic
+        # check starts four seconds after launch - left Qt destroying a
+        # thread that was still running, and that aborts the process on
+        # the way out. Nothing is lost by abandoning the answer.
+        checker = getattr(self, "_update_checker", None)
+        if checker is not None and checker.isRunning():
+            checker.result_ready.disconnect()
+            if not checker.wait(2000):
+                checker.terminate()
+                checker.wait(1000)
         event.accept()
 
 

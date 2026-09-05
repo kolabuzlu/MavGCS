@@ -340,6 +340,14 @@ class MavlinkLink(QThread):
         # upload would be answered out of the waypoint list.
         self._mission_kind = "mission"   # 'mission' | 'fence'
         self._fence_params = {}          # FENCE_* read once on connect
+        # An enable waiting on FENCE_TYPE, and an enable waiting
+        # to be confirmed. Both are deadlines run() watches.
+        self._fence_enable_pending = None
+        self._fence_confirm_deadline = None
+        # A PARAM_REQUEST_READ can be lost as easily as anything else, and
+        # losing it is what sends the enable down the polygon-only path.
+        # One more ask costs three small packets.
+        self._fence_read_retry = None
 
     def run(self):
         try:
@@ -486,6 +494,36 @@ class MavlinkLink(QThread):
                     "Mission upload timed out - no reply from the vehicle. "
                     "Try Start Mission again."
                 )
+
+            # Halfway through the wait with still no answer: ask once more
+            # before falling back to the lossy path.
+            if (self._fence_read_retry is not None
+                    and now >= self._fence_read_retry):
+                self._fence_read_retry = None
+                if self._fence_params.get("FENCE_TYPE") is None:
+                    self._request_fence_params()
+
+            # An enable that was waiting to learn FENCE_TYPE. Going ahead
+            # without it is the lesser evil - the pilot asked for a fence -
+            # but it has to be said plainly, because it turns off whatever
+            # else the mask held.
+            if (self._fence_enable_pending is not None
+                    and now >= self._fence_enable_pending):
+                self._fence_enable_pending = None
+                self._fence_read_retry = None
+                self.command_feedback.emit(
+                    "No answer on FENCE_TYPE - enabling the polygon fence "
+                    "only. Any altitude or circle fence set on the aircraft "
+                    "is switched off by this.")
+                self._apply_fence_enabled(True)
+
+            # A fence parameter the aircraft never echoed back.
+            if (self._fence_confirm_deadline is not None
+                    and now >= self._fence_confirm_deadline):
+                self._fence_confirm_deadline = None
+                self.command_feedback.emit(
+                    "The aircraft did not confirm the fence setting - "
+                    "do not rely on the fence. Check FENCE_ENABLE.")
 
             # Deferred half of clear_mission() (see there for why) - fires
             # once the LOITER mode switch it requested has had time to take
@@ -739,8 +777,15 @@ class MavlinkLink(QThread):
                 elif name.startswith("FENCE_"):
                     self._fence_params[name] = float(msg.param_value)
                     if name == "FENCE_ENABLE":
+                        self._fence_confirm_deadline = None
                         self.fence_enabled_update.emit(
                             bool(int(msg.param_value)))
+                    if (name == "FENCE_TYPE"
+                            and self._fence_enable_pending is not None):
+                        # The answer an enable was waiting for.
+                        self._fence_enable_pending = None
+                        self._fence_read_retry = None
+                        self._apply_fence_enabled(True)
                 elif name in ("BATT_CAPACITY", "BATT_LOW_MAH"):
                     self._batt_params[name] = float(msg.param_value)
                     if "BATT_CAPACITY" in self._batt_params:
@@ -1126,6 +1171,17 @@ class MavlinkLink(QThread):
     # FENCE_ACTION 1 is RTL on Plane, and bit 2 of FENCE_TYPE is the
     # inclusion/exclusion polygon fence - both read off ArduPilot's own
     # parameter definitions rather than guessed.
+    # How long to wait for the aircraft to say what its fence is set to
+    # before enabling with only what is known. Enabling means adding the
+    # polygon bit to FENCE_TYPE, and doing that without knowing the rest
+    # of the mask switches off whatever else was in it.
+    FENCE_PARAM_WAIT_S = 3.0
+    # How long to wait for the aircraft to echo a fence parameter back. A
+    # PARAM_SET draws no COMMAND_ACK, so the echo is the only proof it
+    # landed - and a fence the pilot believes is on when it is not is
+    # worse than no fence at all.
+    FENCE_CONFIRM_S = 3.0
+
     FENCE_ACTION_RTL = 1
     FENCE_TYPE_POLYGON_BIT = 4
 
@@ -1189,23 +1245,42 @@ class MavlinkLink(QThread):
         if self.master is None:
             self.command_feedback.emit("Not connected - can't change the fence")
             return
+        if on and self._fence_params.get("FENCE_TYPE") is None:
+            # Ask what the mask holds and finish the job when the answer
+            # arrives, rather than writing the polygon bit over the top of
+            # an altitude fence somebody is relying on.
+            self._request_fence_params()
+            now_ = time.time()
+            self._fence_enable_pending = now_ + self.FENCE_PARAM_WAIT_S
+            self._fence_read_retry = now_ + self.FENCE_PARAM_WAIT_S / 2.0
+            self.command_feedback.emit(
+                "Reading the aircraft's fence settings first...")
+            return
+        self._apply_fence_enabled(on)
+
+    def _apply_fence_enabled(self, on: bool):
+        """Write the fence parameters and wait to be told they took."""
+        if self.master is None:
+            return
         try:
             with self._send_lock:
                 if on:
                     known = self._fence_params.get("FENCE_TYPE")
-                    if known is None:
-                        self.command_feedback.emit(
-                            "FENCE_TYPE not read yet - setting polygon only")
-                        want = float(self.FENCE_TYPE_POLYGON_BIT)
-                    else:
-                        want = float(int(known) | self.FENCE_TYPE_POLYGON_BIT)
+                    want = (float(self.FENCE_TYPE_POLYGON_BIT) if known is None
+                            else float(int(known) | self.FENCE_TYPE_POLYGON_BIT))
                     self._set_param(b"FENCE_TYPE", want)
                     self._set_param(b"FENCE_ACTION",
                                     float(self.FENCE_ACTION_RTL))
                 self._set_param(b"FENCE_ENABLE", 1.0 if on else 0.0)
+            # Deliberately not "Fence enabled" - nothing has confirmed it
+            # yet, and saying so before the aircraft agrees is how a lost
+            # PARAM_SET becomes a fence the pilot thinks is protecting them.
             self.command_feedback.emit(
-                "Fence enabled - breach action RTL" if on else "Fence disabled")
+                "Fence ON requested - breach action RTL" if on
+                else "Fence OFF requested")
+            self._fence_confirm_deadline = time.time() + self.FENCE_CONFIRM_S
         except Exception as e:
+            self._fence_confirm_deadline = None
             self.command_feedback.emit(f"Failed to change the fence: {e}")
 
     def _set_param(self, name: bytes, value: float):

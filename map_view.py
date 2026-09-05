@@ -1625,11 +1625,32 @@ function setFenceAccepted(pts) {
     if (fenceShape) { map.removeLayer(fenceShape); fenceShape = null; }
     if (fenceLive) { map.removeLayer(fenceLive); fenceLive = null; }
     if (pts && pts.length >= 3) {
+        // Dashed until the aircraft confirms it is switched on. The
+        // corners being accepted is not the same as the fence being
+        // armed, and drawing both the same way would say it is.
         fenceLive = L.polygon(pts, {color: '#ff9800', weight: 2,
-                                    fillOpacity: 0.05}).addTo(map);
+                                    fillOpacity: 0.05,
+                                    dashArray: '6,5'}).addTo(map);
+        fenceLive.bindTooltip('Fence sent - not yet confirmed by the aircraft');
     }
     fencePoints = [];
+    fenceArmed = false;
     refreshFenceButtons();
+}
+
+// Whether the aircraft has told us its fence is on. Only an echoed
+// FENCE_ENABLE sets this; asking for it does not.
+var fenceArmed = false;
+
+function setFenceArmed(on) {
+    fenceArmed = !!on;
+    if (!fenceLive) { return; }
+    fenceLive.setStyle(fenceArmed
+        ? {dashArray: null, weight: 3, fillOpacity: 0.08}
+        : {dashArray: '6,5', weight: 2, fillOpacity: 0.05});
+    fenceLive.bindTooltip(fenceArmed
+        ? 'Geofence armed - RTL on breach'
+        : 'Fence sent - not yet confirmed by the aircraft');
 }
 
 map.on('click', function(e) {
@@ -2596,6 +2617,11 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             "setFenceAccepted(%s);"
             % json.dumps([[float(a), float(b)] for a, b in points]))
+
+    def set_fence_armed(self, on):
+        """Draw the fence as armed only once the aircraft has said so."""
+        self.page().runJavaScript("setFenceArmed(%s);"
+                                  % ("true" if on else "false"))
 
     def set_fence_violations(self, outside_ids, legs):
         """Waypoints outside the fence, and legs that leave it.
