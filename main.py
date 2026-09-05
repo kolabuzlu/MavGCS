@@ -48,7 +48,6 @@ from PySide6.QtWidgets import (
 
 from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
-from retro_view import RetroView
 from map_view import MapView
 import terrain_provider
 from terrain_provider import TerrainRadarWorker
@@ -2522,12 +2521,6 @@ class MainWindow(QMainWindow):
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(self.horizon)   # index 0
         self.view_stack.addWidget(self.fpv_view)  # index 1
-        # Index 2 is not reachable from any button. Press and hold on bare
-        # sky or ground in the HUD to find it, and again to leave.
-        self.retro_view = RetroView()
-        self.view_stack.addWidget(self.retro_view)
-        self.horizon.held_on_empty.connect(self._enter_retro)
-        self.retro_view.exit_requested.connect(self._leave_retro)
 
         # The toggle floats over the view rather than sitting in its own
         # row: an extra row costs vertical space in this column, which on a
@@ -2628,7 +2621,6 @@ class MainWindow(QMainWindow):
 
     def on_attitude(self, roll, pitch, yaw):
         self.horizon.set_attitude(roll, pitch, yaw)
-        self.retro_view.set_state(roll=roll)
         self.telemetry.set_value("roll_deg", f"{math.degrees(roll):.2f}")
         self.telemetry.set_value("pitch_deg", f"{math.degrees(pitch):.2f}")
         # ATTITUDE.yaw is in radians over -pi..+pi (MAVLink spec), so a
@@ -2736,10 +2728,6 @@ class MainWindow(QMainWindow):
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
-        # The hidden map is flown by position and heading, so it moves
-        # only when the aircraft does.
-        self.retro_view.set_state(altitude=alt, lat=lat, lon=lon,
-                                  heading=heading)
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
         self._flight_stats.on_position(lat, lon, alt)
@@ -3075,26 +3063,6 @@ class MainWindow(QMainWindow):
         save_setting("cesium_ion_token", token)
         self.fpv_view.set_token(token)
         return True
-
-    RETRO_INDEX = 2
-
-    def _enter_retro(self):
-        """The hidden view. Only ever reached from the HUD."""
-        if self.view_stack.currentIndex() != 0:
-            return
-        self.view_area.release(self.horizon)
-        self.view_toggle_btn.hide()
-        self.view_stack.setCurrentIndex(self.RETRO_INDEX)
-        self.retro_view.start()
-
-    def _leave_retro(self):
-        """Back to the HUD, which is where it was entered from."""
-        if self.view_stack.currentIndex() != self.RETRO_INDEX:
-            return
-        self.retro_view.stop()
-        self.view_stack.setCurrentIndex(0)
-        self.view_toggle_btn.show()
-        self.view_area.set_label("FPV")
 
     def on_toggle_view(self):
         showing_fpv = self.view_stack.currentIndex() == 1
@@ -3687,10 +3655,8 @@ class MainWindow(QMainWindow):
         error and the Disconnect button - because they had drifted apart
         twice already. Each addition went to whichever path was in hand
         and the other quietly fell behind: a dropped radio left the panel
-        reading ARMED, and the button left you stranded in the hidden
-        view with its own toggle hidden and no way out on screen.
+        reading ARMED while the button cleared it properly.
         """
-        self._leave_retro()
         self._reset_vehicle_state()
 
     def _reset_vehicle_state(self):
