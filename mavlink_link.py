@@ -150,8 +150,10 @@ class MavlinkLink(QThread):
     # TRIM_THROTTLE, the cruise power this airframe was trimmed for.
     trim_throttle_update = Signal(float)
 
-    # Where home actually is, for the map marker.
-    home_position_update = Signal(float, float)  # lat, lon
+    # Where home actually is, for the map marker - and how high it is,
+    # which is what turns a waypoint's relative altitude into a height
+    # above sea level that can be compared against the terrain there.
+    home_position_update = Signal(float, float, float)  # lat, lon, alt AMSL
 
     # What the pack is doing right now, for the can-I-get-home estimate.
     # Current is the one that matters: consumed mAh says where you have
@@ -282,6 +284,7 @@ class MavlinkLink(QThread):
         self._servo_scan_seen = set()
         self._trim_throttle = None
         self._batt_params = {}
+        self._home_alt = None       # metres AMSL, from HOME_POSITION
         self._full_telemetry = full_telemetry
         self._home_lat = None
         # Arming is when ArduPilot sets home, so an arm is the cue to ask
@@ -693,15 +696,22 @@ class MavlinkLink(QThread):
             elif mtype == "HOME_POSITION":
                 lat = msg.latitude / 1e7
                 lon = msg.longitude / 1e7
+                # HOME_POSITION.altitude is millimetres above mean sea
+                # level, not above the ground and not relative to
+                # anything - which is exactly what is wanted here.
+                alt_amsl = msg.altitude / 1000.0
                 moved = (self._home_lat is None
                          or abs(lat - self._home_lat) > 1e-7
-                         or abs(lon - self._home_lon) > 1e-7)
+                         or abs(lon - self._home_lon) > 1e-7
+                         or self._home_alt is None
+                         or abs(alt_amsl - self._home_alt) > 0.5)
                 self._home_lat = lat
                 self._home_lon = lon
+                self._home_alt = alt_amsl
                 # Only on a real change: this arrives again every time it is
                 # re-requested, and redrawing an unmoved marker is noise.
                 if moved:
-                    self.home_position_update.emit(lat, lon)
+                    self.home_position_update.emit(lat, lon, alt_amsl)
 
             elif mtype == "GPS_RAW_INT":
                 sat_count = "--" if msg.satellites_visible == 255 else str(msg.satellites_visible)

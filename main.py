@@ -51,7 +51,7 @@ from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 import terrain_provider
-from terrain_provider import TerrainRadarWorker
+from terrain_provider import TerrainRadarWorker, WaypointTerrainWorker
 from adsb_provider import AdsbWorker
 from tile_cache import TileCacheServer
 from fpv_view import FpvView
@@ -2964,6 +2964,12 @@ class MainWindow(QMainWindow):
         self._waypoint_queue = []
         self._sent_mission = []
         self._mission_default_alt = None
+        # Home's own height above sea level, which is what turns a
+        # waypoint's relative altitude into something the terrain can be
+        # compared against.
+        self._home_alt_amsl = None
+        # Remembered so the same warning is not announced on every recheck.
+        self._last_terrain_warning = []
         self._last_amsl_alt = 0.0
         # True height above the terrain below, from TERRAIN_REPORT. None
         # until the vehicle sends one (it needs terrain data loaded), in
@@ -2982,6 +2988,13 @@ class MainWindow(QMainWindow):
         self.terrain_worker = TerrainRadarWorker(self)
         self.terrain_worker.fan_ready.connect(self.on_terrain_fan_ready)
         self.terrain_worker.start()
+
+        # Checks the mission against the ground under it. Its own thread
+        # because a waypoint over unvisited country means downloading a
+        # terrain tile, which takes seconds.
+        self.wp_terrain_worker = WaypointTerrainWorker(self)
+        self.wp_terrain_worker.result_ready.connect(self.on_wp_terrain_result)
+        self.wp_terrain_worker.start()
 
         # Same idea for ADS-B - starts disabled, only fetches while the
         # map's "ADS-B" checkbox is on (see map_view.py's adsb_toggled).
@@ -3281,9 +3294,43 @@ class MainWindow(QMainWindow):
         self.map_view.set_return_home(
             state, text, f"{need_s} of {have_s} mAh", self._battery_pct)
 
-    def on_home_position(self, lat, lon):
+    def on_home_position(self, lat, lon, alt_amsl):
         self._home_pos = (lat, lon)     # marked in the exported KMZ too
+        self._home_alt_amsl = alt_amsl
         self.map_view.set_home(lat, lon)
+        # Every waypoint's clearance is measured from here, so a new home
+        # changes all of them.
+        self._recheck_waypoint_terrain()
+
+    def _recheck_waypoint_terrain(self):
+        """Ask whether any waypoint is at or below the ground under it.
+
+        Handed off whole each time rather than tracking what changed:
+        moving home, editing one altitude or sending a new default all
+        alter the answer for points that did not themselves move, and the
+        worker skips a request identical to the one it just answered.
+        """
+        points = []
+        for wp in self._waypoint_queue + self._sent_mission:
+            alt = wp["alt"]
+            if alt is None:
+                alt = self._mission_default_alt
+            if alt is None:
+                # No altitude decided for this point yet, so there is
+                # nothing to check it against.
+                continue
+            points.append((wp["id"], wp["lat"], wp["lon"], float(alt)))
+        self.wp_terrain_worker.check(self._home_alt_amsl, points)
+
+    def on_wp_terrain_result(self, bad_ids, worst_margin):
+        self.map_view.set_waypoint_terrain_warnings(bad_ids)
+        if bad_ids and bad_ids != self._last_terrain_warning:
+            n = len(bad_ids)
+            self.on_command_feedback(
+                "%d waypoint%s at or below the terrain (worst %.0f m under)"
+                % (n, "" if n == 1 else "s", abs(worst_margin))
+            )
+        self._last_terrain_warning = list(bad_ids)
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
@@ -3970,6 +4017,7 @@ class MainWindow(QMainWindow):
             {"id": int(wp_id), "lat": lat, "lon": lon, "alt": None}
         )
         self.waypoint_panel.set_count(len(self._waypoint_queue))
+        self._recheck_waypoint_terrain()
 
     def on_waypoint_alt_changed(self, wp_id, alt):
         """An altitude typed into a waypoint's popup on the map.
@@ -3987,6 +4035,9 @@ class MainWindow(QMainWindow):
                     + (" - press Update to send it" if which == "sent" else "")
                 )
                 break
+        # The point that moved is not necessarily the only one affected -
+        # recheck the lot.
+        self._recheck_waypoint_terrain()
 
     def on_clear_waypoints(self):
         self._waypoint_queue = []
@@ -4033,6 +4084,10 @@ class MainWindow(QMainWindow):
         self._sent_mission = list(self._waypoint_queue)
         self._mission_default_alt = alt
         self.map_view.set_waypoint_default_alt(alt)
+        # Every point that was flying the default now has a number, and
+        # the default itself is new, so nothing about the old answer
+        # holds.
+        self._recheck_waypoint_terrain()
         self.waypoint_panel.set_can_update(True)
         # A leftover Fly-to-Here target marker is a separate thing from
         # the waypoint queue - clear it too, since starting a mission
@@ -4323,6 +4378,7 @@ class MainWindow(QMainWindow):
         if self.link is not None:
             self.link.stop()
         self.terrain_worker.stop()
+        self.wp_terrain_worker.stop()
         self.adsb_worker.stop()
         self.tile_server.stop()
         event.accept()

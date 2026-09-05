@@ -380,3 +380,96 @@ class TerrainRadarWorker(QThread):
         if not self.wait(5000):
             self.terminate()
             self.wait(1000)
+
+
+class WaypointTerrainWorker(QThread):
+    """
+    Checks each waypoint against the ground underneath it, off the GUI
+    thread.
+
+    A waypoint carries a height relative to home. What decides whether it
+    clears the ground is that height added to home's own height above sea
+    level, compared with the terrain elevation at the waypoint - three
+    numbers that live in three different places, which is why this is
+    worth doing in one spot rather than at each call site.
+
+    Nothing here changes what the aircraft flies. It answers one question
+    for the map: which of these points would put the aeroplane at or
+    below the ground.
+    """
+
+    # ids of the waypoints that fail, and how far below the terrain the
+    # worst of them sits, in metres
+    result_ready = Signal(list, float)
+
+    # A waypoint exactly at terrain height is already wrong, so the test
+    # is "at or below". This adds nothing on top - no invented safety
+    # buffer, because the number a pilot can reason about is the one they
+    # typed, not that number plus a margin somebody chose for them.
+    CLEARANCE_M = 0.0
+
+    POLL_INTERVAL_S = 0.25
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._running = True
+        self._lock = threading.Lock()
+        self._request = None        # (home_alt_amsl, [(id, lat, lon, rel_alt)])
+        self._last_done = None      # the request last answered, to avoid rework
+        self._provider = TerrainProvider()
+
+    def check(self, home_alt_amsl, waypoints):
+        """Thread-safe; call from the GUI thread whenever anything moves.
+
+        waypoints is [(id, lat, lon, relative_alt_m)]. Points whose
+        altitude is not yet decided should simply be left out.
+        """
+        with self._lock:
+            self._request = (home_alt_amsl, tuple(waypoints))
+
+    def clear(self):
+        with self._lock:
+            self._request = (None, ())
+            self._last_done = None
+
+    def run(self):
+        while self._running:
+            with self._lock:
+                req = self._request
+            if req is None or req == self._last_done:
+                self.msleep(int(self.POLL_INTERVAL_S * 1000))
+                continue
+
+            home_alt, points = req
+            bad, worst = [], 0.0
+            if home_alt is not None:
+                for wp_id, lat, lon, rel_alt in points:
+                    if not self._running:
+                        break
+                    ground = self._provider.elevation(lat, lon)
+                    if ground is None:
+                        # No tile for this spot. Silence rather than a
+                        # guess: an unwarned waypoint reads as "not
+                        # checked", a red one would read as "checked and
+                        # dangerous".
+                        continue
+                    flown_amsl = home_alt + rel_alt
+                    margin = flown_amsl - ground
+                    if margin <= self.CLEARANCE_M:
+                        bad.append(int(wp_id))
+                        worst = min(worst, margin)
+            else:
+                # Without home's height above sea level there is nothing
+                # to compare against, and a relative altitude alone says
+                # nothing about the ground.
+                bad, worst = [], 0.0
+
+            if self._running:
+                self._last_done = req
+                self.result_ready.emit(bad, float(worst))
+
+    def stop(self):
+        self._running = False
+        if not self.wait(5000):
+            self.terminate()
+            self.wait(1000)

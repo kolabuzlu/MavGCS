@@ -567,9 +567,25 @@ function refreshWaypointIcons() {
     for (var i = 0; i < allWaypointLayers.length; i++) {
         var m = allWaypointLayers[i];
         if (m && m._wpId) {
-            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m), wpIsDirty(m)));
+            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
+                                   wpIsDirty(m), !!m._belowTerrain));
         }
     }
+}
+
+// Which waypoints sit at or below the ground under them, worked out in
+// Python where home's height above sea level and the terrain tiles both
+// live. An empty list clears every warning, which is also what arrives
+// when the answer is not known - so a stale red never outlives the
+// reason for it.
+function setWaypointTerrainWarnings(ids) {
+    var flagged = {};
+    for (var i = 0; i < ids.length; i++) { flagged[ids[i]] = true; }
+    for (var j = 0; j < allWaypointLayers.length; j++) {
+        var m = allWaypointLayers[j];
+        if (m && m._wpId) { m._belowTerrain = !!flagged[m._wpId]; }
+    }
+    refreshWaypointIcons();
 }
 
 function wpPopupHtml(m) {
@@ -604,7 +620,8 @@ function applyWaypointAlt(id) {
         var m = allWaypointLayers[i];
         if (m && m._wpId === id) {
             m._wpAlt = v;
-            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m), wpIsDirty(m)));
+            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
+                                   wpIsDirty(m), !!m._belowTerrain));
             if (bridge) { bridge.waypointAltChanged(id, v); }
             map.closePopup();
             break;
@@ -855,13 +872,23 @@ function clearHome() {
 // Numbering restarts at 1 for each mission because that is what the
 // vehicle receives - so without a visual difference a map holding two
 // batches shows two markers labelled "1" and no way to tell them apart.
-function waypointIcon(number, sent, altText, dirty) {
+function waypointIcon(number, sent, altText, dirty, belowTerrain) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
+    // At or below the ground beneath it. Red wins over both the sent and
+    // unsent colours - which of those it is matters far less than the
+    // fact that the aeroplane would be flown into a hill.
+    if (belowTerrain) {
+        fill = '#d32f2f';
+        text = 'white';
+        border = '#ff8a80';
+    }
+    var labelColour = belowTerrain ? '#ff8a80' : (dirty ? '#ffc107' : '');
     var label  = altText
         ? '<div class="wp-alt-label"' +
-          (dirty ? ' style="color:#ffc107"' : '') + '>' + altText + '</div>'
+          (labelColour ? ' style="color:' + labelColour + '"' : '') + '>' +
+          altText + '</div>'
         : '';
     return L.divIcon({
         className: 'waypoint-icon',
@@ -1459,7 +1486,8 @@ function commitWaypoints() {
         // vehicle was never given.
         if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
         m._wpSent = true;
-        m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m), wpIsDirty(m)));
+        m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m),
+                               wpIsDirty(m), !!m._belowTerrain));
     }
     // The next batch has no altitude decided yet, so it shows none rather
     // than borrowing this mission's.
@@ -2301,6 +2329,16 @@ class MapView(QWebEngineView):
     def mark_mission_sent(self):
         """The vehicle has accepted the mission: edited altitudes are live."""
         self.page().runJavaScript("markMissionSent();")
+
+    def set_waypoint_terrain_warnings(self, ids):
+        """Which waypoints sit at or below the ground beneath them.
+
+        An empty list clears every warning, and is also what arrives when
+        the answer is not known - no home altitude, or no terrain tile -
+        so a red marker never outlives the reason for it.
+        """
+        self.page().runJavaScript(
+            "setWaypointTerrainWarnings(%s);" % json.dumps([int(i) for i in ids]))
 
     def set_waypoint_default_alt(self, alt: float):
         """So a waypoint with no altitude of its own shows what it will fly."""
