@@ -30,4 +30,4 @@ through dates. Restore any of them with:
 | V1.18.0 | `11c696152a` | 2026-09-04 | Darken the wind arrow away from the wind speed text |
 | V1.18.1 | `02f5a73063` | 2026-09-05 | Release V1.18.1 |
 | V1.18.2 | `8a9c3f6105` | 2026-09-05 | Release V1.18.2 |
-| V1.19.0 | `6bbdc22d22` | 2026-09-05 | Put the ground clearance on each waypoint |
+| V1.19.0 | `f9d7d64395` | 2026-09-05 | Check the legs between waypoints, not only the waypoints |
