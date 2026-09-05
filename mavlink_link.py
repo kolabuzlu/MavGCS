@@ -795,15 +795,15 @@ class MavlinkLink(QThread):
                     self.status_update.emit(
                         {"battery_mah": f"{consumed}"}
                     )
-                # currents[0] is the whole-pack draw in centiamps, or -1
-                # where there is no sensor. Both halves are needed before
-                # the estimate means anything, so they travel together.
-                amps = -1.0
-                currents = getattr(msg, "currents", None)
-                if currents:
-                    raw = currents[0]
-                    if raw not in (-1, 32767):     # -1 no sensor, INT16_MAX
-                        amps = raw / 100.0
+                # current_battery is the whole-pack draw in centiamps, or
+                # -1 where there is no sensor. Named for the singular
+                # field it is: BATTERY_STATUS carries an array of cell
+                # VOLTAGES but only one current, and reading a plural
+                # "currents" off it silently yielded nothing at all.
+                raw = getattr(msg, "current_battery", -1)
+                amps = raw / 100.0 if raw >= 0 else -1.0
+                # Both halves are needed before the estimate means
+                # anything, so they travel together.
                 if amps >= 0.0 and consumed >= 0:
                     self.battery_power_update.emit(amps, float(consumed))
 
