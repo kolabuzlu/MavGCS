@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.0.0 - Geofence and VTOL modes added.
+Bug fixes and improvements.
+
 ## V1.19.0 - Systems Health panel added.
 Bug fixes and improvements.
 
