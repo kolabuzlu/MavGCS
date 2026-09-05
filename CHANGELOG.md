@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V1.18.1 - Abort landing and topographic map added.
+Bug fixes and improvements.
+
 ## V1.18.0 - Throttle bar and ETA to waypoint added.
 Bug fixes and improvements.
 
