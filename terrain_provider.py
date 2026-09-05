@@ -399,11 +399,12 @@ class WaypointTerrainWorker(QThread):
     hill.
     """
 
-    # [(waypoint id, clearance in metres)] for every point it could
-    # judge. Negative means the point is inside the hill. Points with no
-    # terrain data are simply absent - which is not the same as a
-    # clearance of zero, and must not be shown as one.
-    result_ready = Signal(list)
+    # Two lists. First, [(waypoint id, clearance in metres)] for every
+    # point it could judge. Second, [(from id, to id, worst clearance)]
+    # for every leg between consecutive points. Negative means inside the
+    # hill. Anything with no terrain data is simply absent - which is not
+    # the same as a clearance of zero and must not be shown as one.
+    result_ready = Signal(list, list)
 
     # A waypoint exactly at terrain height is already wrong, so the test
     # is "at or below". This adds nothing on top - no invented safety
@@ -412,6 +413,19 @@ class WaypointTerrainWorker(QThread):
     CLEARANCE_M = 0.0
 
     POLL_INTERVAL_S = 0.25
+
+    # How finely a leg is walked. The terrain postings are 30m apart, so
+    # this looks at roughly every third one - close enough not to step
+    # over a ridge, and cheap because samples inside a tile already held
+    # cost nothing but arithmetic. It is the tile downloads that are
+    # slow, and those depend on how much ground the leg crosses rather
+    # than on how often it is sampled.
+    LEG_STEP_M = 90.0
+
+    # A ceiling on the samples for one leg, so a hundred kilometre leg
+    # does not take a hundred thousand of them. Past this the spacing
+    # simply widens.
+    LEG_MAX_SAMPLES = 400
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -461,9 +475,64 @@ class WaypointTerrainWorker(QThread):
                     clearances.append(
                         (int(wp_id), float(home_alt + rel_alt - ground)))
 
+            legs = []
+            if home_alt is not None and len(points) > 1:
+                for a, b in zip(points, points[1:]):
+                    if not self._running:
+                        break
+                    worst = self._leg_clearance(home_alt, a, b)
+                    if worst is not None:
+                        legs.append((int(a[0]), int(b[0]), worst))
+
             if self._running:
                 self._last_done = req
-                self.result_ready.emit(clearances)
+                self.result_ready.emit(clearances, legs)
+
+    def _leg_clearance(self, home_alt, a, b):
+        """Lowest clearance anywhere along the straight leg from a to b.
+
+        The aircraft's height is taken as a straight line between the two
+        waypoints' altitudes. ArduPlane usually climbs harder than that
+        and reaches the next altitude early, so on a climbing leg this
+        assumes the aeroplane is lower than it will really be - the safe
+        way round. On a descent its glide slope is close to straight, so
+        the two agree.
+
+        None when no part of the leg has terrain data. A leg only
+        partially covered is judged on the part that is: half an answer
+        about real ground beats none.
+        """
+        _ida, lat1, lon1, alt1 = a
+        _idb, lat2, lon2, alt2 = b
+        length = self._haversine_m(lat1, lon1, lat2, lon2)
+        if length < 1.0:
+            return None
+        steps = int(min(self.LEG_MAX_SAMPLES, max(2, length / self.LEG_STEP_M)))
+        worst = None
+        for i in range(steps + 1):
+            if not self._running:
+                break
+            f = i / steps
+            lat = lat1 + (lat2 - lat1) * f
+            lon = lon1 + (lon2 - lon1) * f
+            ground = self._provider.elevation(lat, lon)
+            if ground is None:
+                continue
+            flown = home_alt + alt1 + (alt2 - alt1) * f
+            margin = flown - ground
+            if worst is None or margin < worst:
+                worst = margin
+        return None if worst is None else float(worst)
+
+    @staticmethod
+    def _haversine_m(lat1, lon1, lat2, lon2):
+        r = 6371000.0
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        h = (math.sin(dp / 2) ** 2
+             + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
+        return 2 * r * math.asin(math.sqrt(h))
 
     def stop(self):
         self._running = False

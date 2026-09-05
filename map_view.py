@@ -597,6 +597,39 @@ function refreshWaypointIcons() {
 // live. An empty list clears every warning, which is also what arrives
 // when the answer is not known - so a stale red never outlives the
 // reason for it.
+// Legs whose straight line passes through the ground, drawn as a red
+// overlay on top of the dashed mission line rather than by recolouring
+// it. The mission line is one polyline through every point, so there is
+// no per-leg style to change - and an overlay also leaves the original
+// visible underneath, which keeps the route readable where it is bad.
+var legWarningLayers = [];
+
+function setLegClearances(legs) {
+    for (var i = 0; i < legWarningLayers.length; i++) {
+        map.removeLayer(legWarningLayers[i]);
+    }
+    legWarningLayers = [];
+    if (!legs || !legs.length) { return; }
+
+    var byId = {};
+    for (var j = 0; j < allWaypointLayers.length; j++) {
+        var m = allWaypointLayers[j];
+        if (m && m._wpId) { byId[m._wpId] = m; }
+    }
+    for (var k = 0; k < legs.length; k++) {
+        var fromId = legs[k][0], toId = legs[k][1], worst = legs[k][2];
+        if (worst > 0) { continue; }
+        var a = byId[fromId], b = byId[toId];
+        if (!a || !b) { continue; }
+        var line = L.polyline([a.getLatLng(), b.getLatLng()],
+                              {color: '#d32f2f', weight: 4, opacity: 0.85})
+                    .addTo(map);
+        line.bindTooltip(Math.round(worst) + 'm agl at its worst',
+                         {sticky: true});
+        legWarningLayers.push(line);
+    }
+}
+
 function setWaypointClearances(pairs) {
     var byId = {};
     for (var i = 0; i < pairs.length; i++) { byId[pairs[i][0]] = pairs[i][1]; }
@@ -1538,6 +1571,7 @@ function commitWaypoints() {
 }
 
 function clearWaypoints() {
+    setLegClearances([]);
     for (var i = 0; i < allWaypointLayers.length; i++) {
         map.removeLayer(allWaypointLayers[i]);
     }
@@ -2368,6 +2402,16 @@ class MapView(QWebEngineView):
     def mark_mission_sent(self):
         """The vehicle has accepted the mission: edited altitudes are live."""
         self.page().runJavaScript("markMissionSent();")
+
+    def set_leg_clearances(self, legs):
+        """Worst ground clearance along each leg, as [(from, to, metres)].
+
+        Legs that pass through the ground get a red line drawn over the
+        mission route. An empty list clears them, which is also what
+        arrives when nothing is known.
+        """
+        data = [[int(a), int(b), round(float(m), 1)] for a, b, m in legs]
+        self.page().runJavaScript("setLegClearances(%s);" % json.dumps(data))
 
     def set_waypoint_clearances(self, pairs):
         """Ground clearance per waypoint, as [(id, metres)].

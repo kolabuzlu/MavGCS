@@ -2969,7 +2969,7 @@ class MainWindow(QMainWindow):
         # compared against.
         self._home_alt_amsl = None
         # Remembered so the same warning is not announced on every recheck.
-        self._last_terrain_warning = []
+        self._last_terrain_warning = ([], [])
         self._last_amsl_alt = 0.0
         # True height above the terrain below, from TERRAIN_REPORT. None
         # until the vehicle sends one (it needs terrain data loaded), in
@@ -3311,7 +3311,7 @@ class MainWindow(QMainWindow):
         worker skips a request identical to the one it just answered.
         """
         points = []
-        for wp in self._waypoint_queue + self._sent_mission:
+        for wp in self._mission_points():
             alt = wp["alt"]
             if alt is None:
                 alt = self._mission_default_alt
@@ -3322,7 +3322,24 @@ class MainWindow(QMainWindow):
             points.append((wp["id"], wp["lat"], wp["lon"], float(alt)))
         self.wp_terrain_worker.check(self._home_alt_amsl, points)
 
-    def on_wp_terrain_result(self, clearances):
+    def _mission_points(self):
+        """The mission in flight order, each point once.
+
+        _sent_mission holds the very same dicts as _waypoint_queue once a
+        mission has been started, so running the two together lists every
+        point twice. That was merely wasteful while each point was judged
+        on its own; for the legs between them it would invent one from
+        the last waypoint back to the first.
+        """
+        seen, ordered = set(), []
+        for wp in self._waypoint_queue + self._sent_mission:
+            if wp["id"] in seen:
+                continue
+            seen.add(wp["id"])
+            ordered.append(wp)
+        return ordered
+
+    def on_wp_terrain_result(self, clearances, legs):
         """Ground clearance for each waypoint the terrain is known under.
 
         The map is given every figure, not only the failures: knowing a
@@ -3331,14 +3348,26 @@ class MainWindow(QMainWindow):
         subtraction.
         """
         self.map_view.set_waypoint_clearances(clearances)
+        self.map_view.set_leg_clearances(legs)
+
         bad = [wp_id for wp_id, margin in clearances if margin <= 0.0]
-        if bad and bad != self._last_terrain_warning:
-            worst = min(margin for _id, margin in clearances if margin <= 0.0)
-            self.on_command_feedback(
-                "%d waypoint%s at or below the terrain (worst %.0f m under)"
-                % (len(bad), "" if len(bad) == 1 else "s", abs(worst))
-            )
-        self._last_terrain_warning = bad
+        bad_legs = [(a, b) for a, b, margin in legs if margin <= 0.0]
+        state = (bad, bad_legs)
+        if (bad or bad_legs) and state != self._last_terrain_warning:
+            parts = []
+            if bad:
+                worst = min(m for _i, m in clearances if m <= 0.0)
+                parts.append("%d waypoint%s at or below the terrain "
+                             "(worst %.0f m under)"
+                             % (len(bad), "" if len(bad) == 1 else "s",
+                                abs(worst)))
+            if bad_legs:
+                worst = min(m for _a, _b, m in legs if m <= 0.0)
+                parts.append("%d leg%s cross terrain (worst %.0f m under)"
+                             % (len(bad_legs), "" if len(bad_legs) == 1 else "s",
+                                abs(worst)))
+            self.on_command_feedback(" - ".join(parts))
+        self._last_terrain_warning = state
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
