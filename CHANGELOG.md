@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.0.1 - Ground clearance labels no longer lost to a network blip.
+Bug fixes and improvements.
+
 ## V2.0.0 - MAVLink 2, Geofence and VTOL modes added.
 Bug fixes and improvements.
 

@@ -20,7 +20,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V2.0.0"
+APP_VERSION = "V2.0.1"
 
 import sys
 import os
