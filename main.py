@@ -24,6 +24,11 @@ APP_VERSION = "V1.19.0"
 
 import sys
 import os
+
+# See the note in mavlink_link.py: this must be set before
+# pymavlink is imported anywhere in the process.
+os.environ.setdefault("MAVLINK20", "1")
+
 import math
 import html
 import time

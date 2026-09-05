@@ -6,6 +6,20 @@ Running this on a QThread (instead of the main thread) is important:
 recv_match(blocking=True) would otherwise freeze your whole UI.
 """
 
+# MAVLink 2, chosen before pymavlink is imported because that import is
+# when it picks a dialect and the choice is then fixed for the process.
+#
+# Not a preference. A polygon geofence travels over the mission protocol
+# and is told apart from the flight plan only by the mission_type field,
+# which exists solely in version 2. On a version 1 link that field is not
+# just dropped - the argument slot it would occupy belongs to
+# force_mavlink1 instead, so a fence upload goes out as an ordinary
+# mission and its corners replace the waypoints, silently. ArduPilot has
+# spoken version 2 for years and answers in whichever version it is
+# addressed in.
+import os
+os.environ.setdefault("MAVLINK20", "1")
+
 import time
 import math
 import re
@@ -182,6 +196,14 @@ class MavlinkLink(QThread):
     # GPS, and the systems strip is asked to tell the difference.
     gps_quality_update = Signal(int, int, float)   # fix, sats, hdop
 
+    # Whether the aircraft says its fence is on, read from FENCE_ENABLE
+    # rather than remembered from whatever was last pressed here.
+    fence_enabled_update = Signal(bool)
+
+    # The vehicle accepted a fence, so the map may stop showing it as
+    # pending.
+    fence_uploaded = Signal()
+
     # The five EKF variances, sent apart from the single worst-of figure
     # the HUD flag uses. Buried in that max() a variance can only say the
     # state estimate is unhappy; on their own they say which sensor is
@@ -301,6 +323,13 @@ class MavlinkLink(QThread):
         self._mission_deadline = None  # give up if the vehicle stops responding
         self._mission_restart = True   # False when updating a mission in flight
         self._mission_state = None     # None | 'awaiting_clear_ack' | 'uploading'
+        # Which list the vehicle is being sent: the flight plan or the
+        # fence. They share this one state machine and the same protocol,
+        # separated only by the mission_type field - so every send and
+        # every reply has to agree about which is in flight, or a fence
+        # upload would be answered out of the waypoint list.
+        self._mission_kind = "mission"   # 'mission' | 'fence'
+        self._fence_params = {}          # FENCE_* read once on connect
 
     def run(self):
         try:
@@ -400,6 +429,7 @@ class MavlinkLink(QThread):
                 )
             self.apply_stream_rates()
             self._request_battery_limits()
+            self._request_fence_params()
             if self._want_elevator:
                 self._scan_servo_functions()
                 self._request_pid_mask()
@@ -441,6 +471,7 @@ class MavlinkLink(QThread):
                 self._mission_state = None
                 self._mission_pending = None
                 self._mission_deadline = None
+                self._mission_kind = "mission"
                 self.command_feedback.emit(
                     "Mission upload timed out - no reply from the vehicle. "
                     "Try Start Mission again."
@@ -532,6 +563,14 @@ class MavlinkLink(QThread):
                                      float(msg.throttle))
 
             elif mtype == "MISSION_ACK":
+                # Both lists speak this protocol, so an ACK for the one we
+                # are not uploading is somebody else's business. Older
+                # firmware may omit the field, in which case it means the
+                # flight plan.
+                if (self._mission_state is not None
+                        and getattr(msg, "mission_type", 0)
+                        != self.MISSION_TYPES[self._mission_kind]):
+                    continue
                 if self._mission_state == "awaiting_clear_ack":
                     # Whatever the clear result, proceed to upload - clearing
                     # an already-empty mission can ACK oddly on some
@@ -543,9 +582,17 @@ class MavlinkLink(QThread):
                             self.master.target_system,
                             self.master.target_component,
                             len(self._mission_pending),
+                            **self._mission_type_kwargs(),
                         )
                 elif self._mission_state == "uploading":
-                    if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                    if (msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED
+                            and self._mission_kind == "fence"):
+                        # A fence has no home placeholder to discount, and
+                        # nothing to start: it simply exists once accepted.
+                        self.command_feedback.emit(
+                            f"Fence uploaded ({len(self._mission_pending)} corners)")
+                        self.fence_uploaded.emit()
+                    elif msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
                         n_real_waypoints = len(self._mission_pending) - 1  # exclude home placeholder
                         self.mission_uploaded.emit()
                         if self._mission_restart:
@@ -579,10 +626,13 @@ class MavlinkLink(QThread):
                             result_name = mavutil.mavlink.enums["MAV_MISSION_RESULT"][msg.type].name
                         except (KeyError, AttributeError):
                             result_name = str(msg.type)
-                        self.command_feedback.emit(f"Mission upload failed: {result_name}")
+                        what = "Fence" if self._mission_kind == "fence" else "Mission"
+                        self.command_feedback.emit(
+                            f"{what} upload failed: {result_name}")
                     self._mission_state = None
                     self._mission_pending = None
                     self._mission_deadline = None
+                    self._mission_kind = "mission"
 
             elif mtype in ("MISSION_REQUEST_INT", "MISSION_REQUEST"):
                 # ArduPilot may use either depending on version - handle both.
@@ -590,25 +640,46 @@ class MavlinkLink(QThread):
                     self._mission_state == "uploading"
                     and self._mission_pending is not None
                     and msg.seq < len(self._mission_pending)
+                    and getattr(msg, "mission_type", 0) == self.MISSION_TYPES[self._mission_kind]
                 ):
                     lat, lon, alt = self._mission_pending[msg.seq]
                     # The vehicle is still asking for items, so the upload is
                     # alive however long the whole mission takes.
                     self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
                     with self._send_lock:
-                        self.master.mav.mission_item_int_send(
-                            self.master.target_system,
-                            self.master.target_component,
-                            msg.seq,
-                            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-                            0,  # current
-                            1,  # autocontinue
-                            0, 0, 0, 0,  # param1-4
-                            int(lat * 1e7),
-                            int(lon * 1e7),
-                            float(alt),
-                        )
+                        if self._mission_kind == "fence":
+                            # A fence vertex carries no altitude, and
+                            # param1 is how many corners the polygon has.
+                            # Every vertex states the same total, which is
+                            # how the vehicle knows where the polygon ends.
+                            self.master.mav.mission_item_int_send(
+                                self.master.target_system,
+                                self.master.target_component,
+                                msg.seq,
+                                mavutil.mavlink.MAV_FRAME_GLOBAL,
+                                mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                                0, 1,
+                                float(len(self._mission_pending)),
+                                0, 0, 0,
+                                int(lat * 1e7),
+                                int(lon * 1e7),
+                                0.0,
+                                mavutil.mavlink.MAV_MISSION_TYPE_FENCE,
+                            )
+                        else:
+                            self.master.mav.mission_item_int_send(
+                                self.master.target_system,
+                                self.master.target_component,
+                                msg.seq,
+                                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                                0,  # current
+                                1,  # autocontinue
+                                0, 0, 0, 0,  # param1-4
+                                int(lat * 1e7),
+                                int(lon * 1e7),
+                                float(alt),
+                            )
 
             elif mtype == "STATUSTEXT":
                 text = msg.text
@@ -655,6 +726,11 @@ class MavlinkLink(QThread):
                 elif name == "TRIM_THROTTLE":
                     self._trim_throttle = float(msg.param_value)
                     self.trim_throttle_update.emit(self._trim_throttle)
+                elif name.startswith("FENCE_"):
+                    self._fence_params[name] = float(msg.param_value)
+                    if name == "FENCE_ENABLE":
+                        self.fence_enabled_update.emit(
+                            bool(int(msg.param_value)))
                 elif name in ("BATT_CAPACITY", "BATT_LOW_MAH"):
                     self._batt_params[name] = float(msg.param_value)
                     if "BATT_CAPACITY" in self._batt_params:
@@ -1004,6 +1080,147 @@ class MavlinkLink(QThread):
                         self.master.target_system,
                         self.master.target_component,
                         f"SERVO{n}_FUNCTION".encode(), -1)
+        except Exception:
+            pass
+
+    # A fence travels over the mission protocol, told apart from the
+    # flight plan only by the mission_type field - and that field exists
+    # only in MAVLink 2. On a version 1 link it is not merely dropped:
+    # the third argument of mission_clear_all_send is force_mavlink1
+    # there, so a mission_type passed positionally is silently read as
+    # that flag instead. The upload then goes out as an ordinary mission
+    # and the fence corners overwrite the flight plan, with nothing
+    # anywhere reporting a problem. So it is checked, once, up front.
+    @staticmethod
+    def _mission_type_supported():
+        return "mission_type" in getattr(
+            mavutil.mavlink.MAVLink_mission_item_int_message, "fieldnames", ())
+
+    # Which MAVLink mission list each kind of upload is.
+    MISSION_TYPES = {
+        "mission": mavutil.mavlink.MAV_MISSION_TYPE_MISSION,
+        "fence": mavutil.mavlink.MAV_MISSION_TYPE_FENCE,
+    }
+
+    def _mission_type_kwargs(self):
+        """The mission_type argument, where the link can carry one.
+
+        Passed by keyword, never by position. On a version 1 link the
+        slot a positional would land in is force_mavlink1, so passing a
+        type there sets a completely unrelated flag - and quietly.
+        """
+        if not self._mission_type_supported():
+            return {}
+        return {"mission_type": self.MISSION_TYPES[self._mission_kind]}
+
+    # FENCE_ACTION 1 is RTL on Plane, and bit 2 of FENCE_TYPE is the
+    # inclusion/exclusion polygon fence - both read off ArduPilot's own
+    # parameter definitions rather than guessed.
+    FENCE_ACTION_RTL = 1
+    FENCE_TYPE_POLYGON_BIT = 4
+
+    def upload_fence(self, vertices):
+        """Send a polygon inclusion fence and switch it on.
+
+        Uses the same upload machinery as a mission, told to speak about
+        the fence list instead. The two cannot overlap: whichever is in
+        flight owns the state machine until it finishes or times out.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't upload fence")
+            return
+        if len(vertices) < 3:
+            self.command_feedback.emit(
+                "A fence needs at least three corners")
+            return
+        if not self._mission_type_supported():
+            self.command_feedback.emit(
+                "This link is MAVLink 1, which cannot carry a fence - "
+                "the corners would be uploaded as waypoints and would "
+                "replace the mission. Refusing.")
+            return
+        if self._mission_state is not None:
+            self.command_feedback.emit("An upload is already in progress")
+            return
+
+        # No home placeholder here - that is a flight-plan convention, and
+        # a fence's first item is a real corner.
+        self._mission_pending = [(lat, lon, 0.0) for lat, lon in vertices]
+        self._mission_kind = "fence"
+        self._mission_restart = False
+        self._mission_state = "awaiting_clear_ack"
+        self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
+        self.command_feedback.emit(
+            f"Uploading {len(vertices)}-corner fence...")
+        try:
+            with self._send_lock:
+                self.master.mav.mission_clear_all_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    **self._mission_type_kwargs(),
+                )
+        except Exception as e:
+            self._mission_state = None
+            self._mission_pending = None
+            self._mission_deadline = None
+            self._mission_kind = "mission"
+            self.command_feedback.emit(f"Fence upload failed: {e}")
+
+    def set_fence_enabled(self, on: bool):
+        """Turn the fence on or off, and make sure it is a fence.
+
+        Enabling does three things, because FENCE_ENABLE alone is not
+        enough: the polygon bit has to be set in FENCE_TYPE or the corners
+        are ignored, and FENCE_ACTION decides what a breach does. The
+        polygon bit is added to whatever FENCE_TYPE already holds rather
+        than written over it - an altitude fence somebody set up is not
+        ours to switch off.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't change the fence")
+            return
+        try:
+            with self._send_lock:
+                if on:
+                    known = self._fence_params.get("FENCE_TYPE")
+                    if known is None:
+                        self.command_feedback.emit(
+                            "FENCE_TYPE not read yet - setting polygon only")
+                        want = float(self.FENCE_TYPE_POLYGON_BIT)
+                    else:
+                        want = float(int(known) | self.FENCE_TYPE_POLYGON_BIT)
+                    self._set_param(b"FENCE_TYPE", want)
+                    self._set_param(b"FENCE_ACTION",
+                                    float(self.FENCE_ACTION_RTL))
+                self._set_param(b"FENCE_ENABLE", 1.0 if on else 0.0)
+            self.command_feedback.emit(
+                "Fence enabled - breach action RTL" if on else "Fence disabled")
+        except Exception as e:
+            self.command_feedback.emit(f"Failed to change the fence: {e}")
+
+    def _set_param(self, name: bytes, value: float):
+        """One PARAM_SET. Caller holds the send lock."""
+        self.master.mav.param_set_send(
+            self.master.target_system, self.master.target_component,
+            name, float(value), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+
+    def _request_fence_params(self):
+        """What the aircraft's fence is set to do, before we change it.
+
+        FENCE_TYPE especially: it is a bitmask, and a polygon is only one
+        bit of it. Writing the polygon bit without knowing what else was
+        set would quietly switch off an altitude fence somebody was
+        relying on.
+        """
+        if self.master is None:
+            return
+        self._fence_params.clear()
+        try:
+            with self._send_lock:
+                for name in (b"FENCE_ENABLE", b"FENCE_ACTION", b"FENCE_TYPE"):
+                    self.master.mav.param_request_read_send(
+                        self.master.target_system,
+                        self.master.target_component, name, -1)
         except Exception:
             pass
 
@@ -1368,6 +1585,7 @@ class MavlinkLink(QThread):
                 self.master.mav.mission_clear_all_send(
                     self.master.target_system,
                     self.master.target_component,
+                    **self._mission_type_kwargs(),
                 )
         except Exception as e:
             self._mission_state = None
