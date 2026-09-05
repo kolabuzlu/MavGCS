@@ -45,6 +45,18 @@ LEAFLET_HTML = """
     margin-top: 4px; padding: 4px 10px; cursor: pointer;
     background: #2a6; color: white; border: none; border-radius: 4px;
   }
+  /* The basemap selector expands downwards into the boxes laid over the
+     map. Leaflet parks its control corners at z-index 1000 and every one
+     of those boxes is also 1000, so the tie was broken by document order
+     - and they are all written after the map, so they won and the open
+     selector was covered by Clear Trail and Vectors.
+
+     Lifting the corner rather than the control itself is what actually
+     works: .leaflet-top is positioned and carries its own z-index, so it
+     opens a stacking context its children cannot climb out of, and
+     raising .leaflet-control-layers on its own would do nothing. Only
+     this corner moves, and the selector is the only thing in it. */
+  .leaflet-top.leaflet-right { z-index: 1200; }
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
        same size and position so the two read as one stack of instruments.
