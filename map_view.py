@@ -255,13 +255,25 @@ LEAFLET_HTML = """
 <div id="map"></div>
 <!-- One box, three toggles. They were three separate boxes stacked with
      gaps between them, which read as three unrelated controls rather
-     than as the map's overlay switches. -->
+     than as the map's overlay switches.
+
+     The slot spans the gap between Leaflet's zoom buttons (which end at
+     43px) and the cache panel (which starts at 166px), and centres the
+     box in it. Done this way rather than with a measured left offset so
+     the box stays centred whatever width its widest label happens to
+     render at. It takes no clicks of its own - only the box inside it
+     does - or it would swallow map clicks across that whole strip. -->
+<div id="overlay-slot" style="
+    position: absolute; top: 10px; left: 43px; width: 123px;
+    z-index: 1000; display: flex; justify-content: center;
+    pointer-events: none;
+">
 <div id="overlay-control" style="
-    position: absolute; top: 10px; left: 46px;
     background: rgba(0,0,0,0.6); color: white;
     padding: 5px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 12px;
-    z-index: 1000; display: flex; flex-direction: column; gap: 5px;
+    display: flex; flex-direction: column; gap: 5px;
+    pointer-events: auto;
 ">
     <div style="display: flex; align-items: center; gap: 4px;">
         <input type="checkbox" id="follow-checkbox" checked
@@ -281,6 +293,7 @@ LEAFLET_HTML = """
                style="margin: 0; cursor: pointer;">
         <label for="weather-checkbox" style="cursor: pointer; user-select: none;">Weather</label>
     </div>
+</div>
 </div>
 <div id="zoom-indicator">Z--</div>
 <div id="trail-control" style="
