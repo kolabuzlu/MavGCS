@@ -2486,6 +2486,27 @@ class MessagesPanel(QGroupBox):
             scrollbar.setValue(scrollbar.maximum())
 
 
+def _health_chip(text, top, bottom, edge, foot):
+    """One systems-strip cell: a lit chip standing slightly off the panel.
+
+    The depth is three tricks, because Qt style sheets have no
+    box-shadow: a vertical gradient so the top catches the light, a
+    border a shade brighter than the fill, and a heavier bottom edge
+    standing in for the shadow it would cast. Flat colour read as a
+    label; this reads as something switched on.
+    """
+    return (
+        f"color: {text};"
+        "background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+        f" stop:0 {top}, stop:0.5 {top}, stop:1 {bottom});"
+        f"border: 1px solid {edge};"
+        f"border-bottom: 2px solid {foot};"
+        "border-radius: 5px;"
+        "padding: 3px 0px 2px 0px;"
+        "font-size: 10px; font-weight: bold;"
+    )
+
+
 class SensorHealthPanel(QGroupBox):
     """Every subsystem the autopilot reports on, side by side.
 
@@ -2514,19 +2535,23 @@ class SensorHealthPanel(QGroupBox):
         ("MAV_SYS_STATUS_AHRS", "EKF"),
     ]
 
-    BASE = ("border: 1px solid #3a3d42; border-radius: 3px; "
-            "padding: 3px 0px; font-size: 10px; font-weight: bold;")
     STYLES = {
-        # Not reported as present at all: nothing fitted, or this
-        # autopilot does not say. Dim, because it is not a fault.
-        "absent": BASE + "color: #5c6066; background-color: #1c1e21;",
-        # Fitted but switched off. Cool rather than warm on purpose -
-        # amber is reserved for something actually going wrong, and a
-        # disabled airspeed sensor is a decision, not a warning.
-        "off": BASE + "color: #7d8ea0; background-color: #1a1f24;",
-        "ok": BASE + "color: #5ccf5c; background-color: #172117;",
-        "warn": BASE + "color: #d8a23a; background-color: #241f16;",
-        "failed": BASE + "color: #ff5555; background-color: #2a1616;",
+        # Nothing fitted. The one state drawn sunk rather than raised -
+        # darker at the top, no lit edge - so an empty slot reads as an
+        # absence at a glance rather than as another lamp.
+        "absent": _health_chip("#6a6f76", "#191b1e", "#212429",
+                               "#2b2f34", "#2b2f34"),
+        # Fitted but switched off. Cool, not warm: amber is reserved for
+        # something actually going wrong, and a disabled airspeed sensor
+        # is a decision, not a warning.
+        "off": _health_chip("#93a7bd", "#252d37", "#171c22",
+                            "#3b4855", "#222932"),
+        "ok": _health_chip("#8ff08f", "#1f4026", "#102113",
+                           "#357a41", "#17311d"),
+        "warn": _health_chip("#ffc45e", "#433314", "#291d0b",
+                             "#8a6522", "#3d2c11"),
+        "failed": _health_chip("#ff8b8b", "#451c1c", "#280f0f",
+                               "#8c3030", "#3f1616"),
     }
     TIPS = {
         "absent": "not fitted, or not reported by this autopilot",
