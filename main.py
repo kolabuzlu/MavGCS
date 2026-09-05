@@ -174,6 +174,25 @@ class ReturnHomeEstimator:
     # needs.
     COMFORT_MARGIN = 0.50
 
+    # Everything feeding the ratio moves: the wind estimate wanders, the
+    # airspeed breathes, the current average follows the throttle. Sat on
+    # a threshold, that is enough to flip the verdict every second or two,
+    # and a warning that blinks is one you learn to ignore.
+    #
+    # So a worse verdict is sticky. Climbing back out of it needs the
+    # ratio to clear the threshold by this much, where falling in needed
+    # only to touch it.
+    VERDICT_HYSTERESIS = 0.15
+
+    # And a change has to persist before it is shown. Asymmetric on
+    # purpose: bad news should arrive at once, good news can wait to be
+    # sure of itself.
+    WORSEN_HOLD_S = 1.0
+    IMPROVE_HOLD_S = 5.0
+
+    # Worst to best, for deciding which of the two holds above applies.
+    _SEVERITY = {"no": 0, "marginal": 1, "yes": 2}
+
     def __init__(self):
         self.capacity_mah = None
         self.reserve_mah = 0.0
@@ -184,6 +203,9 @@ class ReturnHomeEstimator:
         self.wind_speed_mps = None
         self.airspeed_mps = None
         self._samples = []          # (monotonic seconds, amps)
+        self._state = None          # the verdict currently being shown
+        self._pending = None        # one waiting out its hold
+        self._pending_since = 0.0
 
     # ---------------------------------------------------------- inputs
 
@@ -276,13 +298,56 @@ class ReturnHomeEstimator:
             return "home", None, self.available_mah()
         need = self.needed_mah()
         have = self.available_mah()
-        if need is None or have is None:
+        if need is None or have is None or need <= 0.0:
+            # Nothing to judge, so nothing to hold on to either - the next
+            # real reading should be believed rather than argued with.
+            self._state = self._pending = None
             return "off", need, have
-        if have >= need * (1.0 + self.COMFORT_MARGIN):
-            return "yes", need, have
-        if have >= need:
-            return "marginal", need, have
-        return "no", need, have
+        return self._settle(have / need), need, have
+
+    def _raw_state(self, ratio):
+        """The verdict this ratio calls for, given the one on show.
+
+        The thresholds are not fixed: leaving a worse verdict costs more
+        than falling into it, which is what stops the two swapping back
+        and forth while the ratio hovers on a line.
+        """
+        ok = 1.0 + self.COMFORT_MARGIN
+        current = self._SEVERITY.get(self._state, -1)
+        # Climbing to a better verdict has to clear the line by the
+        # hysteresis; staying where you are only has to touch it.
+        ok_bar = ok if current >= self._SEVERITY["yes"] else ok + self.VERDICT_HYSTERESIS
+        marginal_bar = (1.0 if current >= self._SEVERITY["marginal"]
+                        else 1.0 + self.VERDICT_HYSTERESIS)
+        if ratio >= ok_bar:
+            return "yes"
+        if ratio >= marginal_bar:
+            return "marginal"
+        return "no"
+
+    def _settle(self, ratio):
+        """Hold a change briefly before showing it."""
+        raw = self._raw_state(ratio)
+        if self._state is None:
+            # First answer of the flight: say it straight away, there is
+            # nothing yet for it to flicker against.
+            self._state = raw
+            self._pending = None
+            return raw
+        now = time.monotonic()
+        if raw == self._state:
+            self._pending = None
+            return self._state
+        if raw != self._pending:
+            self._pending = raw
+            self._pending_since = now
+            return self._state
+        worse = self._SEVERITY[raw] < self._SEVERITY[self._state]
+        hold = self.WORSEN_HOLD_S if worse else self.IMPROVE_HOLD_S
+        if now - self._pending_since >= hold:
+            self._state = raw
+            self._pending = None
+        return self._state
 
 
 class FlightStats:
