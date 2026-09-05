@@ -354,9 +354,10 @@ LEAFLET_HTML = """
     z-index: 1000; pointer-events: none; display: none;
 "></div>
 <div id="eta-readout" style="
-    /* Top of the same left-hand stack: balance at 40, home reach at 109,
-       this above both. */
-    position: absolute; bottom: 136px; left: 8px;
+    /* Top of the same left-hand stack: balance at 40, home reach at 109.
+       That one is two rows and 33px tall, so this sits at 149 to clear
+       it by the same 7px - at the old 136 the two overlapped by six. */
+    position: absolute; bottom: 149px; left: 8px;
     background: rgba(0,0,0,0.6); color: #cfd8e0;
     padding: 4px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 11px; white-space: nowrap;
@@ -1145,15 +1146,23 @@ function setReturnHome(state, text, detail) {
     el.style.display = '';
     // Nodes rather than innerHTML, same as the ETA readout above.
     el.textContent = '';
-    el.appendChild(document.createTextNode('Home Reach : '));
+
+    // Two rows: the verdict, and the arithmetic behind it underneath.
+    // The verdict is what you read at a glance; the mAh are what you
+    // check when it says something you did not expect.
+    var top = document.createElement('div');
+    top.appendChild(document.createTextNode('Home Reach : '));
     var b = document.createElement('b');
     b.textContent = text;
     b.style.color = RTH_COLOURS[state] || '#cfd8e0';
-    el.appendChild(b);
+    top.appendChild(b);
+    el.appendChild(top);
+
     if (detail) {
-        var s = document.createElement('span');
+        var s = document.createElement('div');
         s.style.color = '#9aa6b0';
-        s.textContent = '  ' + detail;
+        s.style.marginTop = '1px';
+        s.textContent = detail;
         el.appendChild(s);
     }
 }
