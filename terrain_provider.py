@@ -393,14 +393,17 @@ class WaypointTerrainWorker(QThread):
     numbers that live in three different places, which is why this is
     worth doing in one spot rather than at each call site.
 
-    Nothing here changes what the aircraft flies. It answers one question
-    for the map: which of these points would put the aeroplane at or
-    below the ground.
+    Nothing here changes what the aircraft flies. It answers one
+    question for the map: how far above the ground each of these points
+    would put the aeroplane, and so which of them would put it inside a
+    hill.
     """
 
-    # ids of the waypoints that fail, and how far below the terrain the
-    # worst of them sits, in metres
-    result_ready = Signal(list, float)
+    # [(waypoint id, clearance in metres)] for every point it could
+    # judge. Negative means the point is inside the hill. Points with no
+    # terrain data are simply absent - which is not the same as a
+    # clearance of zero, and must not be shown as one.
+    result_ready = Signal(list)
 
     # A waypoint exactly at terrain height is already wrong, so the test
     # is "at or below". This adds nothing on top - no invented safety
@@ -441,32 +444,26 @@ class WaypointTerrainWorker(QThread):
                 continue
 
             home_alt, points = req
-            bad, worst = [], 0.0
+            clearances = []
+            # Without home's height above sea level there is nothing to
+            # compare against: a relative altitude alone says nothing
+            # about the ground.
             if home_alt is not None:
                 for wp_id, lat, lon, rel_alt in points:
                     if not self._running:
                         break
                     ground = self._provider.elevation(lat, lon)
                     if ground is None:
-                        # No tile for this spot. Silence rather than a
-                        # guess: an unwarned waypoint reads as "not
-                        # checked", a red one would read as "checked and
-                        # dangerous".
+                        # No tile for this spot. Left out rather than
+                        # guessed at: an unjudged waypoint reads as "not
+                        # checked", where a number would read as known.
                         continue
-                    flown_amsl = home_alt + rel_alt
-                    margin = flown_amsl - ground
-                    if margin <= self.CLEARANCE_M:
-                        bad.append(int(wp_id))
-                        worst = min(worst, margin)
-            else:
-                # Without home's height above sea level there is nothing
-                # to compare against, and a relative altitude alone says
-                # nothing about the ground.
-                bad, worst = [], 0.0
+                    clearances.append(
+                        (int(wp_id), float(home_alt + rel_alt - ground)))
 
             if self._running:
                 self._last_done = req
-                self.result_ready.emit(bad, float(worst))
+                self.result_ready.emit(clearances)
 
     def stop(self):
         self._running = False

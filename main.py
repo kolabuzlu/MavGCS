@@ -3322,15 +3322,23 @@ class MainWindow(QMainWindow):
             points.append((wp["id"], wp["lat"], wp["lon"], float(alt)))
         self.wp_terrain_worker.check(self._home_alt_amsl, points)
 
-    def on_wp_terrain_result(self, bad_ids, worst_margin):
-        self.map_view.set_waypoint_terrain_warnings(bad_ids)
-        if bad_ids and bad_ids != self._last_terrain_warning:
-            n = len(bad_ids)
+    def on_wp_terrain_result(self, clearances):
+        """Ground clearance for each waypoint the terrain is known under.
+
+        The map is given every figure, not only the failures: knowing a
+        point clears by eight metres is worth as much as knowing another
+        one does not clear at all, and both come from the same
+        subtraction.
+        """
+        self.map_view.set_waypoint_clearances(clearances)
+        bad = [wp_id for wp_id, margin in clearances if margin <= 0.0]
+        if bad and bad != self._last_terrain_warning:
+            worst = min(margin for _id, margin in clearances if margin <= 0.0)
             self.on_command_feedback(
                 "%d waypoint%s at or below the terrain (worst %.0f m under)"
-                % (n, "" if n == 1 else "s", abs(worst_margin))
+                % (len(bad), "" if len(bad) == 1 else "s", abs(worst))
             )
-        self._last_terrain_warning = list(bad_ids)
+        self._last_terrain_warning = bad
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)

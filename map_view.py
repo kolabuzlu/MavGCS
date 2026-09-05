@@ -224,6 +224,13 @@ LEAFLET_HTML = """
     text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
     pointer-events: none;
   }
+  .waypoint-icon .wp-agl-label {
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    white-space: nowrap; font-family: sans-serif; font-size: 9px;
+    font-weight: 700; color: #9fd3a0;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
+    pointer-events: none;
+  }
   .adsb-icon .adsb-label {
     position: absolute; top: 34px; left: 50%; transform: translateX(-50%);
     white-space: nowrap; font-family: sans-serif; font-size: 10px;
@@ -544,6 +551,18 @@ function wpAltText(m) {
     return Math.round(a) + 'm' + (wpIsDirty(m) ? ' *' : '');
 }
 
+// How far above the ground a waypoint sits, once Python has worked it
+// out. Blank until then, and blank for a point with no terrain data -
+// which is not the same as a clearance of zero and must not look like
+// one.
+function wpAglText(m) {
+    if (m._clearance === null || m._clearance === undefined) return '';
+    // Negative carries its own minus sign, so both cases read the same
+    // way: the height above the ground, which for a point inside a hill
+    // is simply below zero.
+    return Math.round(m._clearance) + 'm agl';
+}
+
 // An altitude edited since the vehicle last accepted this mission. Until
 // Update is pressed the aircraft will still fly the old figure, so the map
 // must not show the new one as though it were live.
@@ -568,7 +587,7 @@ function refreshWaypointIcons() {
         var m = allWaypointLayers[i];
         if (m && m._wpId) {
             m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
-                                   wpIsDirty(m), !!m._belowTerrain));
+                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m)));
         }
     }
 }
@@ -578,12 +597,22 @@ function refreshWaypointIcons() {
 // live. An empty list clears every warning, which is also what arrives
 // when the answer is not known - so a stale red never outlives the
 // reason for it.
-function setWaypointTerrainWarnings(ids) {
-    var flagged = {};
-    for (var i = 0; i < ids.length; i++) { flagged[ids[i]] = true; }
+function setWaypointClearances(pairs) {
+    var byId = {};
+    for (var i = 0; i < pairs.length; i++) { byId[pairs[i][0]] = pairs[i][1]; }
     for (var j = 0; j < allWaypointLayers.length; j++) {
         var m = allWaypointLayers[j];
-        if (m && m._wpId) { m._belowTerrain = !!flagged[m._wpId]; }
+        if (!m || !m._wpId) { continue; }
+        if (Object.prototype.hasOwnProperty.call(byId, m._wpId)) {
+            m._clearance = byId[m._wpId];
+            m._belowTerrain = m._clearance <= 0;
+        } else {
+            // Not judged this time round - no home altitude, or no
+            // terrain tile. Forget rather than keep: a stale figure is
+            // worse than none.
+            m._clearance = null;
+            m._belowTerrain = false;
+        }
     }
     refreshWaypointIcons();
 }
@@ -621,7 +650,7 @@ function applyWaypointAlt(id) {
         if (m && m._wpId === id) {
             m._wpAlt = v;
             m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
-                                   wpIsDirty(m), !!m._belowTerrain));
+                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m)));
             if (bridge) { bridge.waypointAltChanged(id, v); }
             map.closePopup();
             break;
@@ -872,7 +901,7 @@ function clearHome() {
 // Numbering restarts at 1 for each mission because that is what the
 // vehicle receives - so without a visual difference a map holding two
 // batches shows two markers labelled "1" and no way to tell them apart.
-function waypointIcon(number, sent, altText, dirty, belowTerrain) {
+function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
@@ -885,14 +914,24 @@ function waypointIcon(number, sent, altText, dirty, belowTerrain) {
         border = '#ff8a80';
     }
     var labelColour = belowTerrain ? '#ff8a80' : (dirty ? '#ffc107' : '');
+    // Clearance sits on its own line under the altitude, so the height
+    // asked for and the height above the ground are never mistaken for
+    // one another. The altitude line is lifted to make room for it.
+    var agl = '';
+    if (aglText) {
+        agl = '<div class="wp-agl-label"' +
+              (belowTerrain ? ' style="color:#ff8a80"' : '') + '>' +
+              aglText + '</div>';
+    }
     var label  = altText
         ? '<div class="wp-alt-label"' +
-          (labelColour ? ' style="color:' + labelColour + '"' : '') + '>' +
+          ' style="bottom:' + (aglText ? 36 : 24) + 'px' +
+          (labelColour ? ';color:' + labelColour : '') + '">' +
           altText + '</div>'
         : '';
     return L.divIcon({
         className: 'waypoint-icon',
-        html: label +
+        html: label + agl +
               '<div style="width:22px;height:22px;border-radius:50%;' +
               'background:' + fill + ';color:' + text + ';font-family:sans-serif;' +
               'font-size:12px;font-weight:bold;display:flex;' +
@@ -1487,7 +1526,7 @@ function commitWaypoints() {
         if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
         m._wpSent = true;
         m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m),
-                               wpIsDirty(m), !!m._belowTerrain));
+                               wpIsDirty(m), !!m._belowTerrain, wpAglText(m)));
     }
     // The next batch has no altitude decided yet, so it shows none rather
     // than borrowing this mission's.
@@ -2330,15 +2369,16 @@ class MapView(QWebEngineView):
         """The vehicle has accepted the mission: edited altitudes are live."""
         self.page().runJavaScript("markMissionSent();")
 
-    def set_waypoint_terrain_warnings(self, ids):
-        """Which waypoints sit at or below the ground beneath them.
+    def set_waypoint_clearances(self, pairs):
+        """Ground clearance per waypoint, as [(id, metres)].
 
-        An empty list clears every warning, and is also what arrives when
-        the answer is not known - no home altitude, or no terrain tile -
-        so a red marker never outlives the reason for it.
+        Only the points the terrain is actually known under appear. Any
+        left out have their figure and their warning cleared, so neither
+        a number nor a red marker outlives the reason for it.
         """
+        data = [[int(i), round(float(m), 1)] for i, m in pairs]
         self.page().runJavaScript(
-            "setWaypointTerrainWarnings(%s);" % json.dumps([int(i) for i in ids]))
+            "setWaypointClearances(%s);" % json.dumps(data))
 
     def set_waypoint_default_alt(self, alt: float):
         """So a waypoint with no altitude of its own shows what it will fly."""
