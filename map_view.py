@@ -45,6 +45,24 @@ LEAFLET_HTML = """
     margin-top: 4px; padding: 4px 10px; cursor: pointer;
     background: #2a6; color: white; border: none; border-radius: 4px;
   }
+  /* The Fly To Here bubble, at half opacity so the map shows through it.
+     Deliberately the background alone rather than opacity on the whole
+     bubble: that would take the coordinates and the button down with it,
+     and a position you have to squint at is worse than an opaque box.
+     The tip - the little pointer under the bubble - has to match or it
+     stays a solid white triangle hanging off a see-through box.
+     Scoped by class so the waypoint popups, which hold an input to type
+     an altitude into, keep their solid background. */
+  .flyto-popup .leaflet-popup-content-wrapper,
+  .flyto-popup .leaflet-popup-tip {
+    background: rgba(255, 255, 255, 0.5);
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.25);
+  }
+  /* Leaflet's #333 was picked to sit on solid white. Through a half
+     transparent bubble over dark ground it falls to about 3.7:1, which
+     is thin for a coordinate you are about to fly to. Black takes it
+     back over 6:1 at the same spot and costs nothing on light ground. */
+  .flyto-popup .leaflet-popup-content { color: #000; }
   /* The basemap selector expands downwards into the boxes laid over the
      map. Leaflet parks its control corners at z-index 1000 and every one
      of those boxes is also 1000, so the tie was broken by document order
@@ -1391,7 +1409,7 @@ map.on('click', function(e) {
         '<button class="fly-to-btn" onclick="flyToHere(' + lat + ',' + lon + ')">' +
         'Fly to Here</button>' +
         '</div>';
-    targetMarker.bindPopup(popupHtml).openPopup();
+    targetMarker.bindPopup(popupHtml, {className: 'flyto-popup'}).openPopup();
 
     // Closing a Leaflet popup (its own built-in x button) only hides the
     // popup bubble - it does NOT remove the marker underneath by itself.
