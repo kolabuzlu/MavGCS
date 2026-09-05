@@ -47,8 +47,17 @@ PROVIDERS = {
                "World_Imagery/MapServer/tile/{z}/{y}/{x}",
     "esriref": "https://server.arcgisonline.com/ArcGIS/rest/services/"
                "Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    # Contour lines and hillshading over OSM data. Rendered by a small
+    # volunteer-run service, so the disk cache below is doing it a favour
+    # as much as us - and USER_AGENT matters here for the same reason it
+    # does for OSM.
+    "opentopo": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
 }
-SUBDOMAINS = {"google": ["0", "1", "2", "3"], "osm": ["a", "b", "c"]}
+SUBDOMAINS = {
+    "google": ["0", "1", "2", "3"],
+    "osm": ["a", "b", "c"],
+    "opentopo": ["a", "b", "c"],
+}
 
 # OSM's tile policy expects a real identifying User-Agent.
 USER_AGENT = "MavGCS (https://github.com/kolabuzlu/MavGCS)"

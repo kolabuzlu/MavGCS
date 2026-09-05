@@ -654,6 +654,25 @@ var esriHybridLabels = L.tileLayer(
 );
 var esriWorldImageryHybrid = L.layerGroup([esriWorldImagery, esriHybridLabels]);
 
+// OpenTopoMap: contour lines and hillshading, drawn over the usual OSM
+// roads and place names - a hiking map rather than bare relief.
+//
+// It renders no deeper than zoom 17 where the rest of the map goes to
+// 18. maxNativeZoom stops Leaflet asking for a tile that does not exist
+// and has it stretch the z17 one instead, so the last zoom step goes
+// soft rather than blank. Same treatment the weather radar gets.
+var openTopo = L.tileLayer(
+    TILE_URL + 'opentopo/{z}/{x}/{y}',
+    {
+        minZoom: MIN_ZOOM,
+        maxZoom: MAX_ZOOM,
+        maxNativeZoom: 17,
+        errorTileUrl: TILE_ERROR_IMG,
+        attribution: 'Map data &copy; OpenStreetMap contributors, SRTM | ' +
+                     'Style &copy; OpenTopoMap (CC-BY-SA)',
+    }
+);
+
 // ESRI World Imagery is the layer shown on startup (satellite only - the
 // hybrid variant adds the roads/labels overlay).
 esriWorldImagery.addTo(map);
@@ -663,6 +682,7 @@ L.control.layers(
         'OpenStreetMap': osmStreets,
         'ESRI World Imagery': esriWorldImagery,
         'ESRI World Imagery Hybrid': esriWorldImageryHybrid,
+        'OpenTopoMap': openTopo,
     },
     {},
     { position: 'topright' }
@@ -699,13 +719,15 @@ var TILE_RETRY_MS = 15000;
 function retryFailedTiles() {
     if (!tilesFailed) return;
     tilesFailed = false;   // set again by tileerror if they fail once more
-    [googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels].forEach(function (l) {
+    [googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels,
+     openTopo].forEach(function (l) {
         // redraw() on a layer that isn't currently displayed is a no-op.
         try { l.redraw(); } catch (e) {}
     });
 }
 
-[googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels].forEach(function (l) {
+[googleHybrid, osmStreets, esriWorldImagery, esriHybridLabels,
+ openTopo].forEach(function (l) {
     l.on('tileerror', function () { tilesFailed = true; });
 });
 window.addEventListener('online', retryFailedTiles);
