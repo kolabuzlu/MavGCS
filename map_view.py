@@ -343,21 +343,20 @@ LEAFLET_HTML = """
   </div>
 </div>
 <div id="rth-readout" style="
-    /* Next up the same left-hand stack: balance at 40, ETA at 109, this
-       above both. Same black and the same left edge, so the corner still
-       reads as one column of readouts. */
-    position: absolute; bottom: 136px; left: 8px;
+    /* Directly above the balance indicator, which is 63px tall and sits
+       at 40, so this clears it with a 6px gap. Same left edge and the
+       same black as the credit line, so the corner reads as one stack
+       rather than several unrelated labels. */
+    position: absolute; bottom: 109px; left: 8px;
     background: rgba(0,0,0,0.6); color: #cfd8e0;
     padding: 4px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 11px; white-space: nowrap;
     z-index: 1000; pointer-events: none; display: none;
 "></div>
 <div id="eta-readout" style="
-    /* Directly above the balance indicator, which is 63px tall and sits
-       at 40, so this clears it with a 6px gap. Same left edge and the
-       same black as the credit line, so the corner reads as one stack
-       rather than three unrelated labels. */
-    position: absolute; bottom: 109px; left: 8px;
+    /* Top of the same left-hand stack: balance at 40, home reach at 109,
+       this above both. */
+    position: absolute; bottom: 136px; left: 8px;
     background: rgba(0,0,0,0.6); color: #cfd8e0;
     padding: 4px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 11px; white-space: nowrap;
@@ -1146,7 +1145,7 @@ function setReturnHome(state, text, detail) {
     el.style.display = '';
     // Nodes rather than innerHTML, same as the ETA readout above.
     el.textContent = '';
-    el.appendChild(document.createTextNode('Home : '));
+    el.appendChild(document.createTextNode('Home Reach : '));
     var b = document.createElement('b');
     b.textContent = text;
     b.style.color = RTH_COLOURS[state] || '#cfd8e0';
