@@ -30,4 +30,4 @@ through dates. Restore any of them with:
 | V1.18.0 | `11c696152a` | 2026-09-04 | Darken the wind arrow away from the wind speed text |
 | V1.18.1 | `02f5a73063` | 2026-09-05 | Release V1.18.1 |
 | V1.18.2 | `8a9c3f6105` | 2026-09-05 | Release V1.18.2 |
-| V1.19.0 | `3cbd9d506a` | 2026-09-05 | Say RETURN HOME rather than MARGINAL |
+| V1.19.0 | `17702c6988` | 2026-09-05 | Make the Fly To Here bubble translucent |
