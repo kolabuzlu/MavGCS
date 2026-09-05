@@ -2520,10 +2520,12 @@ class SensorHealthPanel(QGroupBox):
         # Not reported as present at all: nothing fitted, or this
         # autopilot does not say. Dim, because it is not a fault.
         "absent": BASE + "color: #5c6066; background-color: #1c1e21;",
-        # Fitted but switched off. Worth telling apart from broken - a
-        # disabled airspeed sensor is a decision, not a failure.
-        "off": BASE + "color: #d8a23a; background-color: #241f16;",
+        # Fitted but switched off. Cool rather than warm on purpose -
+        # amber is reserved for something actually going wrong, and a
+        # disabled airspeed sensor is a decision, not a warning.
+        "off": BASE + "color: #7d8ea0; background-color: #1a1f24;",
         "ok": BASE + "color: #5ccf5c; background-color: #172117;",
+        "warn": BASE + "color: #d8a23a; background-color: #241f16;",
         "failed": BASE + "color: #ff5555; background-color: #2a1616;",
     }
     TIPS = {
@@ -2542,9 +2544,12 @@ class SensorHealthPanel(QGroupBox):
         for attr, label in self.SENSORS:
             cell = QLabel(label)
             cell.setAlignment(Qt.AlignCenter)
-            cell.setStyleSheet(self.STYLES["absent"])
             row.addWidget(cell, stretch=1)
             self.cells[label] = (getattr(mavutil.mavlink, attr), cell)
+        self._masks = None
+        self._gps_fix = None
+        self._ekf = None
+        self._vibe = None
         self.clear()
         # Whatever height the labels need and not a pixel more: this sits
         # under the messages log, and every row it takes is one that log
@@ -2552,24 +2557,86 @@ class SensorHealthPanel(QGroupBox):
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Fixed)
 
+    # ------------------------------------------------------------ inputs
+
     def set_health(self, present, enabled, health):
-        for label, (bit, cell) in self.cells.items():
-            if not present & bit:
-                state = "absent"
-            elif not enabled & bit:
-                state = "off"
-            elif health & bit:
-                state = "ok"
-            else:
-                state = "failed"
-            cell.setStyleSheet(self.STYLES[state])
-            cell.setToolTip(f"{label} - {self.TIPS[state]}")
+        self._masks = (present, enabled, health)
+        self._apply()
+
+    def set_gps_fix(self, fix_type):
+        self._gps_fix = fix_type
+        self._apply()
+
+    def set_ekf(self, colour):
+        self._ekf = colour
+        self._apply()
+
+    def set_vibe(self, colour):
+        self._vibe = colour
+        self._apply()
 
     def clear(self):
         """Back to unknown, for when there is no aircraft to ask."""
+        self._masks = None
+        self._gps_fix = self._ekf = self._vibe = None
         for label, (_bit, cell) in self.cells.items():
             cell.setStyleSheet(self.STYLES["absent"])
             cell.setToolTip(f"{label} - no telemetry")
+
+    # ------------------------------------------------------------ verdict
+
+    def _base_state(self, bit):
+        present, enabled, health = self._masks
+        if not present & bit:
+            return "absent"
+        if not enabled & bit:
+            return "off"
+        return "ok" if health & bit else "failed"
+
+    def _extra(self, label):
+        """A second opinion, for the cells where one exists.
+
+        SYS_STATUS answers a narrower question than it looks like it
+        does. Its GPS bit says the receiver is talking, and it goes on
+        saying that with the aerial off and no fix at all - which is why
+        disabling the GPS left this green. Where the aircraft sends
+        something sharper, that is used too.
+
+        It can only ever make a cell worse. A good fix cannot argue an
+        unhealthy sensor back to green.
+        """
+        if label == "GPS" and self._gps_fix is not None:
+            if self._gps_fix <= 1:
+                return "failed", "no fix"
+            if self._gps_fix == 2:
+                return "warn", "2D fix only"
+        elif label == "EKF" and self._ekf:
+            if self._ekf == "red":
+                return "failed", "EKF variances high"
+            if self._ekf == "yellow":
+                return "warn", "EKF variances raised"
+        elif label == "ACC" and self._vibe:
+            # Vibration is measured off the accelerometers, so it belongs
+            # to this cell: the sensor is healthy but what it is being
+            # asked to measure through is not.
+            if self._vibe == "red":
+                return "failed", "vibration above 60"
+            if self._vibe == "yellow":
+                return "warn", "vibration above 30"
+        return None
+
+    def _apply(self):
+        if self._masks is None:
+            return
+        for label, (bit, cell) in self.cells.items():
+            state = self._base_state(bit)
+            why = self.TIPS[state]
+            if state == "ok":
+                extra = self._extra(label)
+                if extra:
+                    state, why = extra
+            cell.setStyleSheet(self.STYLES[state])
+            cell.setToolTip(f"{label} - {why}")
 
 
 class GuidedControlPanel(QGroupBox):
@@ -3590,6 +3657,13 @@ class MainWindow(QMainWindow):
     def on_status(self, status_dict):
         for key, value in status_dict.items():
             self.telemetry.set_value(key, value)
+        # The EKF and vibration colours already exist for the HUD flags;
+        # the systems strip takes the same readings so a raised variance
+        # or a shaking airframe shows there too.
+        if "ekf_color" in status_dict:
+            self.sensor_panel.set_ekf(status_dict["ekf_color"])
+        if "vibe_color" in status_dict:
+            self.sensor_panel.set_vibe(status_dict["vibe_color"])
         if "battery_remaining" in status_dict:
             # Already formatted for the telemetry row, and already '--'
             # where the autopilot is not reporting it, so it is carried
@@ -3988,6 +4062,7 @@ class MainWindow(QMainWindow):
         self.link.command_feedback.connect(self.on_command_feedback)
         self.link.status_text_update.connect(self.messages_panel.add_message)
         self.link.sensor_health_update.connect(self.sensor_panel.set_health)
+        self.link.gps_fix_update.connect(self.sensor_panel.set_gps_fix)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
 

@@ -172,6 +172,11 @@ class MavlinkLink(QThread):
     # panel chooses to show, and that belongs with the panel.
     sensor_health_update = Signal(int, int, int)   # present, enabled, health
 
+    # GPS_RAW_INT.fix_type. SYS_STATUS's GPS health bit says the receiver
+    # is talking, which it goes on saying with no fix at all - so the fix
+    # type is the number that actually answers "is the GPS working".
+    gps_fix_update = Signal(int)
+
     # What to ask for, in Hz, for everything the app actually displays.
     # ATTITUDE and GLOBAL_POSITION_INT are left out because the user sets
     # those two: they dominate the budget and they are what the 3D view
@@ -694,6 +699,7 @@ class MavlinkLink(QThread):
                 hdop = "--" if msg.eph == 65535 else f"{msg.eph / 100.0:.2f}"
                 self.status_update.emit({"sat_count": sat_count, "gps_hdop": hdop})
                 self._gps_fix_type = msg.fix_type
+                self.gps_fix_update.emit(int(msg.fix_type))
 
             elif mtype == "EKF_STATUS_REPORT":
                 # Ported from Mission Planner's own CurrentState.cs/HUD.cs
