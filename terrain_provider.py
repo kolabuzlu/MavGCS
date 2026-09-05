@@ -185,6 +185,13 @@ def _decode_tile(raw: bytes) -> _TileData:
     return _TileData(grid, origin_lat, origin_lon, px_lat, px_lon)
 
 
+# How long to leave a tile alone after a fetch that failed for a reason
+# that might not last. Long enough that sampling a leg does not retry it
+# hundreds of times, short enough that the ground appears soon after the
+# network comes back.
+TILE_RETRY_S = 15.0
+
+
 class TerrainProvider:
     """
     Elevation lookups against Copernicus GLO-30 (EGM2008 geoid, ~= MSL - the
@@ -200,14 +207,29 @@ class TerrainProvider:
     def __init__(self):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self._tiles = OrderedDict()  # key -> _TileData, most-recently-used last
-        self._missing = set()  # keys known to not exist (ocean) or that failed to fetch
+        # Two different things that used to share one set. A tile the
+        # server says is not there - ocean, or off the edge of the
+        # dataset - will never be there, and remembering that is free. A
+        # tile we merely failed to fetch says nothing about whether it
+        # exists, and remembering that one permanently is how a single
+        # timeout used to remove that ground for the rest of the session.
+        self._absent = set()        # no such tile, ever
+        self._failed = {}           # key -> when it is worth trying again
 
     def _load_tile(self, key: str):
         if key in self._tiles:
             self._tiles.move_to_end(key)
             return self._tiles[key]
-        if key in self._missing:
+        if key in self._absent:
             return None
+        retry_at = self._failed.get(key)
+        if retry_at is not None:
+            if time.monotonic() < retry_at:
+                # Still cooling off. Returning now matters: a leg is
+                # sampled hundreds of times, and without this every one
+                # of them would sit through its own network timeout.
+                return None
+            del self._failed[key]
 
         path = CACHE_DIR / f"{key}.tif"
         raw = None
@@ -230,20 +252,46 @@ class TerrainProvider:
                     tmp.write_bytes(raw)
                     os.replace(tmp, path)
                     enforce_cache_limit()
-            except (urllib.error.URLError, urllib.error.HTTPError, OSError):
-                self._missing.add(key)
+            except urllib.error.HTTPError as exc:
+                # 404 or 403 from the tile store means there is no such
+                # tile. That will not change; anything else might.
+                if exc.code in (403, 404):
+                    self._absent.add(key)
+                else:
+                    self._failed[key] = time.monotonic() + TILE_RETRY_S
+                return None
+            except (urllib.error.URLError, OSError):
+                # A timeout or a dropped connection. Try again shortly
+                # rather than writing this ground off for good.
+                self._failed[key] = time.monotonic() + TILE_RETRY_S
                 return None
 
         try:
             tile = _decode_tile(raw)
         except Exception:
-            self._missing.add(key)
+            # Corrupt bytes. If they came off the disk, drop the file so
+            # the next attempt fetches it again instead of re-reading the
+            # same broken bytes for ever.
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._failed[key] = time.monotonic() + TILE_RETRY_S
             return None
 
         self._tiles[key] = tile
         while len(self._tiles) > MAX_CACHED_TILES:
             self._tiles.popitem(last=False)
         return tile
+
+    def retry_pending(self):
+        """True while some tile failed in a way that might yet succeed.
+
+        This is the difference between "there is no ground data here"
+        and "we could not get it just now", which is what decides
+        whether asking again is worth anything.
+        """
+        return bool(self._failed)
 
     def elevation(self, lat: float, lon: float):
         """Terrain elevation (m, ~= MSL) at lat/lon, or None if unavailable."""
@@ -427,12 +475,21 @@ class WaypointTerrainWorker(QThread):
     # simply widens.
     LEG_MAX_SAMPLES = 400
 
+    # How long before asking again after an answer that came out short
+    # because a tile could not be fetched. The provider has its own
+    # cooldown, so a pass before that expires costs nothing but the
+    # arithmetic - and once it does expire the ground appears on its own.
+    RETRY_INTERVAL_S = 5.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._running = True
         self._lock = threading.Lock()
         self._request = None        # (home_alt_amsl, [(id, lat, lon, rel_alt)])
         self._last_done = None      # the request last answered, to avoid rework
+        # When to have another go at a request that was answered only in
+        # part. None means the answer was as complete as it will get.
+        self._retry_at = None
         self._provider = TerrainProvider()
 
     def check(self, home_alt_amsl, waypoints):
@@ -448,45 +505,78 @@ class WaypointTerrainWorker(QThread):
         with self._lock:
             self._request = (None, ())
             self._last_done = None
+            self._retry_at = None
 
     def run(self):
         while self._running:
             with self._lock:
                 req = self._request
-            if req is None or req == self._last_done:
+            settled = (req == self._last_done
+                       and (self._retry_at is None
+                            or time.monotonic() < self._retry_at))
+            if req is None or settled:
                 self.msleep(int(self.POLL_INTERVAL_S * 1000))
                 continue
 
-            home_alt, points = req
-            clearances = []
-            # Without home's height above sea level there is nothing to
-            # compare against: a relative altitude alone says nothing
-            # about the ground.
-            if home_alt is not None:
-                for wp_id, lat, lon, rel_alt in points:
-                    if not self._running:
-                        break
-                    ground = self._provider.elevation(lat, lon)
-                    if ground is None:
-                        # No tile for this spot. Left out rather than
-                        # guessed at: an unjudged waypoint reads as "not
-                        # checked", where a number would read as known.
-                        continue
-                    clearances.append(
-                        (int(wp_id), float(home_alt + rel_alt - ground)))
-
-            legs = []
-            if home_alt is not None and len(points) > 1:
-                for a, b in zip(points, points[1:]):
-                    if not self._running:
-                        break
-                    worst = self._leg_clearance(home_alt, a, b)
-                    if worst is not None:
-                        legs.append((int(a[0]), int(b[0]), worst))
-
-            if self._running:
+            try:
+                self._answer(req)
+            except Exception:
+                # Whatever went wrong, this thread must survive it. It is
+                # the only thing that measures ground clearance, and when
+                # it dies the labels simply stop appearing with nothing
+                # to say why - so back off and try the same request
+                # again rather than taking the feature down for the rest
+                # of the session.
                 self._last_done = req
-                self.result_ready.emit(clearances, legs)
+                self._retry_at = time.monotonic() + self.RETRY_INTERVAL_S
+
+    def _answer(self, req):
+        """One pass over a request: judge every point, then every leg."""
+        home_alt, points = req
+        clearances = []
+        # Without home's height above sea level there is nothing to
+        # compare against: a relative altitude alone says nothing
+        # about the ground.
+        if home_alt is not None:
+            for wp_id, lat, lon, rel_alt in points:
+                if not self._running:
+                    break
+                ground = self._provider.elevation(lat, lon)
+                if ground is None:
+                    # No tile for this spot. Left out rather than
+                    # guessed at: an unjudged waypoint reads as "not
+                    # checked", where a number would read as known.
+                    continue
+                clearances.append(
+                    (int(wp_id), float(home_alt + rel_alt - ground)))
+
+        legs = []
+        if home_alt is not None and len(points) > 1:
+            for a, b in zip(points, points[1:]):
+                if not self._running:
+                    break
+                worst = self._leg_clearance(home_alt, a, b)
+                if worst is not None:
+                    legs.append((int(a[0]), int(b[0]), worst))
+
+        if self._running:
+            # An answer is only final when it covered everything
+            # asked about. A request that came out short because a
+            # tile would not download used to be filed as the last
+            # word on it, which left a whole mission with no ground
+            # clearance until the next mission replaced it. Now it is
+            # asked again - but only while the provider says a fetch
+            # might yet succeed, so ground that genuinely has no data
+            # is not chased for ever.
+            complete = (home_alt is not None
+                        and len(clearances) == len(points)
+                        and (len(points) < 2
+                             or len(legs) == len(points) - 1))
+            self._last_done = req
+            self._retry_at = (
+                None if complete or not self._provider.retry_pending()
+                else time.monotonic() + self.RETRY_INTERVAL_S)
+            self.result_ready.emit(clearances, legs)
 
     def _leg_clearance(self, home_alt, a, b):
         """Lowest clearance anywhere along the straight leg from a to b.
