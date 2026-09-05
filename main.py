@@ -4248,9 +4248,13 @@ class MainWindow(QMainWindow):
         """
         self._reset_vehicle_state()
 
+    # The middle state says what to do about it rather than what it is.
+    # "MARGINAL" described the margin; by the time the margin is that
+    # thin the only useful thing the box can say is turn back, so it says
+    # it. The colour is unchanged - amber, not the green of OK.
     RETURN_HOME_TEXT = {
         "yes": "OK",
-        "marginal": "MARGINAL",
+        "marginal": "RETURN HOME",
         "no": "NO",
     }
 
