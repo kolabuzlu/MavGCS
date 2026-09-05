@@ -66,6 +66,16 @@ PLANE_MODES = {
     "AUTOLAND": 26,
     "AUTOTUNE": 8,
     "GUIDED": 15,
+    # QuadPlane modes, offered from the VTOL menu. An airframe with no
+    # VTOL motors simply refuses them, the same as it refuses any other
+    # mode it cannot fly, so they are safe to offer unconditionally.
+    "QSTABILIZE": 17,
+    "QHOVER": 18,
+    "QLOITER": 19,
+    "QLAND": 20,
+    "QRTL": 21,
+    "QAUTOTUNE": 22,
+    "QACRO": 23,
 }
 
 

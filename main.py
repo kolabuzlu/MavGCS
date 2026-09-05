@@ -1369,6 +1369,13 @@ class ModePanel(QGroupBox):
     # 3-column grid), Guided.
     MODE_ORDER = ["MANUAL", "FBWA", "CRUISE", "LOITER", "AUTO", "RTL", "TAKEOFF", "AUTOLAND", "AUTOTUNE", "GUIDED"]
 
+    # The QuadPlane modes, behind one menu rather than seven more buttons.
+    # A tailsitter or a quadplane has these as well as everything above,
+    # and a pure fixed wing has none of them - a menu costs nothing on the
+    # airframes that cannot use it.
+    VTOL_MODES = ["QSTABILIZE", "QHOVER", "QLOITER", "QLAND", "QRTL",
+                  "QAUTOTUNE", "QACRO"]
+
     mode_requested = Signal(str)
     fly_to_requested = Signal()
     abort_landing_requested = Signal()
@@ -1384,6 +1391,27 @@ class ModePanel(QGroupBox):
     # Same weight of colour as RTL's red and the active-mode green, so it
     # reads as one of the panel's coloured controls rather than a sore thumb.
     FLY_TO_STYLE = "background-color: #36a; color: white; font-size: 10px; padding: 3px 4px;"
+    # Light purple, and dark text on it: white on a colour this pale is
+    # barely there. The menu indicator is drawn by the style rather than
+    # painted here, so it takes the same foreground colour.
+    VTOL_STYLE = ("background-color: #b39ddb; color: #241a3a; "
+                  "font-size: 10px; padding: 3px 4px;")
+    # The menu is a child of the button, so without a sheet of its own it
+    # inherits the button's pale purple and becomes unreadable against the
+    # rest of the app. Dark like every other panel, with the purple kept
+    # only as the highlight, which is where it says what the menu belongs
+    # to without having to be the whole background.
+    VTOL_MENU_STYLE = """
+        QMenu {
+            background-color: #2b2f33;
+            color: #e6e6e6;
+            border: 1px solid #b39ddb;
+            font-size: 10px;
+            padding: 2px;
+        }
+        QMenu::item { padding: 4px 16px; }
+        QMenu::item:selected { background-color: #b39ddb; color: #241a3a; }
+    """
 
     def __init__(self, parent=None):
         super().__init__("Flight Mode", parent)
@@ -1419,10 +1447,26 @@ class ModePanel(QGroupBox):
             "Type a coordinate and send the vehicle there in GUIDED mode."
         )
         self.fly_to_btn.clicked.connect(self.fly_to_requested)
-        # Row 3 already holds GUIDED in column 0; this spans the remaining
-        # two so it sits directly under AUTOTUNE without an empty gap.
+
+        # The VTOL menu. Kept out of self.buttons for the same reason as
+        # Fly To: set_active_mode restyles that dictionary wholesale, and
+        # this one carries whichever Q mode is running rather than a mode
+        # of its own.
+        self.vtol_btn = QPushButton("VTOL")
+        self.vtol_btn.setStyleSheet(self.VTOL_STYLE)
+        self.vtol_btn.setToolTip("QuadPlane modes")
+        menu = QMenu(self.vtol_btn)
+        menu.setStyleSheet(self.VTOL_MENU_STYLE)
+        for name in self.VTOL_MODES:
+            menu.addAction(
+                name,
+                lambda checked=False, n=name: self.mode_requested.emit(n))
+        self.vtol_btn.setMenu(menu)
+
+        # Row 3: GUIDED, VTOL, Fly To - one column each.
         last_row = (len(self.MODE_ORDER) - 1) // 3
-        grid.addWidget(self.fly_to_btn, last_row, 1, 1, 2)
+        grid.addWidget(self.vtol_btn, last_row, 1)
+        grid.addWidget(self.fly_to_btn, last_row, 2)
 
     def _autoland_clicked(self):
         """One button, two jobs, decided by what the aircraft is doing.
@@ -1439,6 +1483,13 @@ class ModePanel(QGroupBox):
 
     def set_active_mode(self, mode_name):
         self._landing = mode_name == "AUTOLAND"
+        # The menu button doubles as the indicator for everything under
+        # it: seven modes share one square of panel, so it has to say
+        # which one is running rather than only that one of them is.
+        in_vtol = mode_name in self.VTOL_MODES
+        self.vtol_btn.setText(mode_name if in_vtol else "VTOL")
+        self.vtol_btn.setStyleSheet(
+            self.ACTIVE_STYLE if in_vtol else self.VTOL_STYLE)
         land = self.buttons["AUTOLAND"]
         land.setText(self.ABORT_TEXT if self._landing else "AUTOLAND")
         land.setToolTip(
