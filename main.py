@@ -2528,6 +2528,12 @@ class SensorHealthPanel(QGroupBox):
         "warn": BASE + "color: #d8a23a; background-color: #241f16;",
         "failed": BASE + "color: #ff5555; background-color: #2a1616;",
     }
+    # Mission Planner's own bands for an EKF variance: over 0.5 is
+    # worth a look, over 0.8 means the filter is rejecting the
+    # measurement.
+    VARIANCE_WARN = 0.5
+    VARIANCE_BAD = 0.8
+
     TIPS = {
         "absent": "not fitted, or not reported by this autopilot",
         "off": "fitted but not enabled",
@@ -2550,6 +2556,7 @@ class SensorHealthPanel(QGroupBox):
         self._gps_fix = None
         self._ekf = None
         self._vibe = None
+        self._mag_var = None
         self.clear()
         # Whatever height the labels need and not a pixel more: this sits
         # under the messages log, and every row it takes is one that log
@@ -2575,10 +2582,14 @@ class SensorHealthPanel(QGroupBox):
         self._vibe = colour
         self._apply()
 
+    def set_compass_variance(self, variance):
+        self._mag_var = variance
+        self._apply()
+
     def clear(self):
         """Back to unknown, for when there is no aircraft to ask."""
         self._masks = None
-        self._gps_fix = self._ekf = self._vibe = None
+        self._gps_fix = self._ekf = self._vibe = self._mag_var = None
         for label, (_bit, cell) in self.cells.items():
             cell.setStyleSheet(self.STYLES["absent"])
             cell.setToolTip(f"{label} - no telemetry")
@@ -2615,6 +2626,17 @@ class SensorHealthPanel(QGroupBox):
                 return "failed", "EKF variances high"
             if self._ekf == "yellow":
                 return "warn", "EKF variances raised"
+        elif label == "MAG" and self._mag_var is not None:
+            # The same bands the EKF cell uses, because it is the same
+            # kind of number: how far this sensor is from what the rest
+            # of the estimate expects. A compass fighting the others, or
+            # one deviating on its own, shows here rather than only in
+            # the EKF cell where it cannot be told apart from anything
+            # else going wrong.
+            if self._mag_var > self.VARIANCE_BAD:
+                return "failed", "compass variance high"
+            if self._mag_var > self.VARIANCE_WARN:
+                return "warn", "compass deviating"
         elif label == "ACC" and self._vibe:
             # Vibration is measured off the accelerometers, so it belongs
             # to this cell: the sensor is healthy but what it is being
@@ -4063,6 +4085,8 @@ class MainWindow(QMainWindow):
         self.link.status_text_update.connect(self.messages_panel.add_message)
         self.link.sensor_health_update.connect(self.sensor_panel.set_health)
         self.link.gps_fix_update.connect(self.sensor_panel.set_gps_fix)
+        self.link.compass_variance_update.connect(
+            self.sensor_panel.set_compass_variance)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
 

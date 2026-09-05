@@ -177,6 +177,12 @@ class MavlinkLink(QThread):
     # type is the number that actually answers "is the GPS working".
     gps_fix_update = Signal(int)
 
+    # EKF_STATUS_REPORT.compass_variance on its own. It already feeds the
+    # overall EKF figure through a max(), but buried in there it can only
+    # say the state estimate is unhappy - it cannot say the compass is
+    # why. Sent separately so the MAG cell can answer for itself.
+    compass_variance_update = Signal(float)
+
     # What to ask for, in Hz, for everything the app actually displays.
     # ATTITUDE and GLOBAL_POSITION_INT are left out because the user sets
     # those two: they dominate the budget and they are what the 3D view
@@ -713,6 +719,7 @@ class MavlinkLink(QThread):
                 # is set. MP does NOT check EKF_GPS_GLITCHING/
                 # EKF_CONST_POS_MODE here, despite their names suggesting
                 # otherwise.
+                self.compass_variance_update.emit(float(msg.compass_variance))
                 ekfstatus = max(
                     msg.velocity_variance,
                     msg.compass_variance,
