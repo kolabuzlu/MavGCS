@@ -253,43 +253,36 @@ LEAFLET_HTML = """
 </head>
 <body>
 <div id="map"></div>
-<div id="follow-control" style="
+<!-- One box, three toggles. They were three separate boxes stacked with
+     gaps between them, which read as three unrelated controls rather
+     than as the map's overlay switches. -->
+<div id="overlay-control" style="
     position: absolute; top: 10px; left: 46px;
     background: rgba(0,0,0,0.6); color: white;
-    padding: 4px 8px; border-radius: 4px;
+    padding: 5px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 12px;
-    z-index: 1000; display: flex; align-items: center; gap: 4px;
+    z-index: 1000; display: flex; flex-direction: column; gap: 5px;
 ">
-    <input type="checkbox" id="follow-checkbox" checked
-           onchange="followDrone = this.checked;"
-           style="margin: 0; cursor: pointer;">
-    <label for="follow-checkbox" style="cursor: pointer; user-select: none;">Follow UAV</label>
+    <div style="display: flex; align-items: center; gap: 4px;">
+        <input type="checkbox" id="follow-checkbox" checked
+               onchange="followDrone = this.checked;"
+               style="margin: 0; cursor: pointer;">
+        <label for="follow-checkbox" style="cursor: pointer; user-select: none;">Follow UAV</label>
+    </div>
+    <div style="display: flex; align-items: center; gap: 4px;">
+        <input type="checkbox" id="adsb-checkbox"
+               onchange="setAdsbEnabled(this.checked);"
+               style="margin: 0; cursor: pointer;">
+        <label for="adsb-checkbox" style="cursor: pointer; user-select: none;">ADS-B</label>
+    </div>
+    <div style="display: flex; align-items: center; gap: 4px;">
+        <input type="checkbox" id="weather-checkbox"
+               onchange="setWeatherEnabled(this.checked);"
+               style="margin: 0; cursor: pointer;">
+        <label for="weather-checkbox" style="cursor: pointer; user-select: none;">Weather</label>
+    </div>
 </div>
 <div id="zoom-indicator">Z--</div>
-<div id="adsb-control" style="
-    position: absolute; top: 42px; left: 46px;
-    background: rgba(0,0,0,0.6); color: white;
-    padding: 4px 8px; border-radius: 4px;
-    font-family: sans-serif; font-size: 12px;
-    z-index: 1000; display: flex; align-items: center; gap: 4px;
-">
-    <input type="checkbox" id="adsb-checkbox"
-           onchange="setAdsbEnabled(this.checked);"
-           style="margin: 0; cursor: pointer;">
-    <label for="adsb-checkbox" style="cursor: pointer; user-select: none;">ADS-B</label>
-</div>
-<div id="weather-control" style="
-    position: absolute; top: 74px; left: 46px;
-    background: rgba(0,0,0,0.6); color: white;
-    padding: 4px 8px; border-radius: 4px;
-    font-family: sans-serif; font-size: 12px;
-    z-index: 1000; display: flex; align-items: center; gap: 4px;
-">
-    <input type="checkbox" id="weather-checkbox"
-           onchange="setWeatherEnabled(this.checked);"
-           style="margin: 0; cursor: pointer;">
-    <label for="weather-checkbox" style="cursor: pointer; user-select: none;">Weather</label>
-</div>
 <div id="trail-control" style="
     /* Just past the map/terrain cache panel, which runs from 166px to
        612px (430 wide plus its 8px padding either side). The layer
