@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QRadioButton, QButtonGroup,
 )
 
+from pymavlink import mavutil     # for the SYS_STATUS sensor bit names
 from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
@@ -2451,7 +2452,12 @@ class MessagesPanel(QGroupBox):
         # needed, wasting space the map could have had. Ignoring the
         # vertical hint hands the decision to the stack beside it - this
         # then fills exactly that, no more.
-        self.setMinimumHeight(130)
+        # Lowered from 130 when the systems strip moved in underneath.
+        # The two share this column, and at 130 the log's own floor was
+        # pushing the whole top row down and taking the difference off
+        # the map. Around six lines of log, which is what it showed
+        # before the strip arrived on a smaller window.
+        self.setMinimumHeight(112)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Ignored)
 
@@ -2478,6 +2484,92 @@ class MessagesPanel(QGroupBox):
         # and made selecting text to copy impossible.
         if following:
             scrollbar.setValue(scrollbar.maximum())
+
+
+class SensorHealthPanel(QGroupBox):
+    """Every subsystem the autopilot reports on, side by side.
+
+    SYS_STATUS carries three bitmasks - present, enabled, healthy - and
+    the interesting thing is that they answer different questions. A
+    sensor can be fitted and switched off, or fitted and broken, and
+    those are not the same trouble. Folding them into one green light
+    would throw away the distinction that tells you which.
+
+    So four states rather than two: nothing fitted, fitted but not in
+    use, working, failed. The colours are the same ones the EKF and Vibe
+    flags on the HUD already use, so a red here means what a red there
+    means.
+    """
+
+    # Bit, label. Order is roughly the order they matter on a preflight:
+    # the IMU, then what corrects it, then what it needs to navigate.
+    SENSORS = [
+        ("MAV_SYS_STATUS_SENSOR_3D_GYRO", "GYRO"),
+        ("MAV_SYS_STATUS_SENSOR_3D_ACCEL", "ACC"),
+        ("MAV_SYS_STATUS_SENSOR_3D_MAG", "MAG"),
+        ("MAV_SYS_STATUS_SENSOR_ABSOLUTE_PRESSURE", "BARO"),
+        ("MAV_SYS_STATUS_SENSOR_GPS", "GPS"),
+        ("MAV_SYS_STATUS_SENSOR_LASER_POSITION", "RNGFND"),
+        ("MAV_SYS_STATUS_SENSOR_DIFFERENTIAL_PRESSURE", "PITOT"),
+        ("MAV_SYS_STATUS_AHRS", "EKF"),
+    ]
+
+    BASE = ("border: 1px solid #3a3d42; border-radius: 3px; "
+            "padding: 3px 0px; font-size: 10px; font-weight: bold;")
+    STYLES = {
+        # Not reported as present at all: nothing fitted, or this
+        # autopilot does not say. Dim, because it is not a fault.
+        "absent": BASE + "color: #5c6066; background-color: #1c1e21;",
+        # Fitted but switched off. Worth telling apart from broken - a
+        # disabled airspeed sensor is a decision, not a failure.
+        "off": BASE + "color: #d8a23a; background-color: #241f16;",
+        "ok": BASE + "color: #5ccf5c; background-color: #172117;",
+        "failed": BASE + "color: #ff5555; background-color: #2a1616;",
+    }
+    TIPS = {
+        "absent": "not fitted, or not reported by this autopilot",
+        "off": "fitted but not enabled",
+        "ok": "present, enabled and healthy",
+        "failed": "present and enabled, but reporting unhealthy",
+    }
+
+    def __init__(self, parent=None):
+        super().__init__("Systems", parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 10, 6, 6)
+        row.setSpacing(3)
+        self.cells = {}
+        for attr, label in self.SENSORS:
+            cell = QLabel(label)
+            cell.setAlignment(Qt.AlignCenter)
+            cell.setStyleSheet(self.STYLES["absent"])
+            row.addWidget(cell, stretch=1)
+            self.cells[label] = (getattr(mavutil.mavlink, attr), cell)
+        self.clear()
+        # Whatever height the labels need and not a pixel more: this sits
+        # under the messages log, and every row it takes is one that log
+        # does not get.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Fixed)
+
+    def set_health(self, present, enabled, health):
+        for label, (bit, cell) in self.cells.items():
+            if not present & bit:
+                state = "absent"
+            elif not enabled & bit:
+                state = "off"
+            elif health & bit:
+                state = "ok"
+            else:
+                state = "failed"
+            cell.setStyleSheet(self.STYLES[state])
+            cell.setToolTip(f"{label} - {self.TIPS[state]}")
+
+    def clear(self):
+        """Back to unknown, for when there is no aircraft to ask."""
+        for label, (_bit, cell) in self.cells.items():
+            cell.setStyleSheet(self.STYLES["absent"])
+            cell.setToolTip(f"{label} - no telemetry")
 
 
 class GuidedControlPanel(QGroupBox):
@@ -2655,6 +2747,7 @@ class MainWindow(QMainWindow):
         self.fpv_view = FpvView(_tile_port, load_settings().get("cesium_ion_token", ""))
         self.waypoint_panel = WaypointMissionPanel()
         self.messages_panel = MessagesPanel()
+        self.sensor_panel = SensorHealthPanel()
         self.connection_panel = ConnectionPanel(*self._split_connection_string(connection_string))
         self.status_label = QLabel()
         # True while the feedback line is showing a connection problem that
@@ -2839,8 +2932,17 @@ class MainWindow(QMainWindow):
         top_right_stack.addWidget(self.connection_panel)
         top_right_stack.addWidget(self.waypoint_panel)
 
+        # The messages log with the systems strip beneath it. They share
+        # the width the log used to have on its own, and between them the
+        # height, so the row is no taller than it was and the map keeps
+        # what it had.
+        messages_stack = QVBoxLayout()
+        messages_stack.setSpacing(4)
+        messages_stack.addWidget(self.messages_panel, stretch=1)
+        messages_stack.addWidget(self.sensor_panel)
+
         top_row = QHBoxLayout()
-        top_row.addWidget(self.messages_panel, stretch=3)
+        top_row.addLayout(messages_stack, stretch=3)
         top_row.addLayout(top_right_stack, stretch=1)
         right_layout.addLayout(top_row)
 
@@ -3885,6 +3987,7 @@ class MainWindow(QMainWindow):
         self.link.connection_status.connect(self.on_connection_status)
         self.link.command_feedback.connect(self.on_command_feedback)
         self.link.status_text_update.connect(self.messages_panel.add_message)
+        self.link.sensor_health_update.connect(self.sensor_panel.set_health)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
 
@@ -4024,6 +4127,9 @@ class MainWindow(QMainWindow):
         """
         self._armed = False
         self._ready_to_arm = False
+        # Same reason the EKF and Vibe flags go: a strip of green lights
+        # for sensors nobody can see any more is worse than blank.
+        self.sensor_panel.clear()
         # The estimate is about an aircraft that is still flying. With the
         # link gone the current draw is a stale number that would go on
         # being averaged into a verdict about nothing.

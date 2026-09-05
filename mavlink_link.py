@@ -167,6 +167,11 @@ class MavlinkLink(QThread):
     # telemetry row, but that one is a formatted string.
     home_distance_update = Signal(float)
 
+    # SYS_STATUS's three sensor bitmasks, passed on whole rather than
+    # picked apart here. Which bits matter is a question about what the
+    # panel chooses to show, and that belongs with the panel.
+    sensor_health_update = Signal(int, int, int)   # present, enabled, health
+
     # What to ask for, in Hz, for everything the app actually displays.
     # ATTITUDE and GLOBAL_POSITION_INT are left out because the user sets
     # those two: they dominate the budget and they are what the 3D view
@@ -817,6 +822,11 @@ class MavlinkLink(QThread):
                 ready_to_arm = bool(
                     msg.onboard_control_sensors_present & prearm_bit
                     and msg.onboard_control_sensors_health & prearm_bit
+                )
+                self.sensor_health_update.emit(
+                    int(msg.onboard_control_sensors_present),
+                    int(msg.onboard_control_sensors_enabled),
+                    int(msg.onboard_control_sensors_health),
                 )
                 self.status_update.emit(
                     {
