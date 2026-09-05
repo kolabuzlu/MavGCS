@@ -175,13 +175,16 @@ class MavlinkLink(QThread):
     # GPS_RAW_INT.fix_type. SYS_STATUS's GPS health bit says the receiver
     # is talking, which it goes on saying with no fix at all - so the fix
     # type is the number that actually answers "is the GPS working".
-    gps_fix_update = Signal(int)
+    # Fix type, satellites and HDOP together. A 3D fix on five
+    # satellites with an HDOP of three is a fix, but it is not a healthy
+    # GPS, and the systems strip is asked to tell the difference.
+    gps_quality_update = Signal(int, int, float)   # fix, sats, hdop
 
-    # EKF_STATUS_REPORT.compass_variance on its own. It already feeds the
-    # overall EKF figure through a max(), but buried in there it can only
-    # say the state estimate is unhappy - it cannot say the compass is
-    # why. Sent separately so the MAG cell can answer for itself.
-    compass_variance_update = Signal(float)
+    # The five EKF variances, sent apart from the single worst-of figure
+    # the HUD flag uses. Buried in that max() a variance can only say the
+    # state estimate is unhappy; on their own they say which sensor is
+    # upsetting it. -1 for any the message did not carry.
+    ekf_variances_update = Signal(float, float, float, float, float)
 
     # What to ask for, in Hz, for everything the app actually displays.
     # ATTITUDE and GLOBAL_POSITION_INT are left out because the user sets
@@ -705,7 +708,13 @@ class MavlinkLink(QThread):
                 hdop = "--" if msg.eph == 65535 else f"{msg.eph / 100.0:.2f}"
                 self.status_update.emit({"sat_count": sat_count, "gps_hdop": hdop})
                 self._gps_fix_type = msg.fix_type
-                self.gps_fix_update.emit(int(msg.fix_type))
+                # -1 where the receiver reports the "unknown" sentinel,
+                # so a missing figure is never mistaken for a bad one.
+                self.gps_quality_update.emit(
+                    int(msg.fix_type),
+                    -1 if msg.satellites_visible == 255 else int(msg.satellites_visible),
+                    -1.0 if msg.eph == 65535 else msg.eph / 100.0,
+                )
 
             elif mtype == "EKF_STATUS_REPORT":
                 # Ported from Mission Planner's own CurrentState.cs/HUD.cs
@@ -719,7 +728,11 @@ class MavlinkLink(QThread):
                 # is set. MP does NOT check EKF_GPS_GLITCHING/
                 # EKF_CONST_POS_MODE here, despite their names suggesting
                 # otherwise.
-                self.compass_variance_update.emit(float(msg.compass_variance))
+                self.ekf_variances_update.emit(
+                    float(msg.velocity_variance), float(msg.compass_variance),
+                    float(msg.pos_horiz_variance), float(msg.pos_vert_variance),
+                    float(msg.terrain_alt_variance),
+                )
                 ekfstatus = max(
                     msg.velocity_variance,
                     msg.compass_variance,

@@ -2534,6 +2534,13 @@ class SensorHealthPanel(QGroupBox):
     VARIANCE_WARN = 0.5
     VARIANCE_BAD = 0.8
 
+    # What ArduPilot itself calls a good enough GPS to arm on:
+    # GPS_HDOP_GOOD defaults to 1.4, and the arming check wants six
+    # satellites. A fix that would not pass those is a fix, but it is
+    # not a healthy GPS.
+    HDOP_GOOD = 1.4
+    SATS_GOOD = 6
+
     TIPS = {
         "absent": "not fitted, or not reported by this autopilot",
         "off": "fitted but not enabled",
@@ -2556,7 +2563,9 @@ class SensorHealthPanel(QGroupBox):
         self._gps_fix = None
         self._ekf = None
         self._vibe = None
-        self._mag_var = None
+        self._sats = None
+        self._hdop = None
+        self._var = {}
         self.clear()
         # Whatever height the labels need and not a pixel more: this sits
         # under the messages log, and every row it takes is one that log
@@ -2570,8 +2579,18 @@ class SensorHealthPanel(QGroupBox):
         self._masks = (present, enabled, health)
         self._apply()
 
-    def set_gps_fix(self, fix_type):
+    def set_gps_quality(self, fix_type, sats, hdop):
         self._gps_fix = fix_type
+        # -1 is the link's "the receiver did not say", not a bad value.
+        self._sats = sats if sats >= 0 else None
+        self._hdop = hdop if hdop >= 0 else None
+        self._apply()
+
+    def set_variances(self, velocity, compass, pos_horiz, pos_vert, terrain):
+        self._var = {
+            "MAG": compass, "GPS": pos_horiz,
+            "BARO": pos_vert, "RNGFND": terrain,
+        }
         self._apply()
 
     def set_ekf(self, colour):
@@ -2582,14 +2601,12 @@ class SensorHealthPanel(QGroupBox):
         self._vibe = colour
         self._apply()
 
-    def set_compass_variance(self, variance):
-        self._mag_var = variance
-        self._apply()
-
     def clear(self):
         """Back to unknown, for when there is no aircraft to ask."""
         self._masks = None
-        self._gps_fix = self._ekf = self._vibe = self._mag_var = None
+        self._gps_fix = self._ekf = self._vibe = None
+        self._sats = self._hdop = None
+        self._var = {}
         for label, (_bit, cell) in self.cells.items():
             cell.setStyleSheet(self.STYLES["absent"])
             cell.setToolTip(f"{label} - no telemetry")
@@ -2604,48 +2621,75 @@ class SensorHealthPanel(QGroupBox):
             return "off"
         return "ok" if health & bit else "failed"
 
+    def _variance(self, label):
+        """A cell's own EKF variance, if it has one, as a state."""
+        v = self._var.get(label)
+        if v is None or v < 0:
+            return None
+        if v > self.VARIANCE_BAD:
+            return "failed", f"{label} variance high"
+        if v > self.VARIANCE_WARN:
+            return "warn", f"{label} variance raised"
+        return None
+
     def _extra(self, label):
-        """A second opinion, for the cells where one exists.
+        """A second opinion, for the cells that have one.
 
-        SYS_STATUS answers a narrower question than it looks like it
-        does. Its GPS bit says the receiver is talking, and it goes on
-        saying that with the aerial off and no fix at all - which is why
-        disabling the GPS left this green. Where the aircraft sends
-        something sharper, that is used too.
+        Green is meant to mean nothing is wrong, not merely that the
+        autopilot has not declared the part broken. SYS_STATUS answers
+        the narrower question - is the hardware working - and it goes on
+        answering yes through a GPS with no fix, a compass arguing with
+        its neighbours, and an airframe shaking itself apart. So where
+        the aircraft sends something sharper, that decides too.
 
-        It can only ever make a cell worse. A good fix cannot argue an
+        It can only ever make a cell worse. Good numbers cannot argue an
         unhealthy sensor back to green.
         """
-        if label == "GPS" and self._gps_fix is not None:
-            if self._gps_fix <= 1:
-                return "failed", "no fix"
-            if self._gps_fix == 2:
-                return "warn", "2D fix only"
+        worst = None
+
+        def worse(candidate):
+            nonlocal worst
+            if candidate is None:
+                return
+            order = {"warn": 1, "failed": 2}
+            if worst is None or order[candidate[0]] > order[worst[0]]:
+                worst = candidate
+
+        if label == "GPS":
+            if self._gps_fix is not None:
+                if self._gps_fix <= 1:
+                    worse(("failed", "no fix"))
+                elif self._gps_fix == 2:
+                    worse(("warn", "2D fix only"))
+            if self._sats is not None and self._sats < self.SATS_GOOD:
+                worse(("warn", f"only {self._sats} satellites"))
+            if self._hdop is not None and self._hdop > self.HDOP_GOOD:
+                worse(("warn", f"HDOP {self._hdop:.1f}"))
+            worse(self._variance("GPS"))
+        elif label == "MAG":
+            worse(self._variance("MAG"))
+        elif label == "BARO":
+            worse(self._variance("BARO"))
+        elif label == "RNGFND":
+            worse(self._variance("RNGFND"))
         elif label == "EKF" and self._ekf:
             if self._ekf == "red":
-                return "failed", "EKF variances high"
-            if self._ekf == "yellow":
-                return "warn", "EKF variances raised"
-        elif label == "MAG" and self._mag_var is not None:
-            # The same bands the EKF cell uses, because it is the same
-            # kind of number: how far this sensor is from what the rest
-            # of the estimate expects. A compass fighting the others, or
-            # one deviating on its own, shows here rather than only in
-            # the EKF cell where it cannot be told apart from anything
-            # else going wrong.
-            if self._mag_var > self.VARIANCE_BAD:
-                return "failed", "compass variance high"
-            if self._mag_var > self.VARIANCE_WARN:
-                return "warn", "compass deviating"
+                worse(("failed", "EKF variances high"))
+            elif self._ekf == "yellow":
+                worse(("warn", "EKF variances raised"))
         elif label == "ACC" and self._vibe:
             # Vibration is measured off the accelerometers, so it belongs
             # to this cell: the sensor is healthy but what it is being
             # asked to measure through is not.
             if self._vibe == "red":
-                return "failed", "vibration above 60"
-            if self._vibe == "yellow":
-                return "warn", "vibration above 30"
-        return None
+                worse(("failed", "vibration above 60"))
+            elif self._vibe == "yellow":
+                worse(("warn", "vibration above 30"))
+        # GYRO and PITOT reach here with nothing. Neither the EKF nor any
+        # other message carries a figure for them, so those two cells are
+        # only ever as good as the autopilot's own health bit - worth
+        # knowing when reading the strip.
+        return worst
 
     def _apply(self):
         if self._masks is None:
@@ -4084,9 +4128,8 @@ class MainWindow(QMainWindow):
         self.link.command_feedback.connect(self.on_command_feedback)
         self.link.status_text_update.connect(self.messages_panel.add_message)
         self.link.sensor_health_update.connect(self.sensor_panel.set_health)
-        self.link.gps_fix_update.connect(self.sensor_panel.set_gps_fix)
-        self.link.compass_variance_update.connect(
-            self.sensor_panel.set_compass_variance)
+        self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
+        self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
 
