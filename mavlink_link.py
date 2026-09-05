@@ -153,6 +153,20 @@ class MavlinkLink(QThread):
     # Where home actually is, for the map marker.
     home_position_update = Signal(float, float)  # lat, lon
 
+    # What the pack is doing right now, for the can-I-get-home estimate.
+    # Current is the one that matters: consumed mAh says where you have
+    # been, current says what the trip home will cost per second.
+    battery_power_update = Signal(float, float)   # amps, consumed mAh
+
+    # BATT_CAPACITY and BATT_LOW_MAH, read once on connect. The first is
+    # what the pack holds, the second is the reserve the aircraft will
+    # failsafe on - so arriving with less than that is not arriving.
+    battery_limits_update = Signal(float, float)  # capacity mAh, low mAh
+
+    # Straight-line distance to home in metres. Already computed for the
+    # telemetry row, but that one is a formatted string.
+    home_distance_update = Signal(float)
+
     # What to ask for, in Hz, for everything the app actually displays.
     # ATTITUDE and GLOBAL_POSITION_INT are left out because the user sets
     # those two: they dominate the budget and they are what the 3D view
@@ -248,6 +262,7 @@ class MavlinkLink(QThread):
         self._elevator_trim = None
         self._servo_scan_seen = set()
         self._trim_throttle = None
+        self._batt_params = {}
         self._full_telemetry = full_telemetry
         self._home_lat = None
         # Arming is when ArduPilot sets home, so an arm is the cue to ask
@@ -362,6 +377,7 @@ class MavlinkLink(QThread):
                     0, 0, 0, 0, 0, 0, 0, 0,
                 )
             self.apply_stream_rates()
+            self._request_battery_limits()
             if self._want_elevator:
                 self._scan_servo_functions()
                 self._request_pid_mask()
@@ -480,6 +496,7 @@ class MavlinkLink(QThread):
                 if self._home_lat is not None:
                     dist_home = self._haversine_m(lat, lon, self._home_lat, self._home_lon)
                     self.status_update.emit({"dist_home": f"{dist_home:.2f}"})
+                    self.home_distance_update.emit(dist_home)
                     # Standing on the launch point, "which way is home" has no
                     # answer - the bearing would swing wildly on GPS noise
                     # alone, so the arrow is hidden instead.
@@ -616,6 +633,17 @@ class MavlinkLink(QThread):
                 elif name == "TRIM_THROTTLE":
                     self._trim_throttle = float(msg.param_value)
                     self.trim_throttle_update.emit(self._trim_throttle)
+                elif name in ("BATT_CAPACITY", "BATT_LOW_MAH"):
+                    self._batt_params[name] = float(msg.param_value)
+                    if "BATT_CAPACITY" in self._batt_params:
+                        # LOW_MAH may legitimately be 0 (failsafe off), so
+                        # only capacity is waited for; the reserve then
+                        # defaults to nothing held back, which is what the
+                        # aircraft itself would do.
+                        self.battery_limits_update.emit(
+                            self._batt_params["BATT_CAPACITY"],
+                            self._batt_params.get("BATT_LOW_MAH", 0.0),
+                        )
                 elif name == "GCS_PID_MASK":
                     self._on_pid_mask(int(msg.param_value))
                 elif name.startswith("SERVO"):
@@ -762,10 +790,22 @@ class MavlinkLink(QThread):
                 # and recovers, so it is a poor proxy. -1 means the
                 # autopilot has no current sensor, so there is nothing to
                 # report rather than a misleading zero.
-                if getattr(msg, "current_consumed", -1) >= 0:
+                consumed = getattr(msg, "current_consumed", -1)
+                if consumed >= 0:
                     self.status_update.emit(
-                        {"battery_mah": f"{msg.current_consumed}"}
+                        {"battery_mah": f"{consumed}"}
                     )
+                # currents[0] is the whole-pack draw in centiamps, or -1
+                # where there is no sensor. Both halves are needed before
+                # the estimate means anything, so they travel together.
+                amps = -1.0
+                currents = getattr(msg, "currents", None)
+                if currents:
+                    raw = currents[0]
+                    if raw not in (-1, 32767):     # -1 no sensor, INT16_MAX
+                        amps = raw / 100.0
+                if amps >= 0.0 and consumed >= 0:
+                    self.battery_power_update.emit(amps, float(consumed))
 
             elif mtype == "SYS_STATUS":
                 # MAV_SYS_STATUS_PREARM_CHECK is just another bit in the
@@ -918,6 +958,24 @@ class MavlinkLink(QThread):
                         self.master.target_system,
                         self.master.target_component,
                         f"SERVO{n}_FUNCTION".encode(), -1)
+        except Exception:
+            pass
+
+    def _request_battery_limits(self):
+        """What the pack holds, and what the aircraft calls too low.
+
+        Two reads rather than a parameter list, the same as every other
+        parameter this program wants.
+        """
+        if self.master is None:
+            return
+        self._batt_params.clear()
+        try:
+            with self._send_lock:
+                for name in (b"BATT_CAPACITY", b"BATT_LOW_MAH"):
+                    self.master.mav.param_request_read_send(
+                        self.master.target_system,
+                        self.master.target_component, name, -1)
         except Exception:
             pass
 

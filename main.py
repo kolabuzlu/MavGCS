@@ -116,6 +116,163 @@ def _hms(seconds) -> str:
     return "%02d:%02d:%02d" % (hours, minutes, secs)
 
 
+class ReturnHomeEstimator:
+    """Can the aircraft still reach home on what is left in the pack?
+
+    The naive answer - consumed mAh divided by distance flown, scaled to
+    the distance home - is wrong in a way that flatters the aircraft. The
+    climb out is in that average, loitering contributes consumption but
+    no distance, and neither says anything about the leg home.
+
+    Wind is what actually decides it, and it is the part a pilot is worst
+    at eyeballing. Five kilometres downwind, an eighteen metre a second
+    cruise and a ten metre a second headwind home is a groundspeed of
+    eight: the return takes well over twice as long as the outbound leg
+    that felt fine. So the time home is worked out through the wind
+    triangle from the wind, the bearing home and the current airspeed,
+    including the case where the crosswind alone exceeds the airspeed and
+    the track cannot be held at all.
+
+    Cost is then the trailing average current over that time. Average
+    rather than instantaneous because a single sample swings with every
+    gust and throttle nudge; current rather than consumed-so-far because
+    what matters is the rate the aircraft is burning at now.
+
+    What it does NOT account for, and no caller should pretend otherwise:
+    the climb back to a safe altitude if the aircraft is low, terrain in
+    the way, the circuit and landing at the end, and any change of wind
+    on the way. It answers "does the straight line home fit in what is
+    left", which is a floor, not a promise.
+    """
+
+    # How much recent current draw the average covers. Long enough to
+    # ride out gusts and throttle nudges, short enough to follow a real
+    # change in how hard the aircraft is working.
+    CURRENT_WINDOW_S = 30.0
+
+    # Below this airspeed the wind triangle stops meaning anything, and
+    # on the ground airspeed reads near zero anyway.
+    MIN_AIRSPEED_MPS = 3.0
+
+    # A groundspeed home at or under this is not progress. Guards the
+    # division and the case of being blown backwards.
+    MIN_GROUNDSPEED_MPS = 1.0
+
+    # Nearer than this, the question is not worth asking and the bearing
+    # home is noise.
+    MIN_DISTANCE_M = 50.0
+
+    # Headroom over the estimate before it will say a plain yes. The
+    # estimate is a floor, so an answer with no margin at all should not
+    # read as comfortable.
+    COMFORT_MARGIN = 0.30
+
+    def __init__(self):
+        self.capacity_mah = None
+        self.reserve_mah = 0.0
+        self.consumed_mah = None
+        self.dist_home_m = None
+        self.home_bearing_deg = None
+        self.wind_from_deg = None
+        self.wind_speed_mps = None
+        self.airspeed_mps = None
+        self._samples = []          # (monotonic seconds, amps)
+
+    # ---------------------------------------------------------- inputs
+
+    def set_limits(self, capacity_mah, low_mah):
+        self.capacity_mah = capacity_mah if capacity_mah > 0 else None
+        self.reserve_mah = max(0.0, low_mah)
+
+    def set_power(self, amps, consumed_mah):
+        self.consumed_mah = consumed_mah
+        now = time.monotonic()
+        self._samples.append((now, amps))
+        cutoff = now - self.CURRENT_WINDOW_S
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.pop(0)
+
+    def set_distance(self, metres):
+        self.dist_home_m = metres
+
+    def set_home_bearing(self, deg):
+        # -1 is the "too close to say" sentinel the compass arrow uses.
+        self.home_bearing_deg = deg if deg >= 0 else None
+
+    def set_wind(self, from_deg, speed_mps):
+        self.wind_from_deg = from_deg
+        self.wind_speed_mps = speed_mps
+
+    def set_airspeed(self, mps):
+        self.airspeed_mps = mps
+
+    def reset(self):
+        self.__init__()
+
+    # ------------------------------------------------------------ maths
+
+    def average_amps(self):
+        if not self._samples:
+            return None
+        return sum(a for _, a in self._samples) / len(self._samples)
+
+    def groundspeed_home(self):
+        """Groundspeed the aircraft would make on the bearing home.
+
+        None when it could not hold that track at all - when the
+        crosswind alone matches the airspeed there is no heading that
+        flies the course, and no honest number to report.
+        """
+        v = self.airspeed_mps
+        if v is None or v < self.MIN_AIRSPEED_MPS:
+            return None
+        if (self.home_bearing_deg is None or self.wind_from_deg is None
+                or self.wind_speed_mps is None):
+            return v                    # no wind known: still air is the
+                                        # best guess available
+        delta = math.radians(self.wind_from_deg - self.home_bearing_deg)
+        head = self.wind_speed_mps * math.cos(delta)
+        cross = self.wind_speed_mps * math.sin(delta)
+        if abs(cross) >= v:
+            return None
+        return math.sqrt(v * v - cross * cross) - head
+
+    def needed_mah(self):
+        """What the leg home costs, at the present rate of burn."""
+        amps = self.average_amps()
+        gs = self.groundspeed_home()
+        if amps is None or gs is None or gs < self.MIN_GROUNDSPEED_MPS:
+            return None
+        if self.dist_home_m is None:
+            return None
+        hours = (self.dist_home_m / gs) / 3600.0
+        return amps * hours * 1000.0
+
+    def available_mah(self):
+        """What is left above the reserve the aircraft failsafes on."""
+        if self.capacity_mah is None or self.consumed_mah is None:
+            return None
+        return self.capacity_mah - self.consumed_mah - self.reserve_mah
+
+    def verdict(self):
+        """(state, needed_mah, available_mah).
+
+        state is 'off' when there is not enough to say anything, else
+        'yes', 'marginal' or 'no'.
+        """
+        if self.dist_home_m is not None and self.dist_home_m < self.MIN_DISTANCE_M:
+            return "home", None, None
+        need = self.needed_mah()
+        have = self.available_mah()
+        if need is None or have is None:
+            return "off", need, have
+        if have >= need * (1.0 + self.COMFORT_MARGIN):
+            return "yes", need, have
+        if have >= need:
+            return "marginal", need, have
+        return "no", need, have
+
+
 class FlightStats:
     """Accumulates one flight's numbers, from arming to disarming.
 
@@ -2443,6 +2600,16 @@ class MainWindow(QMainWindow):
         self._flight_start = None
         # Accumulates the numbers reported after landing.
         self._flight_stats = FlightStats()
+        # Can it still get home on what is left in the pack?
+        self._return_home = ReturnHomeEstimator()
+        # The verdict is pushed on a timer rather than on every input.
+        # Its ingredients arrive at four different rates, and recomputing
+        # on each would cross into the map page several times a second to
+        # say the same thing.
+        self._rh_timer = QTimer(self)
+        self._rh_timer.setInterval(1000)
+        self._rh_timer.timeout.connect(self._push_return_home)
+        self._rh_timer.start()
         # Set by the link if this aircraft's elevator cannot be read.
         self._elevator_unavailable = ""
         self._wp_dist = None
@@ -2761,6 +2928,28 @@ class MainWindow(QMainWindow):
 
     def on_home_bearing(self, bearing_deg):
         self.map_view.set_home_bearing(bearing_deg)
+        self._return_home.set_home_bearing(bearing_deg)
+
+    def on_battery_power(self, amps, consumed_mah):
+        self._return_home.set_power(amps, consumed_mah)
+
+    def on_battery_limits(self, capacity_mah, low_mah):
+        self._return_home.set_limits(capacity_mah, low_mah)
+
+    def on_home_distance(self, metres):
+        self._return_home.set_distance(metres)
+
+    def _push_return_home(self):
+        """Hand the map the verdict, once a second."""
+        state, need, have = self._return_home.verdict()
+        if state in ("off", "home"):
+            self.map_view.set_return_home(state, "", "")
+            return
+        self.map_view.set_return_home(
+            state,
+            self.RETURN_HOME_TEXT[state],
+            f"{need:.0f} of {have:.0f} mAh",
+        )
 
     def on_home_position(self, lat, lon):
         self._home_pos = (lat, lon)     # marked in the exported KMZ too
@@ -3134,6 +3323,7 @@ class MainWindow(QMainWindow):
         self.telemetry.set_value("groundspeed", f"{groundspeed:.2f}")
         self.telemetry.set_value("vspeed_mps", f"{climb:.2f}")
         self.horizon.set_airspeed(airspeed)
+        self._return_home.set_airspeed(airspeed)
         if throttle is not None:
             self.horizon.set_throttle(throttle)
         self._last_groundspeed = groundspeed
@@ -3145,6 +3335,7 @@ class MainWindow(QMainWindow):
         self.horizon.set_wind(direction, speed)
         self.map_view.set_wind(direction, speed)
         self._flight_stats.on_wind(speed)
+        self._return_home.set_wind(direction, speed)
         # direction from atan2-based math (WIND_COV path) can come out
         # negative before wrapping - the HUD widget wraps it internally
         # (self.wind_dir = direction_deg % 360), but this text field was
@@ -3585,6 +3776,9 @@ class MainWindow(QMainWindow):
         self.link.trim_throttle_update.connect(self._on_trim_throttle)
         self.link.elevator_status.connect(self._on_elevator_status)
         self.link.vfr_update.connect(self.on_vfr)
+        self.link.battery_power_update.connect(self.on_battery_power)
+        self.link.battery_limits_update.connect(self.on_battery_limits)
+        self.link.home_distance_update.connect(self.on_home_distance)
         self.link.wind_update.connect(self.on_wind)
         self.link.status_update.connect(self.on_status)
         self.link.mission_uploaded.connect(self.on_mission_uploaded)
@@ -3709,6 +3903,12 @@ class MainWindow(QMainWindow):
         """
         self._reset_vehicle_state()
 
+    RETURN_HOME_TEXT = {
+        "yes": "OK",
+        "marginal": "MARGINAL",
+        "no": "NO",
+    }
+
     def _reset_vehicle_state(self):
         """
         Clear the indicators that would be actively wrong once the link is
@@ -3724,6 +3924,11 @@ class MainWindow(QMainWindow):
         """
         self._armed = False
         self._ready_to_arm = False
+        # The estimate is about an aircraft that is still flying. With the
+        # link gone the current draw is a stale number that would go on
+        # being averaged into a verdict about nothing.
+        self._return_home.reset()
+        self.map_view.set_return_home("off", "", "")
         self._update_vehicle_state_label()
         self._set_flight_timer_running(False)
         # A flight is closed off by the disarm arriving over telemetry. If

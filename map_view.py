@@ -342,6 +342,16 @@ LEAFLET_HTML = """
     </div>
   </div>
 </div>
+<div id="rth-readout" style="
+    /* Next up the same left-hand stack: balance at 40, ETA at 109, this
+       above both. Same black and the same left edge, so the corner still
+       reads as one column of readouts. */
+    position: absolute; bottom: 136px; left: 8px;
+    background: rgba(0,0,0,0.6); color: #cfd8e0;
+    padding: 4px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 11px; white-space: nowrap;
+    z-index: 1000; pointer-events: none; display: none;
+"></div>
 <div id="eta-readout" style="
     /* Directly above the balance indicator, which is 63px tall and sits
        at 40, so this clears it with a 6px gap. Same left edge and the
@@ -1112,6 +1122,41 @@ function setEta(label, value) {
     var b = document.createElement('b');
     b.textContent = value;
     el.appendChild(b);
+}
+
+// Green reads as permission, and this is an estimate of a straight line
+// home with nothing spare for the circuit - so even the good answer is
+// the colour of "fine for now", not of "safe".
+var RTH_COLOURS = {
+    'yes': '#8fd98f',
+    'marginal': '#ffd08a',
+    'no': '#ff8a8a'
+};
+
+function setReturnHome(state, text, detail) {
+    var el = document.getElementById('rth-readout');
+    if (!el) { return; }
+    // 'off' is not knowing - no current sensor, no capacity set, no wind
+    // yet. 'home' is being close enough that the question is moot. Both
+    // hide the box: an empty verdict is worse than none.
+    if (state === 'off' || state === 'home' || !text) {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = '';
+    // Nodes rather than innerHTML, same as the ETA readout above.
+    el.textContent = '';
+    el.appendChild(document.createTextNode('Home : '));
+    var b = document.createElement('b');
+    b.textContent = text;
+    b.style.color = RTH_COLOURS[state] || '#cfd8e0';
+    el.appendChild(b);
+    if (detail) {
+        var s = document.createElement('span');
+        s.style.color = '#9aa6b0';
+        s.textContent = '  ' + detail;
+        el.appendChild(s);
+    }
 }
 
 function setCogStatus(state, text, deflection) {
@@ -2120,6 +2165,17 @@ class MapView(QWebEngineView):
         """
         self.page().runJavaScript(
             f"setEta({json.dumps(label)}, {json.dumps(value)});")
+
+    def set_return_home(self, state: str, text: str, detail: str = ""):
+        """Whether the pack still has the leg home in it.
+
+        state is 'yes', 'marginal' or 'no'; 'off' when there is not
+        enough to say, and 'home' when the aircraft is close enough that
+        the question has no meaning. Both of those hide the box.
+        """
+        self.page().runJavaScript(
+            "setReturnHome(%s, %s, %s);"
+            % (json.dumps(state), json.dumps(text), json.dumps(detail)))
 
     def set_cog_status(self, state: str, text: str, deflection: float = 0.0):
         """The live balance indicator above the credit line.
