@@ -1058,10 +1058,16 @@ class ModePanel(QGroupBox):
 
     mode_requested = Signal(str)
     fly_to_requested = Signal()
+    abort_landing_requested = Signal()
 
     NORMAL_STYLE = "font-size: 10px; padding: 3px 4px;"
     ACTIVE_STYLE = "background-color: #2a6; color: white; font-weight: bold; font-size: 10px; padding: 3px 4px;"
     RTL_STYLE = "background-color: #a33; color: white; font-size: 10px; padding: 3px 4px;"
+    # Orange, and not the green every other active mode gets: while this
+    # button is lit it does something different from the label it was
+    # pressed under, and it should not look like the rest of the row.
+    ABORT_STYLE = "background-color: #e07a00; color: white; font-weight: bold; font-size: 10px; padding: 3px 4px;"
+    ABORT_TEXT = "ABORT LANDING"
     # Same weight of colour as RTL's red and the active-mode green, so it
     # reads as one of the panel's coloured controls rather than a sore thumb.
     FLY_TO_STYLE = "background-color: #36a; color: white; font-size: 10px; padding: 3px 4px;"
@@ -1072,10 +1078,18 @@ class ModePanel(QGroupBox):
         grid.setSpacing(4)
         grid.setContentsMargins(6, 10, 6, 6)
         self.buttons = {}
+        # True while the aircraft is actually in AUTOLAND, which is when
+        # that one button stops being a mode request and becomes the way
+        # out of the approach.
+        self._landing = False
         for i, name in enumerate(self.MODE_ORDER):
             btn = QPushButton(name)
             btn.setStyleSheet(self.RTL_STYLE if name == "RTL" else self.NORMAL_STYLE)
-            btn.clicked.connect(lambda checked=False, n=name: self.mode_requested.emit(n))
+            if name == "AUTOLAND":
+                btn.clicked.connect(self._autoland_clicked)
+            else:
+                btn.clicked.connect(
+                    lambda checked=False, n=name: self.mode_requested.emit(n))
             grid.addWidget(btn, i // 3, i % 3)
             self.buttons[name] = btn
 
@@ -1097,9 +1111,34 @@ class ModePanel(QGroupBox):
         last_row = (len(self.MODE_ORDER) - 1) // 3
         grid.addWidget(self.fly_to_btn, last_row, 1, 1, 2)
 
+    def _autoland_clicked(self):
+        """One button, two jobs, decided by what the aircraft is doing.
+
+        Driven by the mode actually reported in telemetry rather than by
+        what was last pressed, so a landing begun from the transmitter or
+        from another GCS still offers the way out, and a request that the
+        aircraft refused never leaves this armed.
+        """
+        if self._landing:
+            self.abort_landing_requested.emit()
+        else:
+            self.mode_requested.emit("AUTOLAND")
+
     def set_active_mode(self, mode_name):
+        self._landing = mode_name == "AUTOLAND"
+        land = self.buttons["AUTOLAND"]
+        land.setText(self.ABORT_TEXT if self._landing else "AUTOLAND")
+        land.setToolTip(
+            "Break off the approach and climb away in "
+            f"{MavlinkLink.ABORT_LANDING_MODE}"
+            if self._landing else "Fly the automatic landing approach"
+        )
         for name, btn in self.buttons.items():
-            if name == mode_name:
+            if name == "AUTOLAND" and self._landing:
+                # Deliberately not the active-mode green. It is in
+                # AUTOLAND, but pressing it now leaves AUTOLAND.
+                btn.setStyleSheet(self.ABORT_STYLE)
+            elif name == mode_name:
                 btn.setStyleSheet(self.ACTIVE_STYLE)
             elif name == "RTL":
                 btn.setStyleSheet(self.RTL_STYLE)
@@ -2611,6 +2650,7 @@ class MainWindow(QMainWindow):
         # after any reconnect (self.link gets replaced with a new
         # instance, but the old binding doesn't follow it).
         self.mode_panel.mode_requested.connect(self.on_mode_requested)
+        self.mode_panel.abort_landing_requested.connect(self.on_abort_landing)
         self.mode_panel.fly_to_requested.connect(self.on_fly_to_latlon)
         self.arm_panel.arm_requested.connect(self.on_arm_requested)
         self.arm_panel.force_disarm_requested.connect(self.on_force_disarm)
@@ -3128,6 +3168,16 @@ class MainWindow(QMainWindow):
         link = self._require_link()
         if link:
             link.set_mode(mode_name)
+
+    def on_abort_landing(self):
+        """Break off an AUTOLAND approach.
+
+        No confirmation dialog, for the same reason the mode buttons have
+        none: this is wanted in a hurry and with one hand.
+        """
+        link = self._require_link()
+        if link:
+            link.abort_landing()
 
     def on_calibration_requested(self):
         link = self._require_link()

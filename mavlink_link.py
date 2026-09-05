@@ -1471,6 +1471,34 @@ class MavlinkLink(QThread):
         except Exception as e:
             self.command_feedback.emit(f"Failed to change mode: {e}")
 
+    # Where an aborted landing goes. RTL climbs to RTL_ALTITUDE and heads
+    # for home or the nearest rally point, which is the behaviour of a
+    # missed approach: get height first. LOITER would circle at whatever
+    # altitude the abort happened at, and on short final that is feet.
+    ABORT_LANDING_MODE = "RTL"
+
+    def abort_landing(self):
+        """Break off an AUTOLAND approach and climb away.
+
+        Not MAV_CMD_DO_GO_AROUND, which is what Mission Planner's Abort
+        Landing button sends. That command reaches ArduPlane's
+        trigger_land_abort(), which returns false unless control_mode is
+        AUTO - so in AUTOLAND it is refused outright and the aeroplane
+        carries on down. ArduPlane's own documentation says as much: the
+        go-around triggers "will only work while in AUTO mode and
+        currently executing a NAV_LAND waypoint mission item", while for
+        AUTOLAND "switching out of AUTOLAND to another mode aborts the
+        landing and returns control to that new mode".
+
+        So the abort is a mode change, which is the sanctioned way, and
+        it is the one thing the firmware is guaranteed to honour.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't abort landing")
+            return
+        self.command_feedback.emit("Aborting landing")
+        self.set_mode(self.ABORT_LANDING_MODE)
+
     @staticmethod
     def _haversine_m(lat1, lon1, lat2, lon2):
         """Great-circle distance in meters between two lat/lon points."""
