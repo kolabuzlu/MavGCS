@@ -355,9 +355,12 @@ LEAFLET_HTML = """
 "></div>
 <div id="eta-readout" style="
     /* Top of the same left-hand stack: balance at 40, home reach at 109.
-       That one is two rows and 33px tall, so this sits at 149 to clear
-       it by the same 7px - at the old 136 the two overlapped by six. */
-    position: absolute; bottom: 149px; left: 8px;
+       That one is three rows and 46px tall, so this sits at 162 to clear
+       it by 7px. Worth remembering that the box below is anchored by its
+       bottom edge, so every row added to it grows upward into this one -
+       both times a row was added, they overlapped by six until this
+       number was moved. */
+    position: absolute; bottom: 162px; left: 8px;
     background: rgba(0,0,0,0.6); color: #cfd8e0;
     padding: 4px 8px; border-radius: 4px;
     font-family: sans-serif; font-size: 11px; white-space: nowrap;
@@ -1133,7 +1136,7 @@ var RTH_COLOURS = {
     'no': '#ff8a8a'
 };
 
-function setReturnHome(state, text, detail) {
+function setReturnHome(state, text, detail, batteryPct) {
     var el = document.getElementById('rth-readout');
     if (!el) { return; }
     // 'off' is not knowing - no current sensor, no capacity set, no wind
@@ -1164,6 +1167,18 @@ function setReturnHome(state, text, detail) {
         s.style.marginTop = '1px';
         s.textContent = detail;
         el.appendChild(s);
+    }
+
+    // The autopilot's own remaining-percent, reported rather than used.
+    // The verdict above is worked out in mAh, which is the unit that
+    // survives a sagging pack; this is here because it is the number
+    // most people have in their head, not because it feeds anything.
+    if (batteryPct) {
+        var p = document.createElement('div');
+        p.style.color = '#9aa6b0';
+        p.style.marginTop = '1px';
+        p.textContent = 'Battery % : ' + batteryPct;
+        el.appendChild(p);
     }
 }
 
@@ -2174,16 +2189,21 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             f"setEta({json.dumps(label)}, {json.dumps(value)});")
 
-    def set_return_home(self, state: str, text: str, detail: str = ""):
+    def set_return_home(self, state: str, text: str, detail: str = "",
+                        battery_pct: str = ""):
         """Whether the pack still has the leg home in it.
 
         state is 'yes', 'marginal' or 'no'; 'off' when there is not
         enough to say, and 'home' when the aircraft is close enough that
         the question has no meaning. Both of those hide the box.
+
+        Three rows: the verdict, the mAh behind it, and the autopilot's
+        own remaining percent - which is shown, not used.
         """
         self.page().runJavaScript(
-            "setReturnHome(%s, %s, %s);"
-            % (json.dumps(state), json.dumps(text), json.dumps(detail)))
+            "setReturnHome(%s, %s, %s, %s);"
+            % (json.dumps(state), json.dumps(text), json.dumps(detail),
+               json.dumps(battery_pct)))
 
     def set_cog_status(self, state: str, text: str, deflection: float = 0.0):
         """The live balance indicator above the credit line.

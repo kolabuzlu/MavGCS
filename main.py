@@ -2602,6 +2602,10 @@ class MainWindow(QMainWindow):
         self._flight_stats = FlightStats()
         # Can it still get home on what is left in the pack?
         self._return_home = ReturnHomeEstimator()
+        # SYS_STATUS's own remaining-percent figure, shown beneath the
+        # verdict. Not an input to it: the estimate works in mAh, which
+        # is the honest unit, while this is the autopilot's own reading.
+        self._battery_pct = "--"
         # The verdict is pushed on a timer rather than on every input.
         # Its ingredients arrive at four different rates, and recomputing
         # on each would cross into the map page several times a second to
@@ -2943,12 +2947,13 @@ class MainWindow(QMainWindow):
         """Hand the map the verdict, once a second."""
         state, need, have = self._return_home.verdict()
         if state in ("off", "home"):
-            self.map_view.set_return_home(state, "", "")
+            self.map_view.set_return_home(state, "", "", "")
             return
         self.map_view.set_return_home(
             state,
             self.RETURN_HOME_TEXT[state],
             f"{need:.0f} of {have:.0f} mAh",
+            self._battery_pct,
         )
 
     def on_home_position(self, lat, lon):
@@ -3393,6 +3398,11 @@ class MainWindow(QMainWindow):
     def on_status(self, status_dict):
         for key, value in status_dict.items():
             self.telemetry.set_value(key, value)
+        if "battery_remaining" in status_dict:
+            # Already formatted for the telemetry row, and already '--'
+            # where the autopilot is not reporting it, so it is carried
+            # through as it stands rather than parsed and reformatted.
+            self._battery_pct = status_dict["battery_remaining"]
         self._flight_stats.on_status(status_dict)
         if "mode" in status_dict:
             self.mode_panel.set_active_mode(status_dict["mode"])
@@ -3928,7 +3938,8 @@ class MainWindow(QMainWindow):
         # link gone the current draw is a stale number that would go on
         # being averaged into a verdict about nothing.
         self._return_home.reset()
-        self.map_view.set_return_home("off", "", "")
+        self._battery_pct = "--"
+        self.map_view.set_return_home("off", "", "", "")
         self._update_vehicle_state_label()
         self._set_flight_timer_running(False)
         # A flight is closed off by the disarm arriving over telemetry. If
