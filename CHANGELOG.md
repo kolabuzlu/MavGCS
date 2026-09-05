@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.0.2 - Geofence state now confirmed by the aircraft.
+Bug fixes and improvements.
+
 ## V2.0.1 - Ground clearance labels no longer lost to a network blip.
 Bug fixes and improvements.
 
