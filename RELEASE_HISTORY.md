@@ -32,3 +32,4 @@ through dates. Restore any of them with:
 | V1.18.2 | `8a9c3f6105` | 2026-09-05 | Release V1.18.2 |
 | V1.19.0 | `f9d7d64395` | 2026-09-05 | Check the legs between waypoints, not only the waypoints |
 | V2.0.0 | `81af4b13d9` | 2026-09-05 | Record V2.0.0 in the release history |
+| V2.0.1 | `e13d646124` | 2026-09-05 | Record V2.0.1 in the release history |
