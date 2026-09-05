@@ -1133,16 +1133,20 @@ function setEta(label, value) {
 var RTH_COLOURS = {
     'yes': '#8fd98f',
     'marginal': '#ffd08a',
-    'no': '#ff8a8a'
+    'no': '#ff8a8a',
+    // Not a verdict. On the ground, or before the numbers arrive, the
+    // box is up but has nothing to say, and grey is the honest colour
+    // for that - anything warmer would read as an answer.
+    'unknown': '#9aa6b0'
 };
 
 function setReturnHome(state, text, detail, batteryPct) {
     var el = document.getElementById('rth-readout');
     if (!el) { return; }
-    // 'off' is not knowing - no current sensor, no capacity set, no wind
-    // yet. 'home' is being close enough that the question is moot. Both
-    // hide the box: an empty verdict is worse than none.
-    if (state === 'off' || state === 'home' || !text) {
+    // Visibility is the caller's decision, carried by an empty text: the
+    // box is up whenever there is an aircraft connected, showing dashes
+    // until it can answer, and down only when there is not.
+    if (!text) {
         el.style.display = 'none';
         return;
     }

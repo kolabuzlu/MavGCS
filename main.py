@@ -268,7 +268,12 @@ class ReturnHomeEstimator:
         'yes', 'marginal' or 'no'.
         """
         if self.dist_home_m is not None and self.dist_home_m < self.MIN_DISTANCE_M:
-            return "home", None, None
+            # No cost to quote for a leg that is not worth flying, but
+            # what is in the pack is still worth showing - it is the same
+            # number the box reports everywhere else, and dropping it
+            # only here made sitting on the strip look like knowing less
+            # than sitting in the hangar.
+            return "home", None, self.available_mah()
         need = self.needed_mah()
         have = self.available_mah()
         if need is None or have is None:
@@ -2951,17 +2956,30 @@ class MainWindow(QMainWindow):
         self._return_home.set_distance(metres)
 
     def _push_return_home(self):
-        """Hand the map the verdict, once a second."""
+        """Hand the map the verdict, once a second.
+
+        The box is up for as long as there is an aircraft on the other
+        end, not only once it can answer. Sitting on the ground it has no
+        verdict to give - no airspeed to fly the wind triangle with, and
+        home is under the wheels - but appearing halfway through a flight
+        is how a readout gets missed. It shows dashes until it knows,
+        which also makes it obvious when something never arrives.
+        """
+        if not self._was_connected:
+            self.map_view.set_return_home("off", "", "", "")
+            return
         state, need, have = self._return_home.verdict()
         if state in ("off", "home"):
-            self.map_view.set_return_home(state, "", "", "")
-            return
+            # Deliberately not one of the three verdict colours: no
+            # judgement has been made, and grey is the honest colour for
+            # that.
+            state, text = "unknown", "--"
+        else:
+            text = self.RETURN_HOME_TEXT[state]
+        need_s = "--" if need is None else f"{need:.0f}"
+        have_s = "--" if have is None else f"{have:.0f}"
         self.map_view.set_return_home(
-            state,
-            self.RETURN_HOME_TEXT[state],
-            f"{need:.0f} of {have:.0f} mAh",
-            self._battery_pct,
-        )
+            state, text, f"{need_s} of {have_s} mAh", self._battery_pct)
 
     def on_home_position(self, lat, lon):
         self._home_pos = (lat, lon)     # marked in the exported KMZ too
