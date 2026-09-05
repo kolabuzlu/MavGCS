@@ -122,6 +122,79 @@ def _hms(seconds) -> str:
     return "%02d:%02d:%02d" % (hours, minutes, secs)
 
 
+def point_in_fence(lat, lon, fence):
+    """Is this point inside the polygon? Ray casting, in plain lat/lon.
+
+    Flat geometry rather than great-circle. Over the few kilometres a
+    fence spans, the error from ignoring the curvature is far smaller
+    than the width of the line the pilot drew with a mouse.
+
+    A fence of fewer than three corners encloses nothing, and everything
+    is reported inside it - there is no boundary to be outside of.
+    """
+    if not fence or len(fence) < 3:
+        return True
+    inside = False
+    n = len(fence)
+    j = n - 1
+    for i in range(n):
+        lat_i, lon_i = fence[i]
+        lat_j, lon_j = fence[j]
+        if (lat_i > lat) != (lat_j > lat):
+            # Longitude where edge i-j crosses this latitude.
+            cross = (lon_j - lon_i) * (lat - lat_i) / (lat_j - lat_i) + lon_i
+            if lon < cross:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _turns(a, b, c):
+    """Sign of the cross product: which way the corner a-b-c bends."""
+    return ((b[1] - a[1]) * (c[0] - a[0])
+            - (b[0] - a[0]) * (c[1] - a[1]))
+
+
+def segments_cross(p1, p2, p3, p4):
+    """Do the two segments cross? Endpoints touching counts as crossing.
+
+    Touching counts because a leg that grazes the fence line has reached
+    the boundary, and the aircraft has no more room than that.
+    """
+    d1, d2 = _turns(p3, p4, p1), _turns(p3, p4, p2)
+    d3, d4 = _turns(p1, p2, p3), _turns(p1, p2, p4)
+    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)):
+        return True
+    # Collinear cases: a zero turn means the point lies on the other
+    # segment's line, so it counts if it also lies within its span.
+    def on(a, b, c):
+        return (min(a[0], b[0]) <= c[0] <= max(a[0], b[0])
+                and min(a[1], b[1]) <= c[1] <= max(a[1], b[1]))
+    return ((d1 == 0 and on(p3, p4, p1)) or (d2 == 0 and on(p3, p4, p2))
+            or (d3 == 0 and on(p1, p2, p3)) or (d4 == 0 and on(p1, p2, p4)))
+
+
+def leg_leaves_fence(a, b, fence):
+    """Does the straight leg from a to b go outside the fence?
+
+    Either end being outside is enough. Both ends inside is not enough
+    on its own: a fence with a notch in it can be left and re-entered
+    between two points that are both comfortably within, so the leg is
+    also tested against every edge.
+    """
+    if not fence or len(fence) < 3:
+        return False
+    if not point_in_fence(a[0], a[1], fence):
+        return True
+    if not point_in_fence(b[0], b[1], fence):
+        return True
+    n = len(fence)
+    for i in range(n):
+        if segments_cross(a, b, fence[i], fence[(i + 1) % n]):
+            return True
+    return False
+
+
 class ReturnHomeEstimator:
     """Can the aircraft still reach home on what is left in the pack?
 
@@ -2975,8 +3048,12 @@ class MainWindow(QMainWindow):
         self._home_alt_amsl = None
         # Corners handed to the aircraft but not yet acknowledged.
         self._pending_fence = []
+        # The fence the aircraft is actually holding, kept so the mission
+        # can be checked against it.
+        self._fence_points = []
         # Remembered so the same warning is not announced on every recheck.
         self._last_terrain_warning = ([], [])
+        self._last_fence_warning = ([], [])
         self._last_amsl_alt = 0.0
         # True height above the terrain below, from TERRAIN_REPORT. None
         # until the vehicle sends one (it needs terrain data loaded), in
@@ -3310,6 +3387,7 @@ class MainWindow(QMainWindow):
         # Every waypoint's clearance is measured from here, so a new home
         # changes all of them.
         self._recheck_waypoint_terrain()
+        self._recheck_fence_containment()
 
     def _recheck_waypoint_terrain(self):
         """Ask whether any waypoint is at or below the ground under it.
@@ -3347,6 +3425,46 @@ class MainWindow(QMainWindow):
             seen.add(wp["id"])
             ordered.append(wp)
         return ordered
+
+    def _recheck_fence_containment(self):
+        """Which waypoints sit outside the fence, and which legs leave it.
+
+        ArduPilot does not do this. Its only fence check on a coordinate
+        is in the reposition handler, which is why Fly To Here is refused
+        outside the fence while an AUTO mission is flown regardless - the
+        firmware treats the fence as a boundary to breach in the air, not
+        as something a mission is measured against. So the mission is
+        measured against it here instead, and the answer is drawn rather
+        than enforced: the aircraft will still fly whatever it is given.
+        """
+        pts = self._mission_points()
+        if not self._fence_points or not pts:
+            self.map_view.set_fence_violations([], [])
+            self._last_fence_warning = ([], [])
+            return
+        outside = [wp["id"] for wp in pts
+                   if not point_in_fence(wp["lat"], wp["lon"],
+                                         self._fence_points)]
+        legs = []
+        for a, b in zip(pts, pts[1:]):
+            if leg_leaves_fence((a["lat"], a["lon"]), (b["lat"], b["lon"]),
+                                self._fence_points):
+                legs.append((a["id"], b["id"]))
+        self.map_view.set_fence_violations(outside, legs)
+        # Every edit to the route runs this again; the message is only
+        # worth repeating when the answer has actually changed.
+        state = (outside, legs)
+        if (outside or legs) and state != self._last_fence_warning:
+            parts = []
+            if outside:
+                parts.append("%d waypoint%s outside the fence"
+                             % (len(outside), "" if len(outside) == 1 else "s"))
+            if legs:
+                parts.append("%d leg%s leaving it"
+                             % (len(legs), "" if len(legs) == 1 else "s"))
+            self.on_command_feedback(
+                "%s - the mission will still fly" % ", ".join(parts))
+        self._last_fence_warning = state
 
     def on_wp_terrain_result(self, clearances, legs):
         """Ground clearance for each waypoint the terrain is known under.
@@ -4071,6 +4189,8 @@ class MainWindow(QMainWindow):
     def on_fence_cleared(self):
         """The fence is discarded on the map, so switch it off as well."""
         self._pending_fence = []
+        self._fence_points = []
+        self._recheck_fence_containment()
         link = self._require_link()
         if link:
             link.set_fence_enabled(False)
@@ -4082,7 +4202,9 @@ class MainWindow(QMainWindow):
             link.set_fence_enabled(True)
         if self._pending_fence:
             self.map_view.set_fence_accepted(self._pending_fence)
+            self._fence_points = self._pending_fence
             self._pending_fence = []
+            self._recheck_fence_containment()
 
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
@@ -4093,6 +4215,7 @@ class MainWindow(QMainWindow):
         )
         self.waypoint_panel.set_count(len(self._waypoint_queue))
         self._recheck_waypoint_terrain()
+        self._recheck_fence_containment()
 
     def on_waypoint_alt_changed(self, wp_id, alt):
         """An altitude typed into a waypoint's popup on the map.
@@ -4113,6 +4236,7 @@ class MainWindow(QMainWindow):
         # The point that moved is not necessarily the only one affected -
         # recheck the lot.
         self._recheck_waypoint_terrain()
+        self._recheck_fence_containment()
 
     def on_clear_waypoints(self):
         self._waypoint_queue = []
@@ -4163,6 +4287,7 @@ class MainWindow(QMainWindow):
         # the default itself is new, so nothing about the old answer
         # holds.
         self._recheck_waypoint_terrain()
+        self._recheck_fence_containment()
         self.waypoint_panel.set_can_update(True)
         # A leftover Fly-to-Here target marker is a separate thing from
         # the waypoint queue - clear it too, since starting a mission

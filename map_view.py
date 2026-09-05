@@ -616,7 +616,8 @@ function refreshWaypointIcons() {
         var m = allWaypointLayers[i];
         if (m && m._wpId) {
             m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
-                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m)));
+                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m),
+                                   !!m._outsideFence));
         }
     }
 }
@@ -632,6 +633,38 @@ function refreshWaypointIcons() {
 // no per-leg style to change - and an overlay also leaves the original
 // visible underneath, which keeps the route readable where it is bad.
 var legWarningLayers = [];
+
+// Waypoints outside the fence, and legs that leave it. ArduPilot flies
+// an AUTO mission without consulting the fence at all, so this is the
+// only warning there is - and it is a warning, not a veto.
+var fenceLegLayers = [];
+
+function setFenceViolations(outsideIds, legs) {
+    var flagged = {};
+    for (var i = 0; i < outsideIds.length; i++) { flagged[outsideIds[i]] = true; }
+    var byId = {};
+    for (var j = 0; j < allWaypointLayers.length; j++) {
+        var m = allWaypointLayers[j];
+        if (m && m._wpId) {
+            m._outsideFence = !!flagged[m._wpId];
+            byId[m._wpId] = m;
+        }
+    }
+    for (var k = 0; k < fenceLegLayers.length; k++) {
+        map.removeLayer(fenceLegLayers[k]);
+    }
+    fenceLegLayers = [];
+    for (var n = 0; n < legs.length; n++) {
+        var a = byId[legs[n][0]], b = byId[legs[n][1]];
+        if (!a || !b) { continue; }
+        var line = L.polyline([a.getLatLng(), b.getLatLng()],
+                              {color: '#ef6c00', weight: 4, opacity: 0.8,
+                               dashArray: '10,6'}).addTo(map);
+        line.bindTooltip('leaves the geofence', {sticky: true});
+        fenceLegLayers.push(line);
+    }
+    refreshWaypointIcons();
+}
 
 function setLegClearances(legs) {
     for (var i = 0; i < legWarningLayers.length; i++) {
@@ -712,7 +745,8 @@ function applyWaypointAlt(id) {
         if (m && m._wpId === id) {
             m._wpAlt = v;
             m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
-                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m)));
+                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m),
+                                   !!m._outsideFence));
             if (bridge) { bridge.waypointAltChanged(id, v); }
             map.closePopup();
             break;
@@ -963,19 +997,29 @@ function clearHome() {
 // Numbering restarts at 1 for each mission because that is what the
 // vehicle receives - so without a visual difference a map holding two
 // batches shows two markers labelled "1" and no way to tell them apart.
-function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText) {
+function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
+                      outsideFence) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
+    // Outside the fence: the fence's own orange, so the warning points
+    // at the thing that caused it rather than being a second kind of
+    // red to work out.
+    if (outsideFence) {
+        fill = '#ef6c00';
+        text = 'white';
+        border = '#ffcc80';
+    }
     // At or below the ground beneath it. Red wins over both the sent and
-    // unsent colours - which of those it is matters far less than the
-    // fact that the aeroplane would be flown into a hill.
+    // unsent colours, and over the fence - a fence breach turns the
+    // aeroplane round, where a hill does not.
     if (belowTerrain) {
         fill = '#d32f2f';
         text = 'white';
         border = '#ff8a80';
     }
-    var labelColour = belowTerrain ? '#ff8a80' : (dirty ? '#ffc107' : '');
+    var labelColour = belowTerrain ? '#ff8a80'
+                    : (outsideFence ? '#ffcc80' : (dirty ? '#ffc107' : ''));
     // Clearance sits on its own line under the altitude, so the height
     // asked for and the height above the ground are never mistaken for
     // one another. The altitude line is lifted to make room for it.
@@ -1677,7 +1721,8 @@ function commitWaypoints() {
         if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
         m._wpSent = true;
         m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m),
-                               wpIsDirty(m), !!m._belowTerrain, wpAglText(m)));
+                               wpIsDirty(m), !!m._belowTerrain, wpAglText(m),
+                               !!m._outsideFence));
     }
     // The next batch has no altitude decided yet, so it shows none rather
     // than borrowing this mission's.
@@ -1690,6 +1735,7 @@ function commitWaypoints() {
 
 function clearWaypoints() {
     setLegClearances([]);
+    setFenceViolations([], []);
     for (var i = 0; i < allWaypointLayers.length; i++) {
         map.removeLayer(allWaypointLayers[i]);
     }
@@ -2550,6 +2596,18 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             "setFenceAccepted(%s);"
             % json.dumps([[float(a), float(b)] for a, b in points]))
+
+    def set_fence_violations(self, outside_ids, legs):
+        """Waypoints outside the fence, and legs that leave it.
+
+        Empty lists clear both, which is also what arrives when there is
+        no fence - so a warning never outlives the boundary that caused
+        it.
+        """
+        self.page().runJavaScript(
+            "setFenceViolations(%s, %s);"
+            % (json.dumps([int(i) for i in outside_ids]),
+               json.dumps([[int(a), int(b)] for a, b in legs])))
 
     def set_leg_clearances(self, legs):
         """Worst ground clearance along each leg, as [(from, to, metres)].
