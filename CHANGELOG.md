@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V1.19.0 - Systems health panel added.
+## V1.19.0 - Systems Health panel added.
 Bug fixes and improvements.
 
 ## V1.18.2 - Home Reach indicator added.
