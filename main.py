@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QStackedWidget,
     QSizePolicy,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QMenu,
-    QFileDialog, QRadioButton, QButtonGroup,
+    QFileDialog, QRadioButton, QButtonGroup, QStyle, QStyleOptionButton,
 )
 
 from pymavlink import mavutil     # for the SYS_STATUS sensor bit names
@@ -1462,11 +1462,39 @@ class ModePanel(QGroupBox):
                 name,
                 lambda checked=False, n=name: self.mode_requested.emit(n))
         self.vtol_btn.setMenu(menu)
+        self._centre_vtol_label()
 
         # Row 3: GUIDED, VTOL, Fly To - one column each.
         last_row = (len(self.MODE_ORDER) - 1) // 3
         grid.addWidget(self.vtol_btn, last_row, 1)
         grid.addWidget(self.fly_to_btn, last_row, 2)
+
+    def _centre_vtol_label(self):
+        """Put VTOL back in the middle of its own button.
+
+        A button with a menu has the indicator's width taken off the
+        label's rectangle before the text is centred, so the word ends up
+        centred in what is left - half the arrow's width to the left of
+        the button's real centre. Padding the other side by the same
+        amount puts it back. The width is asked of the style rather than
+        assumed, because it is a theme and DPI dependent number.
+        """
+        # The metric is only right once the style has been applied to the
+        # widget: asked before that, it answers for the default style and
+        # comes back several pixels short.
+        self.vtol_btn.ensurePolished()
+        opt = QStyleOptionButton()
+        opt.initFrom(self.vtol_btn)
+        arrow = self.vtol_btn.style().pixelMetric(
+            QStyle.PixelMetric.PM_MenuButtonIndicator, opt, self.vtol_btn)
+        pad = "padding: 3px 4px 3px %dpx;" % (4 + max(0, arrow))
+        base = self.VTOL_STYLE.replace("padding: 3px 4px;", "")
+        active = self.ACTIVE_STYLE.replace("padding: 3px 4px;", "")
+        # Both styles this button wears need it - otherwise the word jumps
+        # sideways the moment a Q mode goes active.
+        self._vtol_rest = base + pad
+        self._vtol_active = active + pad
+        self.vtol_btn.setStyleSheet(self._vtol_rest)
 
     def _autoland_clicked(self):
         """One button, two jobs, decided by what the aircraft is doing.
@@ -1489,7 +1517,7 @@ class ModePanel(QGroupBox):
         in_vtol = mode_name in self.VTOL_MODES
         self.vtol_btn.setText(mode_name if in_vtol else "VTOL")
         self.vtol_btn.setStyleSheet(
-            self.ACTIVE_STYLE if in_vtol else self.VTOL_STYLE)
+            self._vtol_active if in_vtol else self._vtol_rest)
         land = self.buttons["AUTOLAND"]
         land.setText(self.ABORT_TEXT if self._landing else "AUTOLAND")
         land.setToolTip(
