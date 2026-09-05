@@ -163,9 +163,16 @@ class ReturnHomeEstimator:
     MIN_DISTANCE_M = 50.0
 
     # Headroom over the estimate before it will say a plain yes. The
-    # estimate is a floor, so an answer with no margin at all should not
-    # read as comfortable.
-    COMFORT_MARGIN = 0.30
+    # estimate is a floor - it knows nothing of the climb back up, the
+    # circuit, or the wind changing on the way - so an answer with only a
+    # little margin should not read as comfortable.
+    #
+    # Half the trip again, rather than the third it started at: MARGINAL
+    # is the useful state, the one that says start thinking about home,
+    # and it earns its keep by arriving while there is still something to
+    # be done about it. OK on a whisker of margin is the answer nobody
+    # needs.
+    COMFORT_MARGIN = 0.50
 
     def __init__(self):
         self.capacity_mah = None
