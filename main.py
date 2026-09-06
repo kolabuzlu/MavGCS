@@ -1417,6 +1417,75 @@ def format_param_value(value, ptype):
     return text if text not in ("", "-") else "0"
 
 
+class ParamLoadingDialog(QDialog):
+    """Shown while the parameter list is coming in, and blocks the rest.
+
+    Application-modal on purpose: a half-read list is not the vehicle's
+    settings, and letting somebody act on it is worse than making them
+    wait. Cancel is there because the wait is not always short - around
+    1300 parameters is 47 kB, which is nothing over USB and can be most
+    of a minute over a radio that is also carrying telemetry - and being
+    locked out of the controls for that long is its own problem.
+    """
+
+    cancelled = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Parameters")
+        self.setModal(True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        # No close button in the title bar: the way out is Cancel, which
+        # the window knows about.
+        self.setWindowFlags(Qt.WindowType.Dialog
+                            | Qt.WindowType.CustomizeWindowHint
+                            | Qt.WindowType.WindowTitleHint)
+        self.setFixedWidth(320)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(8)
+
+        self.label = QLabel("Please wait, getting parameters.")
+        self.label.setStyleSheet("font-size: 12px;")
+        layout.addWidget(self.label)
+
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)          # until the vehicle says how many
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        layout.addWidget(self.bar)
+
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet("color: #9aa4ad; font-size: 10px;")
+        layout.addWidget(self.count_label)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._cancel)
+        row.addWidget(self.cancel_btn)
+        layout.addLayout(row)
+
+    def set_progress(self, got, total):
+        if total:
+            self.bar.setRange(0, total)
+            self.bar.setValue(got)
+            self.count_label.setText("%d of %d" % (got, total))
+        else:
+            self.count_label.setText("%d so far" % got)
+
+    def _cancel(self):
+        self.cancelled.emit()
+        self.reject()
+
+    def reject(self):
+        # Escape, or the title bar, should mean the same as Cancel rather
+        # than leaving the read running behind a window that has gone.
+        self.cancelled.emit()
+        super().reject()
+
+
 class ParametersDialog(QDialog):
     """The vehicle's parameters, as read from it.
 
@@ -1949,10 +2018,13 @@ class ArmDisarmPanel(QGroupBox):
         # and simply gets less of it - it scrolls when it does not fit, so
         # a long one is still readable, where a fixed share of the row
         # would have been taken from it whether there was a reason or not.
-        self.params_btn = QPushButton("Params")
+        self.params_btn = QPushButton("PARAMS")
+        # Wide enough that the count it grows into - PARAMS 1234/1300 -
+        # does not make the button jump about while the list comes in.
+        self.params_btn.setMinimumWidth(112)
         self.params_btn.setStyleSheet(
             "background-color: #3a4a5a; color: #e6e6e6; "
-            "font-size: 10px; padding: 3px 8px;")
+            "font-size: 10px; font-weight: bold; padding: 3px 8px;")
         self.params_btn.setToolTip("Show the parameters read from the vehicle")
         self.params_btn.clicked.connect(self.params_requested)
         force_row.addWidget(self.params_btn)
@@ -3323,6 +3395,7 @@ class MainWindow(QMainWindow):
         # The vehicle's parameters, and the window showing them.
         self._params = {}
         self._params_dialog = None
+        self._params_loading = None
         self._home_move_timer = None
         # Remembered so the same warning is not announced on every recheck.
         self._last_terrain_warning = ([], [])
@@ -4607,8 +4680,11 @@ class MainWindow(QMainWindow):
 
     def _forget_parameters(self):
         """Drop the list, so nothing on screen outlives the vehicle."""
+        # A modal window waiting on a vehicle that has gone would wait
+        # for ever, with everything else locked out behind it.
+        self._hide_param_loading()
         self._params = {}
-        self.params_btn.setText("Params")
+        self.params_btn.setText("PARAMS")
         if self._params_dialog is not None:
             self._params_dialog.set_params({})
 
@@ -4618,6 +4694,7 @@ class MainWindow(QMainWindow):
             return
         if self._params:
             return          # something already read them
+        self._show_param_loading()
         self.link.request_parameters()
 
     def on_show_parameters(self):
@@ -4636,18 +4713,40 @@ class MainWindow(QMainWindow):
 
     def on_refresh_parameters(self):
         link = self._require_link()
-        if link:
-            link.request_parameters()
+        if not link:
+            return
+        self._show_param_loading()
+        link.request_parameters()
+
+    def _show_param_loading(self):
+        """Put the waiting window up, and keep everything else out."""
+        if self._params_loading is None:
+            self._params_loading = ParamLoadingDialog(self)
+            self._params_loading.cancelled.connect(self.on_cancel_parameters)
+        self._params_loading.set_progress(0, 0)
+        self._params_loading.show()
+        self._params_loading.raise_()
+
+    def _hide_param_loading(self):
+        if self._params_loading is not None:
+            self._params_loading.hide()
+
+    def on_cancel_parameters(self):
+        if self.link is not None:
+            self.link.cancel_parameters()
 
     def on_param_progress(self, got, total):
-        self.params_btn.setText("Params %d/%d" % (got, total) if total
-                                else "Params %d" % got)
+        self.params_btn.setText("PARAMS %d/%d" % (got, total) if total
+                                else "PARAMS %d" % got)
         if self._params_dialog is not None:
             self._params_dialog.set_progress(got, total)
+        if self._params_loading is not None:
+            self._params_loading.set_progress(got, total)
 
     def on_params_ready(self, params):
+        self._hide_param_loading()
         self._params = dict(params)
-        self.params_btn.setText("Params (%d)" % len(self._params))
+        self.params_btn.setText("PARAMS (%d)" % len(self._params))
         if self._params_dialog is not None:
             self._params_dialog.set_params(self._params)
 

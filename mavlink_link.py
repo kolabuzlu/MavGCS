@@ -1643,6 +1643,21 @@ class MavlinkLink(QThread):
             self._param_quiet_at = None
             self.command_feedback.emit(f"Failed to ask for parameters: {e}")
 
+    def cancel_parameters(self):
+        """Stop waiting for the rest of the list.
+
+        The vehicle keeps sending whatever is already in flight - there is
+        no way to tell it to stop - so this only stops us waiting on it.
+        Whatever arrived is kept.
+        """
+        if not self._param_active:
+            return
+        self._param_active = False
+        self._param_quiet_at = None
+        self.command_feedback.emit(
+            "Stopped reading parameters at %d" % len(self._params))
+        self.params_ready.emit(dict(self._params))
+
     def _collect_param(self, name, msg):
         """One parameter off the stream."""
         self._params[name] = (float(msg.param_value), int(msg.param_type))
