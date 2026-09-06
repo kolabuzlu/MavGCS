@@ -1906,6 +1906,7 @@ class ArmDisarmPanel(QGroupBox):
 
     # (arm: bool, force: bool) - ARM path only
     arm_requested = Signal(bool, bool)
+    params_requested = Signal()
     # Fired once, only after a completed hold on DISARM (HOLD_DURATION_MS)
     force_disarm_requested = Signal()
 
@@ -1944,6 +1945,17 @@ class ArmDisarmPanel(QGroupBox):
         self.prearm_label.setStyleSheet("color: #e6a23c; font-size: 10px;")
         self.prearm_label.setMinimumWidth(60)
         force_row.addWidget(self.prearm_label, stretch=1)
+        # At the end of the same row. The pre-arm reason keeps the stretch
+        # and simply gets less of it - it scrolls when it does not fit, so
+        # a long one is still readable, where a fixed share of the row
+        # would have been taken from it whether there was a reason or not.
+        self.params_btn = QPushButton("Params")
+        self.params_btn.setStyleSheet(
+            "background-color: #3a4a5a; color: #e6e6e6; "
+            "font-size: 10px; padding: 3px 8px;")
+        self.params_btn.setToolTip("Show the parameters read from the vehicle")
+        self.params_btn.clicked.connect(self.params_requested)
+        force_row.addWidget(self.params_btn)
         layout.addLayout(force_row)
 
         self.arm_btn.clicked.connect(
@@ -3382,23 +3394,13 @@ class MainWindow(QMainWindow):
         info_col.addWidget(self.command_label)
         info_col.addWidget(self.ack_label)
         info_row.addLayout(info_col, stretch=1)
-        # Flight time with the parameters button under it, in the space
-        # that was empty beside the command and ACK lines.
-        right_col = QVBoxLayout()
-        right_col.setSpacing(4)
-        right_col.addWidget(self.flight_time_label)
-        self.params_btn = QPushButton("Parameters")
-        self.params_btn.setStyleSheet(
-            "background-color: #3a4a5a; color: #e6e6e6; "
-            "font-size: 10px; padding: 3px 4px;")
-        self.params_btn.setToolTip(
-            "Show the parameters read from the vehicle")
-        self.params_btn.clicked.connect(self.on_show_parameters)
-        right_col.addWidget(self.params_btn)
-        info_row.addLayout(right_col)
-        info_row.setAlignment(right_col, Qt.AlignTop)
+        info_row.addWidget(self.flight_time_label, alignment=Qt.AlignTop)
         left_layout.addLayout(info_row)
         left_layout.addWidget(self.arm_panel)
+        # The button lives on the arm panel now; everything that
+        # updates its text still reaches it through this name.
+        self.params_btn = self.arm_panel.params_btn
+        self.arm_panel.params_requested.connect(self.on_show_parameters)
         left_layout.addWidget(self.preflight_cal_panel)
         left_layout.addWidget(self.mode_panel)
         left_layout.addWidget(self.guided_panel)
@@ -4606,7 +4608,7 @@ class MainWindow(QMainWindow):
     def _forget_parameters(self):
         """Drop the list, so nothing on screen outlives the vehicle."""
         self._params = {}
-        self.params_btn.setText("Parameters")
+        self.params_btn.setText("Params")
         if self._params_dialog is not None:
             self._params_dialog.set_params({})
 
@@ -4638,14 +4640,14 @@ class MainWindow(QMainWindow):
             link.request_parameters()
 
     def on_param_progress(self, got, total):
-        self.params_btn.setText("Parameters %d/%d" % (got, total) if total
-                                else "Parameters %d" % got)
+        self.params_btn.setText("Params %d/%d" % (got, total) if total
+                                else "Params %d" % got)
         if self._params_dialog is not None:
             self._params_dialog.set_progress(got, total)
 
     def on_params_ready(self, params):
         self._params = dict(params)
-        self.params_btn.setText("Parameters (%d)" % len(self._params))
+        self.params_btn.setText("Params (%d)" % len(self._params))
         if self._params_dialog is not None:
             self._params_dialog.set_params(self._params)
 
