@@ -216,6 +216,11 @@ class MavlinkLink(QThread):
     # (accepted, the vehicle's own word for why) - so the map can put
     # a refused home marker back where it was.
     set_home_result = Signal(bool, str)
+    # (received so far, how many the vehicle says there are)
+    param_progress = Signal(int, int)
+    # {name: (value, mavlink type)} once the list is complete, or as
+    # complete as it is going to get.
+    params_ready = Signal(dict)
 
     # The five EKF variances, sent apart from the single worst-of figure
     # the HUD flag uses. Buried in that max() a variance can only say the
@@ -351,6 +356,13 @@ class MavlinkLink(QThread):
         # losing it is what sends the enable down the polygon-only path.
         # One more ask costs three small packets.
         self._fence_read_retry = None
+        # The full parameter list, while it is arriving.
+        self._params = {}            # name -> (value, type)
+        self._param_index = {}       # index -> name, to spot the gaps
+        self._param_total = None     # what the vehicle says there are
+        self._param_quiet_at = None  # when to chase what is missing
+        self._param_rounds = 0       # how many times we have chased
+        self._param_active = False
 
     def run(self):
         try:
@@ -519,6 +531,12 @@ class MavlinkLink(QThread):
                     "only. Any altitude or circle fence set on the aircraft "
                     "is switched off by this.")
                 self._apply_fence_enabled(True)
+
+            # The parameter stream has gone quiet: chase the gaps, or
+            # settle for what arrived.
+            if (self._param_quiet_at is not None
+                    and now >= self._param_quiet_at):
+                self._param_stream_quiet()
 
             # A fence parameter the aircraft never echoed back.
             if (self._fence_confirm_deadline is not None
@@ -778,6 +796,12 @@ class MavlinkLink(QThread):
                 if isinstance(param_id, bytes):
                     param_id = param_id.decode(errors="replace")
                 name = param_id.rstrip("\x00")
+
+                # Every PARAM_VALUE counts towards the list, whichever
+                # request drew it - an echo from a PARAM_SET is as good a
+                # reading as one from the stream.
+                if self._param_active:
+                    self._collect_param(name, msg)
                 if name == "WP_LOITER_RAD":
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
@@ -1193,6 +1217,18 @@ class MavlinkLink(QThread):
     # worse than no fence at all.
     FENCE_CONFIRM_S = 3.0
 
+    # A parameter list arrives as a stream with no end marker, so "done"
+    # is decided by it going quiet. Long enough that a slow radio mid-list
+    # is not mistaken for the end.
+    PARAM_QUIET_S = 3.0
+    # How many times to chase the ones that never arrived before settling
+    # for what there is. Each round asks for the gaps individually.
+    PARAM_MAX_ROUNDS = 3
+    # Above this many gaps, asking for each one individually costs more
+    # messages than the whole list does, so the list is asked for again
+    # instead. What already arrived is kept either way.
+    PARAM_MAX_CHASE = 60
+
     FENCE_ACTION_RTL = 1
     FENCE_TYPE_POLYGON_BIT = 4
 
@@ -1578,6 +1614,95 @@ class MavlinkLink(QThread):
                 % (lat, lon, alt_amsl))
         except Exception as e:
             self.command_feedback.emit(f"Failed to set home: {e}")
+
+    def request_parameters(self):
+        """Ask the vehicle for its whole parameter list.
+
+        PARAM_REQUEST_LIST makes the vehicle stream every parameter it
+        has - around 1300 on an ArduPlane, some 47 kB on the wire. That
+        is nothing over USB or UDP and the better part of a minute over a
+        radio that is also carrying telemetry, so the caller is given
+        progress rather than a wait.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't read parameters")
+            return
+        self._params = {}
+        self._param_index = {}
+        self._param_total = None
+        self._param_rounds = 0
+        self._param_active = True
+        self._param_quiet_at = time.time() + self.PARAM_QUIET_S
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_list_send(
+                    self.master.target_system, self.master.target_component)
+            self.command_feedback.emit("Reading parameters from the vehicle...")
+        except Exception as e:
+            self._param_active = False
+            self._param_quiet_at = None
+            self.command_feedback.emit(f"Failed to ask for parameters: {e}")
+
+    def _collect_param(self, name, msg):
+        """One parameter off the stream."""
+        self._params[name] = (float(msg.param_value), int(msg.param_type))
+        idx = int(getattr(msg, "param_index", 65535))
+        # 65535 means "not part of a list" - an echo from a set, say.
+        if idx != 65535:
+            self._param_index[idx] = name
+        total = int(getattr(msg, "param_count", 0))
+        if total > 0:
+            self._param_total = total
+        # Still arriving, so push the quiet deadline out again.
+        self._param_quiet_at = time.time() + self.PARAM_QUIET_S
+        self.param_progress.emit(len(self._params), self._param_total or 0)
+
+    def _param_stream_quiet(self):
+        """Nothing has arrived for a while. Chase the gaps or stop."""
+        self._param_quiet_at = None
+        if not self._param_active:
+            return
+        total = self._param_total or 0
+        missing = [i for i in range(total) if i not in self._param_index]
+
+        if not missing or self._param_rounds >= self.PARAM_MAX_ROUNDS:
+            self._param_active = False
+            if missing:
+                self.command_feedback.emit(
+                    "Read %d of %d parameters - %d never arrived"
+                    % (len(self._params), total, len(missing)))
+            else:
+                self.command_feedback.emit(
+                    "Read %d parameters" % len(self._params))
+            self.params_ready.emit(dict(self._params))
+            return
+
+        self._param_rounds += 1
+        try:
+            if len(missing) > self.PARAM_MAX_CHASE:
+                # Most of it never came. Asking for them one at a time
+                # would cost more messages than the whole list does, so
+                # ask for the whole list again - what already arrived is
+                # kept, so a second pass only has to fill the holes.
+                self.command_feedback.emit(
+                    "%d of %d parameters missing - asking for the list again"
+                    % (len(missing), total))
+                with self._send_lock:
+                    self.master.mav.param_request_list_send(
+                        self.master.target_system,
+                        self.master.target_component)
+            else:
+                self.command_feedback.emit(
+                    "Asking again for %d missing parameter%s..."
+                    % (len(missing), "" if len(missing) == 1 else "s"))
+                with self._send_lock:
+                    for idx in missing:
+                        self.master.mav.param_request_read_send(
+                            self.master.target_system,
+                            self.master.target_component, b"", idx)
+        except Exception:
+            pass
+        self._param_quiet_at = time.time() + self.PARAM_QUIET_S
 
     def _request_home(self):
         """Ask the vehicle to send HOME_POSITION now."""

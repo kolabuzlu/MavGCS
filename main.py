@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox, QMenu,
     QFileDialog, QRadioButton, QButtonGroup, QStyle, QStyleOptionButton,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 
 from pymavlink import mavutil     # for the SYS_STATUS sensor bit names
@@ -1359,6 +1360,180 @@ class FlyToDialog(QDialog):
     def values(self):
         """(lat, lon, alt) once accepted, else None."""
         return self._values
+
+
+# MAV_PARAM_TYPE, in the words a pilot would use. Built from pymavlink's
+# own enum rather than typed out: written by hand it had every signed and
+# unsigned type the wrong way round, and nothing would ever have said so.
+def _param_type_names():
+    names = {}
+    for short in ("UINT8", "INT8", "UINT16", "INT16", "UINT32", "INT32",
+                  "UINT64", "INT64"):
+        value = getattr(mavutil.mavlink, "MAV_PARAM_TYPE_" + short, None)
+        if value is not None:
+            names[int(value)] = short.lower()
+    for short, shown in (("REAL32", "float"), ("REAL64", "double")):
+        value = getattr(mavutil.mavlink, "MAV_PARAM_TYPE_" + short, None)
+        if value is not None:
+            names[int(value)] = shown
+    return names
+
+
+PARAM_TYPE_NAMES = _param_type_names()
+# The ones that hold whole numbers, so 12 is not shown as 12.000000.
+PARAM_INT_TYPES = frozenset(
+    t for t, n in PARAM_TYPE_NAMES.items() if n.endswith(("8", "16", "32", "64")))
+
+
+class NumericItem(QTableWidgetItem):
+    """A table cell that sorts by its number and shows its text.
+
+    QTableWidget sorts on what is displayed, so a column of numbers shown
+    as text puts 9 after 10. This keeps the reading the pilot wants and
+    the ordering the column means.
+    """
+
+    def __init__(self, text, value):
+        super().__init__(text)
+        self._value = float(value)
+
+    def __lt__(self, other):
+        if isinstance(other, NumericItem):
+            return self._value < other._value
+        return super().__lt__(other)
+
+
+def format_param_value(value, ptype):
+    """A parameter as a pilot would want to read it.
+
+    Integers as integers, and floats with their trailing zeros taken off
+    rather than padded to a fixed width - a list where every value is six
+    decimal places is far harder to scan than one where 0.5 is 0.5.
+    """
+    if ptype in PARAM_INT_TYPES:
+        return str(int(round(value)))
+    text = "%.6f" % value
+    text = text.rstrip("0").rstrip(".")
+    return text if text not in ("", "-") else "0"
+
+
+class ParametersDialog(QDialog):
+    """The vehicle's parameters, as read from it.
+
+    Read-only on purpose. Showing them is useful on its own, and writing
+    one back is a different kind of act - a wrong parameter can leave an
+    aircraft unflyable - so it is not something to fall into by clicking
+    in a table.
+    """
+
+    refresh_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Vehicle Parameters")
+        self.resize(560, 620)
+        self._params = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter by name, e.g. FENCE")
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        top.addWidget(self.filter_edit, stretch=1)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setToolTip("Read the whole list from the vehicle again")
+        self.refresh_btn.clicked.connect(self.refresh_requested)
+        top.addWidget(self.refresh_btn)
+        self.save_btn = QPushButton("Save...")
+        self.save_btn.setToolTip("Write these to a .param file")
+        self.save_btn.clicked.connect(self._save)
+        top.addWidget(self.save_btn)
+        layout.addLayout(top)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Name", "Value", "Type"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table, stretch=1)
+
+        self.status_label = QLabel("Not read yet.")
+        layout.addWidget(self.status_label)
+
+    def set_progress(self, got, total):
+        self.status_label.setText(
+            "Reading... %d of %d" % (got, total) if total
+            else "Reading... %d so far" % got)
+
+    def set_params(self, params):
+        """Replace the table with a fresh reading."""
+        self._params = dict(params)
+        # Sorting while filling is both slow and wrong - rows move under
+        # the insert - so it goes off for the duration.
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        for name in sorted(self._params):
+            value, ptype = self._params[name]
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(name))
+            # Sorts by number, shows the formatted text.
+            self.table.setItem(
+                row, 1,
+                NumericItem(format_param_value(value, ptype), value))
+            self.table.setItem(
+                row, 2,
+                QTableWidgetItem(PARAM_TYPE_NAMES.get(ptype, str(ptype))))
+        self.table.setSortingEnabled(True)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        text = self.filter_edit.text().strip().upper()
+        shown = 0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            hide = bool(text) and text not in item.text().upper()
+            self.table.setRowHidden(row, hide)
+            shown += not hide
+        total = self.table.rowCount()
+        if not total:
+            self.status_label.setText("Not read yet.")
+        elif shown == total:
+            self.status_label.setText("%d parameters" % total)
+        else:
+            self.status_label.setText("%d of %d parameters" % (shown, total))
+
+    def _save(self):
+        if not self._params:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save parameters", "parameters.param",
+            "Parameter file (*.param);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                # The format Mission Planner and MAVProxy both read.
+                for name in sorted(self._params):
+                    value, ptype = self._params[name]
+                    fh.write("%s,%s\n" % (name,
+                                          format_param_value(value, ptype)))
+        except OSError as e:
+            QMessageBox.warning(self, "Could not save",
+                                "Writing the file failed: %s" % e)
+            return
+        self.status_label.setText("Saved %d parameters to %s"
+                                  % (len(self._params), path))
 
 
 class ModePanel(QGroupBox):
@@ -3133,6 +3308,9 @@ class MainWindow(QMainWindow):
         self._fence_points = []
         # A home change that has been sent and not yet answered.
         self._home_move_worker = None
+        # The vehicle's parameters, and the window showing them.
+        self._params = {}
+        self._params_dialog = None
         self._home_move_timer = None
         # Remembered so the same warning is not announced on every recheck.
         self._last_terrain_warning = ([], [])
@@ -3204,7 +3382,21 @@ class MainWindow(QMainWindow):
         info_col.addWidget(self.command_label)
         info_col.addWidget(self.ack_label)
         info_row.addLayout(info_col, stretch=1)
-        info_row.addWidget(self.flight_time_label, alignment=Qt.AlignTop)
+        # Flight time with the parameters button under it, in the space
+        # that was empty beside the command and ACK lines.
+        right_col = QVBoxLayout()
+        right_col.setSpacing(4)
+        right_col.addWidget(self.flight_time_label)
+        self.params_btn = QPushButton("Parameters")
+        self.params_btn.setStyleSheet(
+            "background-color: #3a4a5a; color: #e6e6e6; "
+            "font-size: 10px; padding: 3px 4px;")
+        self.params_btn.setToolTip(
+            "Show the parameters read from the vehicle")
+        self.params_btn.clicked.connect(self.on_show_parameters)
+        right_col.addWidget(self.params_btn)
+        info_row.addLayout(right_col)
+        info_row.setAlignment(right_col, Qt.AlignTop)
         left_layout.addLayout(info_row)
         left_layout.addWidget(self.arm_panel)
         left_layout.addWidget(self.preflight_cal_panel)
@@ -4105,6 +4297,15 @@ class MainWindow(QMainWindow):
         # connected, neither of which should clear anything.
         if self._was_connected and not connected:
             self._on_link_gone()
+        if connected and not self._was_connected:
+            # A new vehicle, so whatever was read from the last one is not
+            # this one's. Read the list, but not this instant: connecting
+            # already sends stream rates and several parameter reads, and
+            # a thousand more messages on top of that burst is the worst
+            # moment for it on a radio.
+            self._forget_parameters()
+            QTimer.singleShot(self.PARAM_AUTOREAD_DELAY_MS,
+                              self._auto_read_parameters)
         self._was_connected = connected
         self._set_link_status(connected, message)
         # A failure reason is worth more than a tooltip - it is the thing
@@ -4397,6 +4598,57 @@ class MainWindow(QMainWindow):
             self.on_command_feedback("Home change refused (%s)" % detail)
             self.map_view.revert_home()
 
+    # How long after connecting to ask for the parameter list. Connecting
+    # already sends the stream rates and the fence and battery reads;
+    # this waits for that to clear rather than competing with it.
+    PARAM_AUTOREAD_DELAY_MS = 2500
+
+    def _forget_parameters(self):
+        """Drop the list, so nothing on screen outlives the vehicle."""
+        self._params = {}
+        self.params_btn.setText("Parameters")
+        if self._params_dialog is not None:
+            self._params_dialog.set_params({})
+
+    def _auto_read_parameters(self):
+        """The read that happens on its own, once a vehicle is there."""
+        if self.link is None or not self._was_connected:
+            return
+        if self._params:
+            return          # something already read them
+        self.link.request_parameters()
+
+    def on_show_parameters(self):
+        """Open the parameter window, reading them if that has not happened."""
+        if self._params_dialog is None:
+            self._params_dialog = ParametersDialog(self)
+            self._params_dialog.refresh_requested.connect(
+                self.on_refresh_parameters)
+            if self._params:
+                self._params_dialog.set_params(self._params)
+        self._params_dialog.show()
+        self._params_dialog.raise_()
+        self._params_dialog.activateWindow()
+        if not self._params:
+            self.on_refresh_parameters()
+
+    def on_refresh_parameters(self):
+        link = self._require_link()
+        if link:
+            link.request_parameters()
+
+    def on_param_progress(self, got, total):
+        self.params_btn.setText("Parameters %d/%d" % (got, total) if total
+                                else "Parameters %d" % got)
+        if self._params_dialog is not None:
+            self._params_dialog.set_progress(got, total)
+
+    def on_params_ready(self, params):
+        self._params = dict(params)
+        self.params_btn.setText("Parameters (%d)" % len(self._params))
+        if self._params_dialog is not None:
+            self._params_dialog.set_params(self._params)
+
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
 
@@ -4578,6 +4830,8 @@ class MainWindow(QMainWindow):
         self.link.fence_uploaded.connect(self.on_fence_uploaded)
         self.link.fence_enabled_update.connect(self.on_fence_enabled)
         self.link.set_home_result.connect(self.on_set_home_result)
+        self.link.param_progress.connect(self.on_param_progress)
+        self.link.params_ready.connect(self.on_params_ready)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
@@ -4602,6 +4856,7 @@ class MainWindow(QMainWindow):
             self.link.stop()
             self.link = None
         self._set_link_status(False, "Disconnected by the user")
+        self._was_connected = False
         self.command_label.setText("")
         self._link_message_shown = False
         self.ack_label.setText("")
@@ -4696,6 +4951,10 @@ class MainWindow(QMainWindow):
         reading ARMED while the button cleared it properly.
         """
         self._reset_vehicle_state()
+        # The parameters belong to the vehicle that has gone. Left on
+        # screen they read as this one's, and the next vehicle may not be
+        # the same airframe at all.
+        self._forget_parameters()
 
     # The middle state says what to do about it rather than what it is.
     # "MARGINAL" described the margin; by the time the margin is that
