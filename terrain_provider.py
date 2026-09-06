@@ -430,6 +430,37 @@ class TerrainRadarWorker(QThread):
             self.wait(1000)
 
 
+class PointElevationWorker(QThread):
+    """One ground height, off the GUI thread, then finished.
+
+    Fetching a tile can take seconds, and the caller is the GUI thread
+    answering a drag - so it cannot ask the question directly. Emits the
+    elevation, or None when the ground there is not known.
+    """
+
+    ready = Signal(float, float, object)      # lat, lon, metres or None
+
+    def __init__(self, lat, lon, parent=None):
+        super().__init__(parent)
+        self._lat = float(lat)
+        self._lon = float(lon)
+
+    def run(self):
+        try:
+            elev = TerrainProvider().elevation(self._lat, self._lon)
+        except Exception:
+            elev = None
+        self.ready.emit(self._lat, self._lon, elev)
+
+    def stop(self):
+        """There is no safe way to interrupt a socket read, so this only
+        waits. Called on the way out, where a running QThread would
+        otherwise abort the process."""
+        if not self.wait(3000):
+            self.terminate()
+            self.wait(1000)
+
+
 class WaypointTerrainWorker(QThread):
     """
     Checks each waypoint against the ground underneath it, off the GUI

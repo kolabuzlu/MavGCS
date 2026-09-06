@@ -56,7 +56,8 @@ from mavlink_link import MavlinkLink, PLANE_MODES
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 import terrain_provider
-from terrain_provider import TerrainRadarWorker, WaypointTerrainWorker
+from terrain_provider import (TerrainRadarWorker, WaypointTerrainWorker,
+                              PointElevationWorker)
 from adsb_provider import AdsbWorker
 from tile_cache import TileCacheServer
 from fpv_view import FpvView
@@ -3130,6 +3131,9 @@ class MainWindow(QMainWindow):
         # The fence the aircraft is actually holding, kept so the mission
         # can be checked against it.
         self._fence_points = []
+        # A home change that has been sent and not yet answered.
+        self._home_move_worker = None
+        self._home_move_timer = None
         # Remembered so the same warning is not announced on every recheck.
         self._last_terrain_warning = ([], [])
         self._last_fence_warning = ([], [])
@@ -3278,6 +3282,7 @@ class MainWindow(QMainWindow):
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
         self.map_view.waypoint_alt_changed.connect(self.on_waypoint_alt_changed)
         self.map_view.fence_requested.connect(self.on_fence_requested)
+        self.map_view.home_moved.connect(self.on_home_moved)
         self.map_view.fence_cleared.connect(self.on_fence_cleared)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
@@ -4297,6 +4302,101 @@ class MainWindow(QMainWindow):
             "Aircraft confirms geofence %s" % ("ON" if enabled else "OFF"))
         self.map_view.set_fence_armed(enabled)
 
+    # How long to wait for the vehicle to answer a home change before
+    # putting the marker back. Without this a command that draws no reply
+    # leaves an amber house sitting somewhere home is not.
+    HOME_MOVE_TIMEOUT_MS = 6000
+
+    def on_home_moved(self, lat, lon):
+        """The home marker was dragged. Ask before doing anything with it.
+
+        Home is where RTL goes and what every relative altitude is
+        measured from, so a drag - which is easy to do by accident on a
+        map you are panning - is treated as a proposal rather than an
+        instruction.
+        """
+        link = self._require_link()
+        if link is None:
+            self.map_view.revert_home()
+            return
+
+        where = ""
+        if self._home_pos is not None:
+            moved = FlightStats._haversine_m(
+                self._home_pos[0], self._home_pos[1], lat, lon)
+            where = "\n\nThat is %.0f m from where home is now." % moved
+
+        reply = QMessageBox.question(
+            self,
+            "Move home?",
+            "Set the vehicle's home position to\n"
+            "%.6f, %.6f ?%s\n\n"
+            "RTL returns to home, and every waypoint altitude is measured "
+            "from it." % (lat, lon, where),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            self.map_view.revert_home()
+            return
+
+        # The ground height there decides the new home's altitude, and
+        # looking it up can mean fetching a tile - not something to do on
+        # this thread while the map waits.
+        self._stop_home_worker()
+        self.on_command_feedback("Looking up the ground height there...")
+        self._home_move_worker = PointElevationWorker(lat, lon, self)
+        self._home_move_worker.ready.connect(self._send_home)
+        self._home_move_worker.start()
+
+    def _stop_home_worker(self):
+        if self._home_move_worker is not None:
+            self._home_move_worker.stop()
+            self._home_move_worker = None
+
+    def _send_home(self, lat, lon, elevation):
+        """Ground height in hand (or not), ask the vehicle to move home."""
+        link = self._require_link()
+        if link is None:
+            self.map_view.revert_home()
+            return
+        if elevation is None:
+            # No terrain data there. The old home's height is a poor guess
+            # on a slope, so say which was used rather than let a silent
+            # substitution shift every relative altitude.
+            alt = self._home_alt_amsl if self._home_alt_amsl is not None else 0.0
+            self.on_command_feedback(
+                "No terrain data there - using the previous home height "
+                "of %.0f m AMSL" % alt)
+        else:
+            alt = float(elevation)
+        link.set_home(lat, lon, alt)
+
+        # The marker stays amber until the vehicle says something. If it
+        # says nothing, put it back.
+        if self._home_move_timer is None:
+            self._home_move_timer = QTimer(self)
+            self._home_move_timer.setSingleShot(True)
+            self._home_move_timer.timeout.connect(self._home_move_timed_out)
+        self._home_move_timer.start(self.HOME_MOVE_TIMEOUT_MS)
+
+    def _home_move_timed_out(self):
+        self.on_command_feedback(
+            "No reply to the home change - putting the marker back")
+        self.map_view.revert_home()
+
+    def on_set_home_result(self, accepted, detail):
+        """What the vehicle made of the home change."""
+        if self._home_move_timer is not None:
+            self._home_move_timer.stop()
+        if accepted:
+            # The marker is not moved here. The vehicle has been asked
+            # where home is now, and its answer draws it.
+            self.on_command_feedback("Home change accepted")
+        else:
+            self.on_command_feedback("Home change refused (%s)" % detail)
+            self.map_view.revert_home()
+
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
 
@@ -4477,6 +4577,7 @@ class MainWindow(QMainWindow):
         self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
         self.link.fence_uploaded.connect(self.on_fence_uploaded)
         self.link.fence_enabled_update.connect(self.on_fence_enabled)
+        self.link.set_home_result.connect(self.on_set_home_result)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
@@ -4680,6 +4781,7 @@ class MainWindow(QMainWindow):
         # check starts four seconds after launch - left Qt destroying a
         # thread that was still running, and that aborts the process on
         # the way out. Nothing is lost by abandoning the answer.
+        self._stop_home_worker()
         checker = getattr(self, "_update_checker", None)
         if checker is not None and checker.isRunning():
             checker.result_ready.disconnect()

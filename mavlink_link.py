@@ -213,6 +213,9 @@ class MavlinkLink(QThread):
     # The vehicle accepted a fence, so the map may stop showing it as
     # pending.
     fence_uploaded = Signal()
+    # (accepted, the vehicle's own word for why) - so the map can put
+    # a refused home marker back where it was.
+    set_home_result = Signal(bool, str)
 
     # The five EKF variances, sent apart from the single worst-of figure
     # the HUD flag uses. Buried in that max() a variance can only say the
@@ -746,6 +749,14 @@ class MavlinkLink(QThread):
                 except (KeyError, AttributeError):
                     result_name = f"result {msg.result}"
                 self.command_feedback.emit(f"ACK: {cmd_name} -> {result_name}")
+                if msg.command == mavutil.mavlink.MAV_CMD_DO_SET_HOME:
+                    accepted = (msg.result
+                                == mavutil.mavlink.MAV_RESULT_ACCEPTED)
+                    if accepted:
+                        # Ask where home is now rather than assuming it
+                        # went where it was asked to go.
+                        self._request_home()
+                    self.set_home_result.emit(accepted, result_name)
 
             elif mtype == "PID_TUNING":
                 # axis 2 is pitch (PID_TUNING_PITCH).
@@ -1528,6 +1539,45 @@ class MavlinkLink(QThread):
             mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
             0, msg_id, interval_us, 0, 0, 0, 0, 0,
         )
+
+    def set_home(self, lat: float, lon: float, alt_amsl: float):
+        """Move the vehicle's home to a coordinate.
+
+        Sent as COMMAND_INT rather than COMMAND_LONG on purpose: the long
+        form carries a coordinate in float32 parameters, which cannot hold
+        a latitude to better than about a metre. The int form carries it
+        as degrees times 1e7, which is exact.
+
+        param1 = 0 means "use the location in this message" rather than
+        "use where the vehicle is standing".
+
+        Nothing here decides whether the vehicle will accept it. Home is
+        refused in some states, and the COMMAND_ACK that comes back is
+        the only answer that counts - which is why the marker is not moved
+        until the vehicle reports its new home itself.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't set home")
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.command_int_send(
+                    self.master.target_system,
+                    self.master.target_component,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL,
+                    mavutil.mavlink.MAV_CMD_DO_SET_HOME,
+                    0, 0,                      # current, autocontinue
+                    0,                         # param1: use the location below
+                    0, 0, 0,
+                    int(round(lat * 1e7)),
+                    int(round(lon * 1e7)),
+                    float(alt_amsl),
+                )
+            self.command_feedback.emit(
+                "Home change requested: %.6f, %.6f at %.0f m AMSL"
+                % (lat, lon, alt_amsl))
+        except Exception as e:
+            self.command_feedback.emit(f"Failed to set home: {e}")
 
     def _request_home(self):
         """Ask the vehicle to send HOME_POSITION now."""

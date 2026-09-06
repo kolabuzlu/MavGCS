@@ -980,15 +980,58 @@ var homeIcon = L.divIcon({
     iconAnchor: [17, 17]
 });
 
+// The same house in amber, for a home that has been dragged somewhere
+// and not yet agreed to by the aircraft. Home is where RTL goes, so the
+// difference between asked-for and confirmed has to be visible.
+var homePendingIcon = L.divIcon({
+    className: 'home-icon',
+    html: '<svg width="34" height="34" viewBox="0 0 28 28">' +
+          '<circle cx="14" cy="14" r="12" fill="rgba(20,20,20,0.72)" ' +
+          'stroke="#ffb300" stroke-width="2" stroke-dasharray="4,3"/>' +
+          '<path d="M14 6 L22 13.5 L6 13.5 Z" fill="#ffffff"/>' +
+          '<rect x="8.5" y="13.5" width="11" height="7" fill="#ffffff"/>' +
+          '<rect x="12.2" y="16" width="3.6" height="4.5" fill="#ffb300"/>' +
+          '</svg>',
+    iconSize: [34, 34],
+    iconAnchor: [17, 17]
+});
+
+// Where the vehicle last said home was. A drag is only a request, so
+// this is what the marker goes back to if the vehicle says no.
+var homeConfirmed = null;
+
 function setHome(lat, lon) {
     var ll = [lat, lon];
     if (homeMarker === null) {
         homeMarker = L.marker(ll, {icon: homeIcon, zIndexOffset: -500,
-                                   interactive: true}).addTo(map);
+                                   interactive: true,
+                                   draggable: true}).addTo(map);
+        homeMarker.on('dragend', function () {
+            var q = homeMarker.getLatLng();
+            homeMarker.setIcon(homePendingIcon);
+            homeMarker.bindTooltip(
+                'Home change requested - waiting for the aircraft',
+                {direction: 'top', offset: [0, -14]});
+            if (bridge) { bridge.homeMoved(q.lat, q.lng); }
+        });
     } else {
         homeMarker.setLatLng(ll);
     }
-    homeMarker.bindTooltip('Home ' + lat.toFixed(6) + ', ' + lon.toFixed(6),
+    homeConfirmed = ll;
+    homeMarker.setIcon(homeIcon);
+    homeMarker.bindTooltip('Home ' + lat.toFixed(6) + ', ' + lon.toFixed(6) +
+                           ' - drag to move it',
+                           {direction: 'top', offset: [0, -14]});
+}
+
+// The vehicle refused it, or the pilot changed their mind at the prompt.
+function revertHome() {
+    if (homeMarker === null) { return; }
+    if (homeConfirmed !== null) { homeMarker.setLatLng(homeConfirmed); }
+    homeMarker.setIcon(homeIcon);
+    var ll = homeMarker.getLatLng();
+    homeMarker.bindTooltip('Home ' + ll.lat.toFixed(6) + ', ' +
+                           ll.lng.toFixed(6) + ' - drag to move it',
                            {direction: 'top', offset: [0, -14]});
 }
 
@@ -997,6 +1040,7 @@ function clearHome() {
         map.removeLayer(homeMarker);
         homeMarker = null;
     }
+    homeConfirmed = null;
 }
 
 // `sent` draws the muted version used for a mission already uploaded.
@@ -2403,10 +2447,15 @@ class Bridge(QObject):
     terrain_cache_clear_requested = Signal()
     fence_requested = Signal(list)
     fence_cleared = Signal()
+    home_moved = Signal(float, float)
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
         self.fly_to_here.emit(lat, lon)
+
+    @Slot(float, float)
+    def homeMoved(self, lat, lon):
+        self.home_moved.emit(lat, lon)
 
     @Slot(float, float, int)
     def waypointAdded(self, lat, lon, wp_id):
@@ -2471,6 +2520,7 @@ class MapView(QWebEngineView):
     terrain_cache_clear_requested = Signal()
     fence_requested = Signal(list)
     fence_cleared = Signal()
+    home_moved = Signal(float, float)
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
@@ -2482,6 +2532,7 @@ class MapView(QWebEngineView):
         self._bridge.waypoint_alt_changed.connect(self.waypoint_alt_changed)
         self._bridge.fence_requested.connect(self.fence_requested)
         self._bridge.fence_cleared.connect(self.fence_cleared)
+        self._bridge.home_moved.connect(self.home_moved)
         self._bridge.adsb_toggled.connect(self.adsb_toggled)
         self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
         self._bridge.tile_cache_limit_changed.connect(self.tile_cache_limit_changed)
@@ -2623,6 +2674,10 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             "setFenceAccepted(%s);"
             % json.dumps([[float(a), float(b)] for a, b in points]))
+
+    def revert_home(self):
+        """Put the home marker back where the vehicle last said it was."""
+        self.page().runJavaScript("revertHome();")
 
     def set_fence_armed(self, on):
         """Draw the fence as armed only once the aircraft has said so."""
