@@ -1536,7 +1536,7 @@ class ParametersDialog(QDialog):
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table, stretch=1)
 
-        self.status_label = QLabel("Not read yet.")
+        self.status_label = QLabel("Not read yet - press GET PARAMS.")
         layout.addWidget(self.status_label)
 
     def set_progress(self, got, total):
@@ -1576,7 +1576,7 @@ class ParametersDialog(QDialog):
             shown += not hide
         total = self.table.rowCount()
         if not total:
-            self.status_label.setText("Not read yet.")
+            self.status_label.setText("Not read yet - press GET PARAMS.")
         elif shown == total:
             self.status_label.setText("%d parameters" % total)
         else:
@@ -1976,6 +1976,7 @@ class ArmDisarmPanel(QGroupBox):
     # (arm: bool, force: bool) - ARM path only
     arm_requested = Signal(bool, bool)
     params_requested = Signal()
+    get_params_requested = Signal()
     # Fired once, only after a completed hold on DISARM (HOLD_DURATION_MS)
     force_disarm_requested = Signal()
 
@@ -2018,6 +2019,19 @@ class ArmDisarmPanel(QGroupBox):
         # and simply gets less of it - it scrolls when it does not fit, so
         # a long one is still readable, where a fixed share of the row
         # would have been taken from it whether there was a reason or not.
+        # Reading them is a separate act from looking at them: the list
+        # is a minute of radio on some links, so it happens when it is
+        # asked for and not a moment before.
+        self.get_params_btn = QPushButton("GET PARAMS")
+        self.get_params_btn.setMinimumWidth(112)
+        self.get_params_btn.setStyleSheet(
+            "background-color: #3a4a5a; color: #e6e6e6; "
+            "font-size: 10px; font-weight: bold; padding: 3px 8px;")
+        self.get_params_btn.setToolTip(
+            "Read the parameter list from the vehicle now")
+        self.get_params_btn.clicked.connect(self.get_params_requested)
+        force_row.addWidget(self.get_params_btn)
+
         self.params_btn = QPushButton("PARAMS")
         # Wide enough that the count it grows into - PARAMS 1234/1300 -
         # does not make the button jump about while the list comes in.
@@ -3474,6 +3488,8 @@ class MainWindow(QMainWindow):
         # updates its text still reaches it through this name.
         self.params_btn = self.arm_panel.params_btn
         self.arm_panel.params_requested.connect(self.on_show_parameters)
+        self.arm_panel.get_params_requested.connect(
+            self.on_refresh_parameters)
         left_layout.addWidget(self.preflight_cal_panel)
         left_layout.addWidget(self.mode_panel)
         left_layout.addWidget(self.guided_panel)
@@ -4374,13 +4390,10 @@ class MainWindow(QMainWindow):
             self._on_link_gone()
         if connected and not self._was_connected:
             # A new vehicle, so whatever was read from the last one is not
-            # this one's. Read the list, but not this instant: connecting
-            # already sends stream rates and several parameter reads, and
-            # a thousand more messages on top of that burst is the worst
-            # moment for it on a radio.
+            # this one's. Nothing is read from this one either until it is
+            # asked for - the list is a minute of radio on some links, and
+            # that is not a cost to impose on every connection.
             self._forget_parameters()
-            QTimer.singleShot(self.PARAM_AUTOREAD_DELAY_MS,
-                              self._auto_read_parameters)
         self._was_connected = connected
         self._set_link_status(connected, message)
         # A failure reason is worth more than a tooltip - it is the thing
@@ -4673,11 +4686,6 @@ class MainWindow(QMainWindow):
             self.on_command_feedback("Home change refused (%s)" % detail)
             self.map_view.revert_home()
 
-    # How long after connecting to ask for the parameter list. Connecting
-    # already sends the stream rates and the fence and battery reads;
-    # this waits for that to clear rather than competing with it.
-    PARAM_AUTOREAD_DELAY_MS = 2500
-
     def _forget_parameters(self):
         """Drop the list, so nothing on screen outlives the vehicle."""
         # A modal window waiting on a vehicle that has gone would wait
@@ -4687,15 +4695,6 @@ class MainWindow(QMainWindow):
         self.params_btn.setText("PARAMS")
         if self._params_dialog is not None:
             self._params_dialog.set_params({})
-
-    def _auto_read_parameters(self):
-        """The read that happens on its own, once a vehicle is there."""
-        if self.link is None or not self._was_connected:
-            return
-        if self._params:
-            return          # something already read them
-        self._show_param_loading()
-        self.link.request_parameters()
 
     def on_show_parameters(self):
         """Open the parameter window, reading them if that has not happened."""
@@ -4708,8 +4707,6 @@ class MainWindow(QMainWindow):
         self._params_dialog.show()
         self._params_dialog.raise_()
         self._params_dialog.activateWindow()
-        if not self._params:
-            self.on_refresh_parameters()
 
     def on_refresh_parameters(self):
         link = self._require_link()
