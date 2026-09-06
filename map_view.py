@@ -9,7 +9,7 @@ import json
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineProfile
 from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtCore import QUrl, QObject, Signal, Slot
+from PySide6.QtCore import QUrl, QObject, Qt, Signal, Slot
 
 
 
@@ -2527,18 +2527,45 @@ class MapView(QWebEngineView):
         _clear_browser_cache()
 
         self._bridge = Bridge()
-        self._bridge.fly_to_here.connect(self.fly_to_here)
-        self._bridge.waypoint_added.connect(self.waypoint_added)
-        self._bridge.waypoint_alt_changed.connect(self.waypoint_alt_changed)
-        self._bridge.fence_requested.connect(self.fence_requested)
-        self._bridge.fence_cleared.connect(self.fence_cleared)
-        self._bridge.home_moved.connect(self.home_moved)
-        self._bridge.adsb_toggled.connect(self.adsb_toggled)
-        self._bridge.adsb_center_changed.connect(self.adsb_center_changed)
-        self._bridge.tile_cache_limit_changed.connect(self.tile_cache_limit_changed)
-        self._bridge.tile_cache_clear_requested.connect(self.tile_cache_clear_requested)
-        self._bridge.terrain_cache_limit_changed.connect(self.terrain_cache_limit_changed)
-        self._bridge.terrain_cache_clear_requested.connect(self.terrain_cache_clear_requested)
+        # Queued, every one of them, and this matters.
+        #
+        # A bridge slot is called by JavaScript, synchronously, while
+        # WebEngine is part-way through its own call. Anything the
+        # handler then does that re-enters the page - running more
+        # JavaScript, or opening a modal dialog and spinning a nested
+        # event loop - happens underneath that call. Qt WebEngine faults
+        # on this: six access violations inside Qt6WebEngineCore have
+        # been logged against builds that did it, the Clear fence button
+        # among them, which reaches the page again through the fence
+        # warnings before its own JavaScript has returned.
+        #
+        # Queuing the hop lets the JavaScript call finish first and runs
+        # the handler on the next turn of the event loop, where the page
+        # is no longer in the middle of anything.
+        self._bridge.fly_to_here.connect(
+            self.fly_to_here, Qt.ConnectionType.QueuedConnection)
+        self._bridge.waypoint_added.connect(
+            self.waypoint_added, Qt.ConnectionType.QueuedConnection)
+        self._bridge.waypoint_alt_changed.connect(
+            self.waypoint_alt_changed, Qt.ConnectionType.QueuedConnection)
+        self._bridge.fence_requested.connect(
+            self.fence_requested, Qt.ConnectionType.QueuedConnection)
+        self._bridge.fence_cleared.connect(
+            self.fence_cleared, Qt.ConnectionType.QueuedConnection)
+        self._bridge.home_moved.connect(
+            self.home_moved, Qt.ConnectionType.QueuedConnection)
+        self._bridge.adsb_toggled.connect(
+            self.adsb_toggled, Qt.ConnectionType.QueuedConnection)
+        self._bridge.adsb_center_changed.connect(
+            self.adsb_center_changed, Qt.ConnectionType.QueuedConnection)
+        self._bridge.tile_cache_limit_changed.connect(
+            self.tile_cache_limit_changed, Qt.ConnectionType.QueuedConnection)
+        self._bridge.tile_cache_clear_requested.connect(
+            self.tile_cache_clear_requested, Qt.ConnectionType.QueuedConnection)
+        self._bridge.terrain_cache_limit_changed.connect(
+            self.terrain_cache_limit_changed, Qt.ConnectionType.QueuedConnection)
+        self._bridge.terrain_cache_clear_requested.connect(
+            self.terrain_cache_clear_requested, Qt.ConnectionType.QueuedConnection)
 
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
