@@ -34,4 +34,4 @@ through dates. Restore any of them with:
 | V2.0.0 | `81af4b13d9` | 2026-09-05 | Record V2.0.0 in the release history |
 | V2.0.1 | `9248c6fc62` | 2026-09-05 | Record V2.0.1 in the release history |
 | V2.0.2 | `adc6540162` | 2026-09-05 | Record V2.0.2 in the release history |
-| V2.0.3 | `PENDING` | 2026-09-06 | Rebuilt: home drag, and the WebEngine re-entrancy fix |
+| V2.0.3 | `26753e06e5` | 2026-09-06 | Rebuilt: home drag, and the WebEngine re-entrancy fix |
