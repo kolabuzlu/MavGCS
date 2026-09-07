@@ -38,6 +38,31 @@ LOGS = ROOT / "logs"
 SAMPLE_EVERY_S = 5.0
 
 
+def _powershell(script, timeout_s, failure_prefix):
+    """Run a PowerShell snippet and return its output as text.
+
+    Both the encoding and the None are things this got wrong. text=True
+    with no encoding decodes using the system locale - cp1252 here - and
+    Windows writes its event log messages in Turkish, so the first
+    accented character killed the reader thread with a UnicodeDecodeError
+    and left stdout as None. That happened on the run that finally caught
+    the crash, and it took the Windows crash record with it: the one
+    field naming the faulting module. UTF-8 on both sides, and never
+    assume stdout came back.
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + script],
+            capture_output=True, timeout=timeout_s,
+            encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return "%s: %r" % (failure_prefix, exc)
+    if out.stdout is None:
+        return "%s: no output (exit %s)" % (failure_prefix, out.returncode)
+    return out.stdout.strip()
+
+
 def sample_line(pid):
     """Memory, handles and web engine processes, in one line."""
     ps = (
@@ -54,12 +79,7 @@ def sample_line(pid):
         "$we2 = ([double]$weMB).ToString($inv);"
         "'{0},{1},{2},{3}' -f $mem, $p.HandleCount, $we2, $weN"
     ) % pid
-    try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=20)
-        return out.stdout.strip()
-    except Exception as exc:
-        return "sample failed: %r" % exc
+    return _powershell(ps, 20, "sample failed")
 
 
 def sampler(pid, log, stop):
@@ -81,12 +101,7 @@ def windows_crash_record(since, log):
         "Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000; StartTime=$s} "
         "-ErrorAction SilentlyContinue | ForEach-Object { $_.TimeCreated; $_.Message }"
     ) % since.strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=60)
-        text = out.stdout.strip()
-    except Exception as exc:
-        text = "could not read the event log: %r" % exc
+    text = _powershell(ps, 60, "could not read the event log")
     log.write("\n=== what Windows recorded ===\n")
     log.write(text + "\n" if text else "  nothing - it was not an unhandled crash\n")
 
@@ -139,9 +154,19 @@ def main():
         threading.Thread(target=sampler, args=(proc.pid, log, stop),
                          daemon=True).start()
 
+        # ANGLE's input layout cache overflowing is the last thing logged
+        # before both crashes so far, and never appears in a run that
+        # survives. Stamp those lines with the elapsed time and mark them,
+        # so the next crash says how long the churn had been building and
+        # what was on screen when it started.
         try:
             for line in proc.stdout:
-                log.write(line)
+                if "angle_platform_impl" in line or "TrimCache" in line:
+                    log.write("[watch %7.1fs] *** GPU: %s"
+                              % ((datetime.now() - started).total_seconds(),
+                                 line.lstrip()))
+                else:
+                    log.write(line)
                 log.flush()
         except KeyboardInterrupt:
             pass
