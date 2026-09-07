@@ -29,25 +29,6 @@ import os
 # pymavlink is imported anywhere in the process.
 os.environ.setdefault("MAVLINK20", "1")
 
-# Composite the web pages on the CPU rather than the GPU.
-#
-# The map and the 3D view are Chromium, and with GPU compositing on it
-# faults - an access violation inside Qt6WebEngineCore, always at the
-# same address, taking the whole program with it. Measured on a circling
-# aircraft with every overlay on: about eight and a half minutes to the
-# crash, repeatably. The same run with this set has passed two and a half
-# hours. How long it takes depends on how much the map is drawing, which
-# is what a race in the compositor looks like - memory and handles are
-# flat throughout, so nothing is running out.
-#
-# Compositing only, not the whole GPU. --disable-gpu also stops it, but
-# it takes WebGL with it and the 3D view needs that: with this flag the
-# renderer is still ANGLE on Direct3D11, exactly as before.
-#
-# Anything already in the environment wins, so this can still be
-# overridden from outside for testing.
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu-compositing")
-
 import math
 import html
 import time
