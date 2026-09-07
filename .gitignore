@@ -11,3 +11,6 @@ selftest.log
 map_cache/
 .placeholder_cache_purged
 settings.json
+
+# Watched runs (tools/watch_run.py) - one file per run, never committed.
+logs/

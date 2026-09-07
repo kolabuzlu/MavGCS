@@ -22,3 +22,22 @@ run.bat --selftest             check the link only, no window
 It finds Python, installs anything missing from `requirements.txt` the
 first time, and passes whatever you type after it straight to `main.py`.
 If MavGCS stops with an error the window stays open so you can read it.
+
+## When it crashes
+
+`watch.bat` runs MavGCS and records everything needed to explain a crash
+afterwards. Same arguments as `run.bat`:
+
+```
+watch.bat                       listen on UDP 14550
+watch.bat tcp:127.0.0.1:5762    SITL over TCP
+watch.bat COM5:460800           a radio on a serial port
+```
+
+Fly as normal. If it dies, the log under `logs\` holds the stack of every
+thread at the moment of the fault, whatever Chromium was complaining
+about beforehand, a memory sample every five seconds, and what Windows
+recorded afterwards.
+
+It only writes things down - MavGCS behaves exactly as it does under
+`run.bat`.
