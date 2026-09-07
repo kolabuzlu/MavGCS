@@ -1,6 +1,6 @@
 <img width="300" height="150" alt="mavgcsbacksocial" src="https://github.com/user-attachments/assets/995634de-93ff-432d-8484-83e8f4dd8d6b" />
 
-### Ground Control Station for MAVLink
+## Ground Control Station for MAVLink
 
 ![MavGCS screenshot](mavgcs2.png)
 
@@ -16,7 +16,7 @@ You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to acti
 
 Created by **Derin Hakan Karakurt**
 
-## Installing & Running MavGCS (Windows) 💻
+### Installing & Running MavGCS (Windows) 💻
 
 Download `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
