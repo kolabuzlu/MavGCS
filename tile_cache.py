@@ -22,6 +22,7 @@ runs to tens or low hundreds of MB.
 
 import shutil
 import socket
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -74,6 +75,29 @@ def _content_type(blob: bytes) -> str:
     if blob.startswith(b"\xff\xd8"):
         return "image/jpeg"
     return "application/octet-stream"
+
+
+# Leaflet abandons tiles constantly - every one you pan past is a fetch it
+# no longer wants - and each abandonment reaches this server as a dropped
+# connection partway through the answer. That is normal operation, not a
+# fault, but socketserver's default is to print a full traceback for it.
+#
+# Guarding the individual writes did not hold: the drop lands wherever the
+# response happened to be, and end_headers() flushing the header buffer
+# raises just as readily as writing the body does. So it is filtered here
+# instead, at the one point every failed request already passes through,
+# which covers the sites that exist now and any added later.
+#
+# Only these three are silenced. Anything else still prints in full - a
+# real bug in the handler must not be hidden by this.
+GONE_AWAY = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+class _TileHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], GONE_AWAY):
+            return
+        super().handle_error(request, client_address)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -140,10 +164,7 @@ class _Handler(BaseHTTPRequestHandler):
         # forth doesn't even reach this server.
         self.send_header("Cache-Control", "max-age=86400")
         self.end_headers()
-        try:
-            self.wfile.write(blob)
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # Leaflet abandons tiles as you pan; not an error
+        self.wfile.write(blob)
 
     def _serve_lib(self, rel_parts):
         """Serve a file from the bundled vendor/leaflet directory."""
@@ -175,10 +196,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(blob)))
         self.send_header("Cache-Control", "max-age=86400")
         self.end_headers()
-        try:
-            self.wfile.write(blob)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        self.wfile.write(blob)
 
 
 class TileCacheServer:
@@ -279,7 +297,7 @@ class TileCacheServer:
             self._count = max(0, self._count - removed)
 
     def start(self):
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._httpd = _TileHTTPServer(("127.0.0.1", 0), _Handler)
         self._httpd.daemon_threads = True
         self._httpd.tile_cache = self
         self.port = self._httpd.server_address[1]
