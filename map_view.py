@@ -1104,6 +1104,13 @@ var haveCentered = false;
 // stay right as the window resizes.
 var FOLLOW_INSET = {left: 150, top: 95, right: 262, bottom: 20};
 
+// A nudge on top of that, purely to taste. The insets above say where the
+// panels are, which is measurable; this says where the aircraft is wanted
+// inside what they leave, which is a judgement about how it looks. Kept
+// apart so either can be changed without disturbing the other. Negative y
+// moves the aircraft up the screen.
+var FOLLOW_NUDGE = {x: 0, y: -5};
+
 function followTargetPoint() {
     var s = map.getSize();
     var l = FOLLOW_INSET.left, t = FOLLOW_INSET.top;
@@ -1112,7 +1119,8 @@ function followTargetPoint() {
     // and offsetting would put the aircraft off the edge. Plain centre is
     // the safe answer there.
     if (r - l < s.x * 0.25 || b - t < s.y * 0.25) { return s.divideBy(2); }
-    return L.point((l + r) / 2, (t + b) / 2);
+    return L.point((l + r) / 2 + FOLLOW_NUDGE.x,
+                   (t + b) / 2 + FOLLOW_NUDGE.y);
 }
 
 // Move the map so the aircraft sits at that point rather than at the
