@@ -2760,6 +2760,10 @@ class ConnectionPanel(QGroupBox):
         row.addWidget(self.field2_stack)      # stretch, so the row ends flush)
         refresh_row.addWidget(self.refresh_btn)
         self.link_stats_label = QLabel("")
+        # Right, so it lines up under the buttons above it rather than
+        # sitting flush left against a row that is flush right.
+        self.link_stats_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.link_stats_label.setStyleSheet(
             "color: #9aa4ad; font-size: 10px; font-family: Consolas, monospace;")
         self.link_stats_label.setToolTip(
