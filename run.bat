@@ -6,8 +6,11 @@ rem  Double-click it, or from a terminal:
 rem
 rem      run.bat                        listen on udp 14550 (the default)
 rem      run.bat tcp:127.0.0.1:5762     SITL over tcp
-rem      run.bat COM5,57600             a radio on a serial port
+rem      run.bat COM5:460800            a radio on a serial port
 rem      run.bat --selftest             check the link only, no window
+rem
+rem  In PowerShell put .\ in front - it will not run a
+rem  script from the folder you are standing in without it.
 rem
 rem  Anything typed after run.bat is handed straight to main.py.
 rem ---------------------------------------------------------------------

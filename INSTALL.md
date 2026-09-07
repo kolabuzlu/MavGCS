@@ -13,11 +13,15 @@ For working on MavGCS rather than just flying with it. Needs
 Double-click **`run.bat`**, or from a terminal in this folder:
 
 ```
-run.bat                        listen on UDP 14550 (the default)
-run.bat tcp:127.0.0.1:5762     SITL over TCP
-run.bat COM5,57600             a radio on a serial port
-run.bat --selftest             check the link only, no window
+.\run.bat                        listen on UDP 14550 (the default)
+.\run.bat tcp:127.0.0.1:5762     SITL over TCP
+.\run.bat COM5:460800            a radio on a serial port
+.\run.bat --selftest             check the link only, no window
 ```
+
+The `.\` matters in PowerShell: it will not run a script from the folder
+you are standing in without it. In the old Command Prompt the plain name
+works either way.
 
 It finds Python, installs anything missing from `requirements.txt` the
 first time, and passes whatever you type after it straight to `main.py`.
@@ -29,9 +33,9 @@ If MavGCS stops with an error the window stays open so you can read it.
 afterwards. Same arguments as `run.bat`:
 
 ```
-watch.bat                       listen on UDP 14550
-watch.bat tcp:127.0.0.1:5762    SITL over TCP
-watch.bat COM5:460800           a radio on a serial port
+.\watch.bat                       listen on UDP 14550
+.\watch.bat tcp:127.0.0.1:5762    SITL over TCP
+.\watch.bat COM5:460800           a radio on a serial port
 ```
 
 Fly as normal. If it dies, the log under `logs\` holds the stack of every

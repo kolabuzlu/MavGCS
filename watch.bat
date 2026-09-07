@@ -6,6 +6,9 @@ rem      watch.bat                       listen on UDP 14550
 rem      watch.bat tcp:127.0.0.1:5762    SITL over TCP
 rem      watch.bat COM5:460800           a radio on a serial port
 rem
+rem  In PowerShell put .\ in front - it will not run a
+rem  script from the folder you are standing in without it.
+rem
 rem  Writes one file per run into logs\. When it dies, give Claude that
 rem  file - it holds the stack of every thread at the moment of the
 rem  fault, Chromium's own log, and what Windows recorded afterwards.
