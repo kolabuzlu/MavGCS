@@ -225,6 +225,13 @@ class MavlinkLink(QThread):
     # {name: (value, mavlink type)} once the list is complete, or as
     # complete as it is going to get.
     params_ready = Signal(dict)
+    # (written so far, how many were asked for)
+    param_write_progress = Signal(int, int)
+    # {name: (asked, got_back_or_None)} once every write has been
+    # answered or given up on. got_back is None where nothing came
+    # back at all, and can differ from asked where the aircraft
+    # clamped the value to something it would accept.
+    param_write_done = Signal(dict)
     # How hard the radio is working: bytes and messages a second each
     # way, and what fraction of the vehicle's frames never arrived.
     link_stats_update = Signal(dict)
@@ -378,6 +385,11 @@ class MavlinkLink(QThread):
         self._param_quiet_at = None  # when to chase what is missing
         self._param_rounds = 0       # how many times we have chased
         self._param_active = False
+        # Writes still waiting for the aircraft to echo them back:
+        # name -> [wanted, type, tries so far, when to retry].
+        self._param_writes = {}
+        self._param_write_results = {}
+        self._param_write_total = 0
         # Last reading of pymavlink's own counters, so the meter can
         # report a rate rather than a total.
         self._stats_at = None
@@ -570,6 +582,9 @@ class MavlinkLink(QThread):
             if (self._stats_at is None
                     or now - self._stats_at >= self.LINK_STATS_INTERVAL_S):
                 self._emit_link_stats(now)
+
+            if self._param_writes:
+                self._check_param_writes(now)
 
             # The parameter stream has gone quiet: chase the gaps, or
             # settle for what arrived.
@@ -851,6 +866,10 @@ class MavlinkLink(QThread):
                 # reading as one from the stream.
                 if self._param_active:
                     self._collect_param(name, msg)
+                # An echo is the only answer a PARAM_SET gets, so it is
+                # also how a write is confirmed.
+                if self._param_writes:
+                    self._on_param_write_echo(name, msg.param_value)
                 if name == "WP_LOITER_RAD":
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
@@ -1287,6 +1306,13 @@ class MavlinkLink(QThread):
     # link go bad while it is happening, and long enough that the numbers
     # are not jittering too fast to read.
     LINK_STATS_INTERVAL_S = 1.0
+
+    # How long to wait for the aircraft to echo a parameter back before
+    # trying again. A PARAM_SET draws no acknowledgement of its own, so
+    # the echo is the only evidence the value landed.
+    PARAM_WRITE_ACK_S = 2.0
+    # How many times to send one parameter before giving up on it.
+    PARAM_WRITE_TRIES = 3
 
     PARAM_QUIET_S = 3.0
     # How many times to chase the ones that never arrived before settling
@@ -1787,6 +1813,108 @@ class MavlinkLink(QThread):
         self.command_feedback.emit(
             "Stopped reading parameters at %d" % len(self._params))
         self.params_ready.emit(dict(self._params))
+
+    def write_parameters(self, changes):
+        """Write parameters, and confirm each one landed.
+
+        `changes` is {name: (value, mavlink type)}.
+
+        A PARAM_SET is answered only by the aircraft echoing the parameter
+        back, so that echo is what counts as success - and the value in it
+        is the value the aircraft actually took, which is not always the
+        one asked for. It clamps anything outside a parameter's range, and
+        a pilot who is not told that would believe a setting they do not
+        have.
+        """
+        if self.master is None:
+            self.command_feedback.emit("Not connected - can't write parameters")
+            return
+        if not changes:
+            return
+        now = time.time()
+        self._param_writes = {}
+        self._param_write_results = {}
+        for name, (value, ptype) in changes.items():
+            self._param_writes[name] = [float(value), int(ptype), 0, now]
+        self._param_write_total = len(self._param_writes)
+        self.command_feedback.emit(
+            "Writing %d parameter%s..."
+            % (self._param_write_total,
+               "" if self._param_write_total == 1 else "s"))
+        self.param_write_progress.emit(0, self._param_write_total)
+        self._send_pending_writes(now)
+
+    def _send_pending_writes(self, now):
+        """Send every write that is due, and count the attempt."""
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                for name, entry in self._param_writes.items():
+                    value, ptype, tries, due = entry
+                    if now < due:
+                        continue
+                    self.master.mav.param_set_send(
+                        self.master.target_system,
+                        self.master.target_component,
+                        name.encode(), float(value), int(ptype))
+                    entry[2] = tries + 1
+                    entry[3] = now + self.PARAM_WRITE_ACK_S
+        except Exception as e:
+            self.command_feedback.emit(f"Failed to write parameters: {e}")
+            self._finish_writes()
+
+    def _on_param_write_echo(self, name, value):
+        """The aircraft echoed a parameter we were writing."""
+        entry = self._param_writes.pop(name, None)
+        if entry is None:
+            return
+        wanted = entry[0]
+        self._param_write_results[name] = (wanted, float(value))
+        self.param_write_progress.emit(
+            len(self._param_write_results), self._param_write_total)
+        if not self._param_writes:
+            self._finish_writes()
+
+    def _check_param_writes(self, now):
+        """Retry the ones that have gone unanswered, or give up on them."""
+        if not self._param_writes:
+            return
+        overdue = [n for n, e in self._param_writes.items()
+                   if now >= e[3]]
+        if not overdue:
+            return
+        for name in overdue:
+            if self._param_writes[name][2] >= self.PARAM_WRITE_TRIES:
+                # Nothing came back after every attempt: the aircraft does
+                # not have this value, and the pilot has to be told which.
+                self._param_write_results[name] = (
+                    self._param_writes.pop(name)[0], None)
+        self.param_write_progress.emit(
+            len(self._param_write_results), self._param_write_total)
+        if self._param_writes:
+            self._send_pending_writes(now)
+        else:
+            self._finish_writes()
+
+    def _finish_writes(self):
+        results = dict(self._param_write_results)
+        self._param_writes = {}
+        self._param_write_results = {}
+        self._param_write_total = 0
+        if not results:
+            return
+        took = sum(1 for w, g in results.values() if g is not None)
+        lost = len(results) - took
+        clamped = sum(1 for w, g in results.values()
+                      if g is not None and abs(g - w) > 1e-6)
+        parts = ["%d written" % took]
+        if clamped:
+            parts.append("%d changed by the aircraft" % clamped)
+        if lost:
+            parts.append("%d NOT written" % lost)
+        self.command_feedback.emit("Parameters: " + ", ".join(parts))
+        self.param_write_done.emit(results)
 
     def _collect_param(self, name, msg):
         """One parameter off the stream."""

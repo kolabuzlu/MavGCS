@@ -1511,15 +1511,17 @@ class ParamLoadingDialog(QDialog):
 
 
 class ParametersDialog(QDialog):
-    """The vehicle's parameters, as read from it.
+    """The vehicle's parameters, read and written.
 
-    Read-only on purpose. Showing them is useful on its own, and writing
-    one back is a different kind of act - a wrong parameter can leave an
-    aircraft unflyable - so it is not something to fall into by clicking
-    in a table.
+    Writing one is a different kind of act from reading it - a wrong
+    parameter can leave an aircraft unflyable - so nothing is sent until
+    Write is pressed, and then only the values actually edited, and then
+    only after a list of them has been shown and agreed to.
     """
 
     refresh_requested = Signal()
+    # {name: (value, mavlink type)} for the edited rows only.
+    write_requested = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1544,12 +1546,23 @@ class ParametersDialog(QDialog):
         self.save_btn.setToolTip("Write these to a .param file")
         self.save_btn.clicked.connect(self._save)
         top.addWidget(self.save_btn)
+        self.write_btn = QPushButton("Write")
+        self.write_btn.setToolTip(
+            "Send the edited values to the vehicle")
+        self.write_btn.setEnabled(False)
+        self.write_btn.clicked.connect(self._write)
+        top.addWidget(self.write_btn)
         layout.addLayout(top)
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Name", "Value", "Type"])
         self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Only the value column is editable; the name and type are the
+        # vehicle's to state, not ours.
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.table.itemChanged.connect(self._on_item_changed)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -1563,6 +1576,13 @@ class ParametersDialog(QDialog):
         self.status_label = QLabel("Not read yet - press GET PARAMS.")
         layout.addWidget(self.status_label)
 
+        # Edits waiting to be written: name -> new value. Kept apart from
+        # the table so a filter or a re-sort cannot lose them.
+        self._edits = {}
+        # True while the table is being filled, so filling it does not
+        # look like editing.
+        self._loading = False
+
     def set_progress(self, got, total):
         self.status_label.setText(
             "Reading... %d of %d" % (got, total) if total
@@ -1571,6 +1591,8 @@ class ParametersDialog(QDialog):
     def set_params(self, params):
         """Replace the table with a fresh reading."""
         self._params = dict(params)
+        self._edits = {}
+        self._loading = True
         # Sorting while filling is both slow and wrong - rows move under
         # the insert - so it goes off for the duration.
         self.table.setSortingEnabled(False)
@@ -1579,16 +1601,145 @@ class ParametersDialog(QDialog):
             value, ptype = self._params[name]
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(name))
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 0, name_item)
             # Sorts by number, shows the formatted text.
             self.table.setItem(
                 row, 1,
                 NumericItem(format_param_value(value, ptype), value))
-            self.table.setItem(
-                row, 2,
-                QTableWidgetItem(PARAM_TYPE_NAMES.get(ptype, str(ptype))))
+            type_item = QTableWidgetItem(PARAM_TYPE_NAMES.get(ptype, str(ptype)))
+            type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 2, type_item)
         self.table.setSortingEnabled(True)
+        self._loading = False
+        self._refresh_write_button()
         self._apply_filter()
+
+    EDITED_BRUSH = QColor("#ffc107")
+
+    def _on_item_changed(self, item):
+        """A value was typed. Remember it; nothing is sent yet."""
+        if self._loading or item.column() != 1:
+            return
+        name_item = self.table.item(item.row(), 0)
+        if name_item is None:
+            return
+        name = name_item.text()
+        original, ptype = self._params.get(name, (None, None))
+        if original is None:
+            return
+        text = item.text().strip()
+        try:
+            value = float(text)
+        except ValueError:
+            # Not a number. Put the vehicle's value back rather than
+            # leaving something unsendable in the cell.
+            self._set_cell(item, format_param_value(original, ptype), original)
+            self._edits.pop(name, None)
+            self._mark_row(item.row(), False)
+            self.status_label.setText("%s: not a number - left unchanged" % name)
+            self._refresh_write_button()
+            return
+        if ptype in PARAM_INT_TYPES:
+            value = float(int(round(value)))
+        changed = abs(value - original) > 1e-9
+        if changed:
+            self._edits[name] = value
+        else:
+            self._edits.pop(name, None)
+        # Re-show it the way the rest of the column is written, and keep
+        # the sort key in step with what is displayed.
+        self._set_cell(item, format_param_value(value, ptype), value)
+        self._mark_row(item.row(), changed)
+        self._refresh_write_button()
+
+    def _set_cell(self, item, text, value):
+        """Set text and sort key without it counting as another edit."""
+        was, self._loading = self._loading, True
+        item.setText(text)
+        if isinstance(item, NumericItem):
+            item._value = float(value)
+        self._loading = was
+
+    def _mark_row(self, row, edited):
+        for col in range(self.table.columnCount()):
+            cell = self.table.item(row, col)
+            if cell is not None:
+                cell.setForeground(self.EDITED_BRUSH if edited
+                                   else self.table.palette().text())
+
+    def _refresh_write_button(self):
+        n = len(self._edits)
+        self.write_btn.setText("Write (%d)" % n if n else "Write")
+        self.write_btn.setEnabled(bool(n))
+
+    def _write(self):
+        """Show what is about to change, then ask for it to be sent."""
+        if not self._edits:
+            return
+        lines = []
+        for name in sorted(self._edits):
+            old_value, ptype = self._params[name]
+            lines.append("%s:  %s  ->  %s"
+                         % (name, format_param_value(old_value, ptype),
+                            format_param_value(self._edits[name], ptype)))
+        shown = "\n".join(lines[:15])
+        if len(lines) > 15:
+            shown += "\n... and %d more" % (len(lines) - 15)
+        reply = QMessageBox.question(
+            self, "Write parameters",
+            "Write %d parameter%s to the vehicle?\n\n%s\n\n"
+            "A wrong value can leave the aircraft unflyable."
+            % (len(lines), "" if len(lines) == 1 else "s", shown),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self.write_requested.emit(
+            {n: (v, self._params[n][1]) for n, v in self._edits.items()})
+
+    def set_write_progress(self, done, total):
+        self.status_label.setText("Writing... %d of %d" % (done, total))
+
+    def set_write_results(self, results):
+        """What the aircraft actually took.
+
+        A value it clamped is not the value that was asked for, and
+        saying "written" over the top of that would be a lie the pilot
+        acts on.
+        """
+        took = clamped = lost = 0
+        for name, (wanted, got) in results.items():
+            row = self._row_for(name)
+            if got is None:
+                lost += 1
+                continue
+            ptype = self._params.get(name, (0, 0))[1]
+            self._params[name] = (got, ptype)
+            self._edits.pop(name, None)
+            if row is not None:
+                cell = self.table.item(row, 1)
+                if cell is not None:
+                    self._set_cell(cell, format_param_value(got, ptype), got)
+                self._mark_row(row, False)
+            if abs(got - wanted) > 1e-6:
+                clamped += 1
+            else:
+                took += 1
+        parts = ["%d written" % took]
+        if clamped:
+            parts.append("%d changed by the aircraft" % clamped)
+        if lost:
+            parts.append("%d NOT written - still edited" % lost)
+        self.status_label.setText(", ".join(parts))
+        self._refresh_write_button()
+
+    def _row_for(self, name):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.text() == name:
+                return row
+        return None
 
     def _apply_filter(self):
         text = self.filter_edit.text().strip().upper()
@@ -4836,6 +4987,8 @@ class MainWindow(QMainWindow):
             self._params_dialog = ParametersDialog(self)
             self._params_dialog.refresh_requested.connect(
                 self.on_refresh_parameters)
+            self._params_dialog.write_requested.connect(
+                self.on_write_parameters)
             if self._params:
                 self._params_dialog.set_params(self._params)
         self._params_dialog.show()
@@ -4873,6 +5026,26 @@ class MainWindow(QMainWindow):
             self._params_dialog.set_progress(got, total)
         if self._params_loading is not None:
             self._params_loading.set_progress(got, total)
+
+    def on_write_parameters(self, changes):
+        """Send the edited values, if there is a vehicle to send them to."""
+        link = self._require_link()
+        if link:
+            link.write_parameters(changes)
+
+    def on_param_write_progress(self, done, total):
+        if self._params_dialog is not None:
+            self._params_dialog.set_write_progress(done, total)
+
+    def on_param_write_done(self, results):
+        # Keep our own copy in step with what the aircraft actually took,
+        # so a later Save writes the real values rather than the asked-for
+        # ones.
+        for name, (wanted, got) in results.items():
+            if got is not None and name in self._params:
+                self._params[name] = (got, self._params[name][1])
+        if self._params_dialog is not None:
+            self._params_dialog.set_write_results(results)
 
     def on_params_ready(self, params):
         self._hide_param_loading()
@@ -5065,6 +5238,8 @@ class MainWindow(QMainWindow):
         self.link.set_home_result.connect(self.on_set_home_result)
         self.link.param_progress.connect(self.on_param_progress)
         self.link.params_ready.connect(self.on_params_ready)
+        self.link.param_write_progress.connect(self.on_param_write_progress)
+        self.link.param_write_done.connect(self.on_param_write_done)
         self.link.link_stats_update.connect(self.on_link_stats)
         self.link.vehicle_terrain_update.connect(self.on_vehicle_terrain)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
