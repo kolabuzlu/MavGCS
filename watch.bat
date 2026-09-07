@@ -2,7 +2,8 @@
 rem ---------------------------------------------------------------------
 rem  Run MavGCS with everything recorded, so a crash can be explained.
 rem
-rem      watch.bat        (in PowerShell:  .\watch.bat)
+rem      watch.bat            (in PowerShell:  .\watch.bat)
+rem      watch.bat notrail    same, but the trail is held short
 rem
 rem  No connection to give it - start it, then connect from the
 rem  Connection panel as usual.
@@ -41,7 +42,7 @@ pause
 exit /b 1
 
 :got_python
-%PY% tools\watch_run.py
+%PY% tools\watch_run.py %*
 set "RC=%errorlevel%"
 echo.
 pause

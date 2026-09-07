@@ -5,6 +5,7 @@ QWebChannel bridge so a map click can call back into Python (used for the
 """
 
 import json
+import os
 
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineProfile
@@ -1004,7 +1005,7 @@ var path = L.polyline([], {color: 'red', weight: 2}).addTo(map);
 // costs more per update the longer you fly - measured at 0.12ms per update
 // at 1000 points and 3.27ms at 20000, climbing roughly linearly, all of it
 // on the GUI thread.
-var TRAIL_MAX_POINTS = 8000;      // about 45 minutes at ArduPilot's 3Hz
+var TRAIL_MAX_POINTS = %%TRAIL_MAX%%;   // 8000 is about 45 minutes at 3Hz
 
 // What is on the map right now, as counts. Only ever called by the
 // watcher: the ANGLE cache that overflows just before the compositor
@@ -2715,6 +2716,16 @@ class MapView(QWebEngineView):
         html = LEAFLET_HTML.replace(
             "%%TILE_PROXY%%", f"http://127.0.0.1:{tile_proxy_port}"
         )
+        # The trail is the one thing on the map that grows without bound,
+        # and it is the current suspect for the compositor fault - so it
+        # can be capped from outside to fly a comparison. Normal runs set
+        # nothing and get the full 8000.
+        try:
+            trail_max = int(os.environ.get("MAVGCS_TRAIL_MAX", "8000"))
+        except ValueError:
+            trail_max = 8000
+        trail_max = max(2, min(trail_max, 100000))
+        html = html.replace("%%TRAIL_MAX%%", str(trail_max))
         # base URL lets the relative CDN references resolve sanely
         self.setHtml(html, QUrl("https://localhost/"))
 

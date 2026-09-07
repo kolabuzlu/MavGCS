@@ -128,6 +128,13 @@ def main():
     env["PYTHONUNBUFFERED"] = "1"
     # Ask the map to report what it is drawing; see main.py.
     env["MAVGCS_WATCH_STATE"] = "1"
+    # watch.bat notrail - fly exactly as normal, but with the trail held
+    # at a few points. It is the one thing on the map that grows without
+    # bound, and the current suspect for the compositor fault, so this
+    # flies the comparison without changing anything else.
+    notrail = len(sys.argv) > 1 and sys.argv[1].lower() == "notrail"
+    if notrail:
+        env["MAVGCS_TRAIL_MAX"] = "2"
     # Chromium's own log, turned up, on stderr where it can be captured.
     existing = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = (
@@ -140,6 +147,8 @@ def main():
         log.write("started   %s\n" % started.strftime("%Y-%m-%d %H:%M:%S"))
         log.write("connect from the Connection panel once it is up\n")
         log.write("flags     %s\n" % env["QTWEBENGINE_CHROMIUM_FLAGS"])
+        log.write("trail     %s\n"
+                  % ("HELD SHORT - notrail" if notrail else "normal (8000)"))
         log.write("=" * 70 + "\n")
         log.flush()
 
