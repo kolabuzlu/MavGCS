@@ -137,6 +137,18 @@ class TelemetryPanel(QFrame):
             self.labels[key].setText(str(value))
 
 
+def _rate_text(bytes_per_s) -> str:
+    """A link rate a pilot can read at a glance.
+
+    In kB/s past a kilobyte, because that is the unit the radios are sold
+    in - an ELRS link carries something like 1 to 2 kB/s, and "1.4 kB/s"
+    against that is immediately meaningful where "1434 B/s" is not.
+    """
+    if bytes_per_s >= 1024.0:
+        return "%.1f kB/s" % (bytes_per_s / 1024.0)
+    return "%.0f B/s" % bytes_per_s
+
+
 def _hms(seconds) -> str:
     hours, rem = divmod(int(seconds), 3600)
     minutes, secs = divmod(rem, 60)
@@ -2747,6 +2759,14 @@ class ConnectionPanel(QGroupBox):
         row.addWidget(self.field1_stack, 1)   # takes the slack (no trailing
         row.addWidget(self.field2_stack)      # stretch, so the row ends flush)
         refresh_row.addWidget(self.refresh_btn)
+        self.link_stats_label = QLabel("")
+        self.link_stats_label.setStyleSheet(
+            "color: #9aa4ad; font-size: 10px; font-family: Consolas, monospace;")
+        self.link_stats_label.setToolTip(
+            "What the radio link is carrying: bytes and messages a second "
+            "in and out, and the share of the vehicle's frames that did not "
+            "arrive. A link near its limit shows a high rate with loss "
+            "climbing; a quiet one shows neither.")
         refresh_row.addStretch(1)
         # Shares the button row rather than taking one of its own: a row to
         # itself cost the map 27px of height for a control used once in a
@@ -2755,6 +2775,12 @@ class ConnectionPanel(QGroupBox):
         refresh_row.addWidget(self.update_btn)
         refresh_row.addWidget(self.connect_btn)
         refresh_row.addWidget(self.disconnect_btn)
+
+        # Its own line, added once the label exists. The button row had
+        # 119px to spare, and nothing readable fits in that - shortened
+        # enough to squeeze in, the meter became a row of numbers with no
+        # way to tell what they were.
+        outer.addWidget(self.link_stats_label)
 
         self._refresh_serial_ports()
         self._on_protocol_changed(self.protocol_combo.currentText())
@@ -3332,6 +3358,9 @@ class MainWindow(QMainWindow):
         self.messages_panel = MessagesPanel()
         self.sensor_panel = SensorHealthPanel()
         self.connection_panel = ConnectionPanel(*self._split_connection_string(connection_string))
+        # The meter lives on the connection panel, beside the buttons
+        # it belongs with; this is how the handler reaches it.
+        self.link_stats_label = self.connection_panel.link_stats_label
         self.status_label = QLabel()
         # True while the feedback line is showing a connection problem that
         # we put there, and may therefore remove again.
@@ -4705,6 +4734,23 @@ class MainWindow(QMainWindow):
             self.on_command_feedback("Home change refused (%s)" % detail)
             self.map_view.revert_home()
 
+    # Above this, the meter goes amber: a link losing more than a frame in
+    # fifty is not comfortable, and it is worth noticing before it becomes
+    # a link that has stopped.
+    LINK_LOSS_WARN_PCT = 2.0
+
+    def on_link_stats(self, stats):
+        """The radio meter, once a second."""
+        rx = stats.get("rx_bps", 0.0)
+        tx = stats.get("tx_bps", 0.0)
+        loss = stats.get("loss_pct", 0.0)
+        self.link_stats_label.setText(
+            "RX %s  %.0f/s     TX %s     loss %.1f%%"
+            % (_rate_text(rx), stats.get("rx_mps", 0.0), _rate_text(tx), loss))
+        self.link_stats_label.setStyleSheet(
+            "color: %s; font-size: 10px; font-family: Consolas, monospace;"
+            % ("#e6a23c" if loss >= self.LINK_LOSS_WARN_PCT else "#9aa4ad"))
+
     def _forget_parameters(self):
         """Drop the list, so nothing on screen outlives the vehicle."""
         # A modal window waiting on a vehicle that has gone would wait
@@ -4949,6 +4995,7 @@ class MainWindow(QMainWindow):
         self.link.set_home_result.connect(self.on_set_home_result)
         self.link.param_progress.connect(self.on_param_progress)
         self.link.params_ready.connect(self.on_params_ready)
+        self.link.link_stats_update.connect(self.on_link_stats)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()

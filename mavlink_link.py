@@ -221,6 +221,9 @@ class MavlinkLink(QThread):
     # {name: (value, mavlink type)} once the list is complete, or as
     # complete as it is going to get.
     params_ready = Signal(dict)
+    # How hard the radio is working: bytes and messages a second each
+    # way, and what fraction of the vehicle's frames never arrived.
+    link_stats_update = Signal(dict)
 
     # The five EKF variances, sent apart from the single worst-of figure
     # the HUD flag uses. Buried in that max() a variance can only say the
@@ -363,6 +366,10 @@ class MavlinkLink(QThread):
         self._param_quiet_at = None  # when to chase what is missing
         self._param_rounds = 0       # how many times we have chased
         self._param_active = False
+        # Last reading of pymavlink's own counters, so the meter can
+        # report a rate rather than a total.
+        self._stats_at = None
+        self._stats_last = None
 
     def run(self):
         try:
@@ -531,6 +538,10 @@ class MavlinkLink(QThread):
                     "only. Any altitude or circle fence set on the aircraft "
                     "is switched off by this.")
                 self._apply_fence_enabled(True)
+
+            if (self._stats_at is None
+                    or now - self._stats_at >= self.LINK_STATS_INTERVAL_S):
+                self._emit_link_stats(now)
 
             # The parameter stream has gone quiet: chase the gaps, or
             # settle for what arrived.
@@ -1220,6 +1231,11 @@ class MavlinkLink(QThread):
     # A parameter list arrives as a stream with no end marker, so "done"
     # is decided by it going quiet. Long enough that a slow radio mid-list
     # is not mistaken for the end.
+    # How often the link meter reports. A second is short enough to see a
+    # link go bad while it is happening, and long enough that the numbers
+    # are not jittering too fast to read.
+    LINK_STATS_INTERVAL_S = 1.0
+
     PARAM_QUIET_S = 3.0
     # How many times to chase the ones that never arrived before settling
     # for what there is. Each round asks for the gaps individually.
@@ -1614,6 +1630,56 @@ class MavlinkLink(QThread):
                 % (lat, lon, alt_amsl))
         except Exception as e:
             self.command_feedback.emit(f"Failed to set home: {e}")
+
+    def _emit_link_stats(self, now):
+        """What the radio is actually carrying, once a second.
+
+        pymavlink counts all of this already - bytes and packets both
+        ways, frames that failed their checksum, and frames missing from
+        the sequence. Taking the difference since last time turns those
+        totals into the rates a pilot can act on: a link near its ceiling
+        looks completely different from one that is simply quiet, and
+        without this the app says only CONNECTED for both.
+
+        Loss is measured over the last interval rather than since the
+        connection opened. A cumulative figure barely moves once a flight
+        has been going a while, which is exactly when it would matter.
+        """
+        if self.master is None:
+            return
+        try:
+            mav = self.master.mav
+            totals = (int(mav.total_bytes_received), int(mav.total_bytes_sent),
+                      int(mav.total_packets_received), int(mav.total_packets_sent),
+                      int(getattr(self.master, "mav_loss", 0)),
+                      int(mav.total_receive_errors))
+        except Exception:
+            return
+
+        last, then = self._stats_last, self._stats_at
+        self._stats_last, self._stats_at = totals, now
+        if last is None or then is None:
+            return                      # first reading is only a baseline
+        span = now - then
+        if span <= 0:
+            return
+
+        # Counters only ever climb; a negative step means the link was
+        # replaced underneath us, so start again rather than report nonsense.
+        deltas = [a - b for a, b in zip(totals, last)]
+        if any(d < 0 for d in deltas):
+            return
+        rx_b, tx_b, rx_p, tx_p, lost, errors = deltas
+
+        arrived = rx_p + lost
+        self.link_stats_update.emit({
+            "rx_bps": rx_b / span,
+            "tx_bps": tx_b / span,
+            "rx_mps": rx_p / span,
+            "tx_mps": tx_p / span,
+            "loss_pct": (100.0 * lost / arrived) if arrived else 0.0,
+            "errors": errors,
+        })
 
     def request_parameters(self):
         """Ask the vehicle for its whole parameter list.
