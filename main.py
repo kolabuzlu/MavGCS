@@ -2645,7 +2645,8 @@ class ConnectionPanel(QGroupBox):
     # the host box was filled in, which silently produced an outgoing
     # connection for the common SITL case, where listening is what's needed.
     PROTOCOLS = ["Serial", "TCP", "UDP (listen)", "UDP (connect to)"]
-    BAUD_RATES = ["4800", "9600", "19200", "38400", "57600", "115200", "230400"]
+    BAUD_RATES = ["4800", "9600", "19200", "38400", "57600", "115200",
+                  "230400", "460800"]
 
     connect_requested = Signal(str)
     disconnect_requested = Signal()
