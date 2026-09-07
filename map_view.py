@@ -140,6 +140,19 @@ LEAFLET_HTML = """
   .leaflet-control-layers-separator {
     border-top-color: rgba(255,255,255,0.15);
   }
+  /* The attribution bar was the last white box left on the map once the
+     zoom and basemap controls went dark. Restyled rather than hidden:
+     OpenStreetMap and Esri both require their credit to stay visible, and
+     it is Leaflet's own too. Written with .leaflet-container in front to
+     match the specificity Leaflet sets its own background at, which is
+     two classes - the same trap as the touch borders above. */
+  .leaflet-container .leaflet-control-attribution {
+    background: rgba(0,0,0,0.6);
+    color: #b8c0c6;
+  }
+  .leaflet-control-attribution a { color: #6fc3e8; }
+  .leaflet-control-attribution a:hover,
+  .leaflet-control-attribution a:focus { color: #9ad8f2; }
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
        same size and position so the two read as one stack of instruments.
