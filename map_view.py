@@ -1308,6 +1308,7 @@ var trackSpeed = 0;       // m/s
 // angle between them - the crab angle, the whole reason for showing both -
 // read several degrees out through a turn.
 var animCourseFrom = 0, animCourseTo = 0, currentCourse = -1;
+var lastMarkerDeg = null;   // last angle actually written to the icon
 var navBearing = null;    // deg, what the controller is steering at
 var navDistance = 0;      // m to that point
 var turnRate = 0;         // deg/s
@@ -1582,10 +1583,30 @@ function setWind(fromDeg, speedMps) {
     overlaysNeedRedraw();
 }
 
+// Every rotation on the compass goes through here.
+//
+// These are written from the same 60fps animation loop as the aircraft
+// marker, and they had the same fault: an unrounded float meant a fresh
+// angle on every frame and never the same one twice. Each distinct angle
+// costs an entry in the GPU's input layout cache, which holds 512, and a
+// few minutes of turning overflowed it - taking the compositor down with
+// an access violation. toFixed(2) made 36000 possible angles per element.
+//
+// Whole degrees give 360, which fits and repeats, and the guard means a
+// steady heading writes nothing at all. On a 200px dial one degree is
+// under two pixels at the rim.
+function _setRotation(el, deg) {
+    if (!el) { return; }
+    var d = ((Math.round(deg) % 360) + 360) % 360;
+    if (el.__rotDeg === d) { return; }
+    el.__rotDeg = d;
+    el.setAttribute('transform', 'rotate(' + d + ' 100 100)');
+}
+
 function _updateCompass(heading, course) {
     var rose = document.getElementById('cp-rose');
     if (!rose) { return; }
-    rose.setAttribute('transform', 'rotate(' + (-heading).toFixed(2) + ' 100 100)');
+    _setRotation(rose, -heading);
 
     var h = document.getElementById('cp-heading');
     if (h) { h.textContent = Math.round(heading % 360) + '\u00b0'; }
@@ -1601,7 +1622,7 @@ function _updateCompass(heading, course) {
     if (tm) {
         if (course >= 0) {
             tm.style.display = '';
-            tm.setAttribute('transform', 'rotate(' + course.toFixed(2) + ' 100 100)');
+            _setRotation(tm, course);
         } else {
             tm.style.display = 'none';
         }
@@ -1613,8 +1634,7 @@ function _updateCompass(heading, course) {
             hg.style.display = 'none';
         } else {
             hg.style.display = '';
-            hg.setAttribute('transform',
-                            'rotate(' + homeBearing.toFixed(2) + ' 100 100)');
+            _setRotation(hg, homeBearing);
         }
     }
 
@@ -1630,7 +1650,7 @@ function _updateCompass(heading, course) {
         // WIND reports where the wind comes FROM; the arrow shows where it
         // is pushing the aircraft, which is the opposite way.
         var toward = (windFrom + 180) % 360;
-        wg.setAttribute('transform', 'rotate(' + toward.toFixed(2) + ' 100 100)');
+        _setRotation(wg, toward);
     }
     // km/h, matching the wind readout in the telemetry panel.
     if (wt) { wt.textContent = (windSpeed * 3.6).toFixed(1) + ' km/h'; }
@@ -1650,7 +1670,29 @@ function _animateMarker(now) {
         var el = marker.getElement();
         if (el) {
             var inner = el.querySelector('div');
-            if (inner) { inner.style.transform = 'rotate(' + currentHeading + 'deg)'; }
+            // Whole degrees, and only when the degree actually changes.
+            //
+            // This line used to write the raw interpolated float on every
+            // animation frame, so a turn produced a brand new rotation
+            // angle 60 times a second and never the same one twice. Each
+            // distinct angle costs an entry in the GPU's input layout
+            // cache, which holds 512; a few minutes of loitering overflows
+            // it, and the eviction that follows takes the compositor down
+            // with an access violation inside Qt6WebEngineCore.
+            //
+            // That is the crash: it needed a turn, which is why it struck
+            // in LOITER and in the loiter after RTL and never on a
+            // straight leg. Rounding bounds the set to 360 angles, which
+            // fits in the cache and repeats instead of growing, and the
+            // guard means a steady heading writes nothing at all. One
+            // degree on a 92px icon moves its tip by under a pixel.
+            if (inner) {
+                var deg = Math.round(currentHeading) % 360;
+                if (deg !== lastMarkerDeg) {
+                    inner.style.transform = 'rotate(' + deg + 'deg)';
+                    lastMarkerDeg = deg;
+                }
+            }
         }
 
         if (trackCourse >= 0) {
@@ -2342,7 +2384,16 @@ function renderAdsbContacts(contacts) {
         var el = m.getElement();
         if (el) {
             var rot = el.querySelector('.adsb-rot');
-            if (rot) rot.style.transform = 'rotate(' + track + 'deg)';
+            // Whole degrees, and only on a change - the same reason as the
+            // aircraft marker and the compass. Every contact carries its
+            // own angle, so with traffic about this multiplies.
+            if (rot) {
+                var td = ((Math.round(track) % 360) + 360) % 360;
+                if (rot.__rotDeg !== td) {
+                    rot.__rotDeg = td;
+                    rot.style.transform = 'rotate(' + td + 'deg)';
+                }
+            }
             var lbl = el.querySelector('.adsb-label');
             if (lbl && lbl.textContent !== callsign) lbl.textContent = callsign;
         }

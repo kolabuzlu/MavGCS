@@ -23,6 +23,8 @@ Modes:
                       map still pans and the trail still grows; the only
                       thing missing is the turning. This is the control
                       for the loiter theory.
+  norotate            circling, but with the heading held still, so the
+                      marker never turns. The map pans on the same path.
   novectors           circling, with the vector overlays off. Those are
                       replaced wholesale on every update, unlike the
                       trail which is only appended to.
@@ -47,7 +49,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 LOGS = ROOT / "logs"
 RUN_FOR_S = 660          # 11 minutes - past every crash seen so far
-MODES = ("loiter", "straight", "novectors", "notrail", "frozen")
+MODES = ("loiter", "straight", "norotate", "novectors",
+         "notrail", "frozen")
 
 
 # --------------------------------------------------------------- child --
@@ -87,6 +90,15 @@ def drive(mode):
         n["i"] += 1
         if mode == "frozen":
             lat, lon, hdg = LAT0, LON0, 0.0
+        elif mode == "norotate":
+            # The position still goes round - so the map pans exactly as
+            # it does in a loiter - but the reported heading never moves.
+            # The marker therefore holds one angle. This is what separates
+            # turning the icon from flying a circle.
+            a = n["i"] * ANGLE_STEP
+            lat = LAT0 + RADIUS_DEG * math.sin(a)
+            lon = LON0 + RADIUS_DEG * math.cos(a)
+            hdg = 0.0
         elif mode == "straight":
             # The same ground speed as the circuit - one arc step is
             # RADIUS_DEG * ANGLE_STEP - but on a constant bearing, so the
