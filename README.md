@@ -19,3 +19,5 @@ Created by **Derin Hakan Karakurt**
 Download `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
 and run **MavGCS.exe**. No setup needed.
+
+Dedicated to N.A. :sparkling_heart:
