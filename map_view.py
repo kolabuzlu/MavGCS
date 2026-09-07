@@ -1039,6 +1039,12 @@ function mavgcsDrawState() {
         // second, and in straight flight it is empty. The trail was ruled
         // out by flying with it capped, and the crash follows LOITER and
         // the loiter after RTL, so what the turn draws is the question.
+        // Whether the aircraft was actually turning, and how hard the
+        // rotations are being written. A run with no crash proves nothing
+        // unless hdg was moving - which is why the quiet SITL runs earlier
+        // told us nothing at all.
+        hdg: Math.round(currentHeading),
+        rotw: rotWrites,
         vectors: vectorsEnabled ? 1 : 0,
         arc: turnArc.getLatLngs().length,
         track: trackLine.getLatLngs().length,
@@ -1309,6 +1315,11 @@ var trackSpeed = 0;       // m/s
 // read several degrees out through a turn.
 var animCourseFrom = 0, animCourseTo = 0, currentCourse = -1;
 var lastMarkerDeg = null;   // last angle actually written to the icon
+// How many rotations have actually been written to the DOM. Before
+// the angles were rounded this climbed at 60 a second in a turn and
+// never repeated an angle, which is what overflowed the GPU's cache.
+// In the log it is the fix working or not, as a number.
+var rotWrites = 0;
 var navBearing = null;    // deg, what the controller is steering at
 var navDistance = 0;      // m to that point
 var turnRate = 0;         // deg/s
@@ -1600,6 +1611,7 @@ function _setRotation(el, deg) {
     var d = ((Math.round(deg) % 360) + 360) % 360;
     if (el.__rotDeg === d) { return; }
     el.__rotDeg = d;
+    rotWrites++;
     el.setAttribute('transform', 'rotate(' + d + ' 100 100)');
 }
 
@@ -1691,6 +1703,7 @@ function _animateMarker(now) {
                 if (deg !== lastMarkerDeg) {
                     inner.style.transform = 'rotate(' + deg + 'deg)';
                     lastMarkerDeg = deg;
+                    rotWrites++;
                 }
             }
         }
