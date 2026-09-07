@@ -263,13 +263,23 @@ function nowMs() {
     return (window.performance && performance.now) ? performance.now() : Date.now();
 }
 
+function wrap360(deg) {
+    return ((deg % 360) + 360) % 360;
+}
+
 function shortestAngleDelta(from, to) {
     // Via the short way round, so 359 -> 1 turns 2 degrees, not -358.
-    return ((to - from + 540) % 360) - 180;
+    //
+    // The second modulo is not decoration. JavaScript's % keeps the sign
+    // of the dividend, so once `from` has run past about 540 a bare
+    // ((to - from + 540) % 360) - 180 goes negative and hands back the
+    // LONG way round: at from=700, to=5 it asked for -335 degrees instead
+    // of +25. The camera then swung most of a circle in a few frames.
+    return wrap360(to - from + 180) - 180;
 }
 
 function lerpAngle(from, to, u) {
-    return from + shortestAngleDelta(from, to) * u;
+    return wrap360(from + shortestAngleDelta(from, to) * u);
 }
 
 function pushSample(buffer, sample, t) {
@@ -422,7 +432,8 @@ function stepCamera(dtMs) {
         Math.abs(wantPos.lon - pose.lon) > SNAP_DEG) {
         pose.lat = wantPos.lat; pose.lon = wantPos.lon;
         pose.alt = wantPos.alt; pose.agl = wantPos.agl;
-        pose.yaw = wantAtt.yaw; pose.pitch = wantAtt.pitch; pose.roll = wantAtt.roll;
+        pose.yaw = wrap360(wantAtt.yaw); pose.pitch = wantAtt.pitch;
+        pose.roll = wantAtt.roll;
     } else {
         var k = 1 - Math.exp(-dtMs / SMOOTH_TAU_MS);
         pose.lat += (wantPos.lat - pose.lat) * k;
@@ -430,7 +441,12 @@ function stepCamera(dtMs) {
         pose.alt += (wantPos.alt - pose.alt) * k;
         pose.agl += (wantPos.agl - pose.agl) * k;
         pose.pitch += (wantAtt.pitch - pose.pitch) * k;
-        pose.yaw += shortestAngleDelta(pose.yaw, wantAtt.yaw) * k;
+        // Wrapped back into 0..360 rather than left to accumulate. It used
+        // to grow without bound - a loiter adds 360 a lap - which is how it
+        // reached the range where the delta above came back inverted, and
+        // why the view only threw itself round after a couple of laps and
+        // only as the heading crossed north.
+        pose.yaw = wrap360(pose.yaw + shortestAngleDelta(pose.yaw, wantAtt.yaw) * k);
         pose.roll += shortestAngleDelta(pose.roll, wantAtt.roll) * k;
     }
     applyPose();
