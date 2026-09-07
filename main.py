@@ -3928,6 +3928,7 @@ class MainWindow(QMainWindow):
 
     def on_battery_power(self, amps, consumed_mah):
         self._return_home.set_power(amps, consumed_mah)
+        self.horizon.set_battery_power(amps, consumed_mah)
 
     def on_battery_limits(self, capacity_mah, low_mah):
         self._return_home.set_limits(capacity_mah, low_mah)

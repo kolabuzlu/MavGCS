@@ -27,6 +27,8 @@ class ArtificialHorizon(QWidget):
         self.wind_dir = None   # degrees (direction wind is coming FROM), None until first update
         self.wind_speed = None  # m/s, None until first update
         self.battery_voltage = None  # total pack voltage (V), None until first update
+        self.battery_amps = None     # current being drawn (A)
+        self.battery_mah = None      # taken out of the pack so far
         self.cell_count = 4  # default guess: 4S is a common pack size
         # When True the sky/ground fill is skipped so this widget can be
         # rendered as a transparent overlay on the 3D FPV view.
@@ -87,8 +89,13 @@ class ArtificialHorizon(QWidget):
     LEFT_GROUP_MARGIN = 13.0
 
     BATTERY_BOX_W = 104
-    BATTERY_BOX_H = 44
+    # Three rows now: pack voltage, per-cell with the S selector beside
+    # it, and what is being drawn and what has been used.
+    BATTERY_BOX_H = 60
     BATTERY_MARGIN = 6
+    # Where each row sits inside the box, from its top edge.
+    BATTERY_ROW2_Y = 22
+    BATTERY_ROW3_Y = 40
 
     TAPE_TOP = 4
     TAPE_H = 26
@@ -128,8 +135,11 @@ class ArtificialHorizon(QWidget):
         """
         rect = cls.battery_box_rect_for(w, h)
         combo_w, combo_h = 44, 16
+        # Measured from the top, not the bottom: it belongs beside the
+        # per-cell figure, and anchoring it to the bottom moved it onto
+        # the current row the moment the box grew a third one.
         return QRect(int(rect.right() - 6 - combo_w),
-                     int(rect.bottom() - 6 - combo_h), combo_w, combo_h)
+                     int(rect.top() + cls.BATTERY_ROW2_Y), combo_w, combo_h)
 
     def _battery_box_rect(self):
         return self.battery_box_rect_for(self.width(), self.height())
@@ -148,6 +158,12 @@ class ArtificialHorizon(QWidget):
 
     def set_battery_voltage(self, voltage):
         self.battery_voltage = voltage
+
+    def set_battery_power(self, amps, consumed_mah):
+        """What the pack is giving right now, and what has gone from it."""
+        self.battery_amps = amps
+        self.battery_mah = consumed_mah
+        self.update()
         self.update()
 
     def set_attitude(self, roll, pitch, yaw=0.0):
@@ -450,9 +466,31 @@ class ArtificialHorizon(QWidget):
         # Leave room on the right for the cell_selector combo box that
         # sits over this same row.
         painter.drawText(
-            QRectF(batt_rect.left() + 6, batt_rect.top() + 22, batt_rect.width() - 58, 16),
+            QRectF(batt_rect.left() + 6,
+                   batt_rect.top() + self.BATTERY_ROW2_Y,
+                   batt_rect.width() - 58, 16),
             Qt.AlignVCenter | Qt.AlignLeft, cell_text,
         )
+
+        # Third row: what is being drawn, and what has been taken out.
+        # Current on the left and consumed on the right, so neither has to
+        # be read past the other as the figures change width.
+        #
+        # A point smaller than the row above it, because two labelled
+        # figures have to share a box sized for one. At 8pt the widest
+        # pair a real aircraft produces - a negative current beside a
+        # five-figure consumption - leaves two pixels between them; at
+        # 7pt it leaves seventeen.
+        painter.setFont(QFont("Sans", 7))
+        amps_text = ("%.1f A" % self.battery_amps
+                     if self.battery_amps is not None else "-- A")
+        mah_text = ("%.0f mAh" % self.battery_mah
+                    if self.battery_mah is not None else "-- mAh")
+        row3 = QRectF(batt_rect.left() + 6,
+                      batt_rect.top() + self.BATTERY_ROW3_Y,
+                      batt_rect.width() - 12, 16)
+        painter.drawText(row3, Qt.AlignVCenter | Qt.AlignLeft, amps_text)
+        painter.drawText(row3, Qt.AlignVCenter | Qt.AlignRight, mah_text)
 
         # Fixed aircraft symbol (always horizontal, always centered)
         painter.setPen(QPen(Qt.yellow, 3))
