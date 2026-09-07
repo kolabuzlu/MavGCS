@@ -1,9 +1,10 @@
 """
 Run MavGCS with everything recorded, so a crash can be explained afterwards.
 
-    watch.bat                      listen on UDP 14550 (the default)
-    watch.bat tcp:127.0.0.1:5762   SITL over TCP
-    watch.bat COM5:460800          a radio on a serial port
+    watch.bat        (in PowerShell:  .\\watch.bat)
+
+Takes nothing. MavGCS does not connect on its own anyway - start it,
+then pick the port and press Connect in the Connection panel as usual.
 
 Writes one file per run into logs\\, holding:
 
@@ -103,7 +104,6 @@ def main():
     LOGS.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = LOGS / ("mavgcs_%s.log" % stamp)
-    args = sys.argv[1:]
 
     env = dict(os.environ)
     # Dump every thread's stack if the process dies on a fault. This is
@@ -121,13 +121,13 @@ def main():
     with open(path, "w", encoding="utf-8", errors="replace") as log:
         log.write("MavGCS watched run\n")
         log.write("started   %s\n" % started.strftime("%Y-%m-%d %H:%M:%S"))
-        log.write("arguments %s\n" % (" ".join(args) or "(none - UDP 14550)"))
+        log.write("connect from the Connection panel once it is up\n")
         log.write("flags     %s\n" % env["QTWEBENGINE_CHROMIUM_FLAGS"])
         log.write("=" * 70 + "\n")
         log.flush()
 
         proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "main.py")] + args,
+            [sys.executable, str(ROOT / "main.py")],
             cwd=str(ROOT), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1)

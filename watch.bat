@@ -2,16 +2,14 @@
 rem ---------------------------------------------------------------------
 rem  Run MavGCS with everything recorded, so a crash can be explained.
 rem
-rem      watch.bat                       listen on UDP 14550
-rem      watch.bat tcp:127.0.0.1:5762    SITL over TCP
-rem      watch.bat COM5:460800           a radio on a serial port
+rem      watch.bat        (in PowerShell:  .\watch.bat)
 rem
-rem  In PowerShell put .\ in front - it will not run a
-rem  script from the folder you are standing in without it.
+rem  No connection to give it - start it, then connect from the
+rem  Connection panel as usual.
 rem
 rem  Writes one file per run into logs\. When it dies, give Claude that
-rem  file - it holds the stack of every thread at the moment of the
-rem  fault, Chromium's own log, and what Windows recorded afterwards.
+rem  file: it holds the stack of every thread at the moment of the fault,
+rem  Chromium's own log, and what Windows recorded afterwards.
 rem ---------------------------------------------------------------------
 setlocal
 cd /d "%~dp0"
@@ -43,7 +41,7 @@ pause
 exit /b 1
 
 :got_python
-%PY% tools\watch_run.py %*
+%PY% tools\watch_run.py
 set "RC=%errorlevel%"
 echo.
 pause
