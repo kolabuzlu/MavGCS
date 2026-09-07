@@ -1783,6 +1783,12 @@ class MavlinkLink(QThread):
         if self.master is None:
             self.command_feedback.emit("Not connected - can't read parameters")
             return
+        if self._param_writes:
+            # Same collision from the other side.
+            self.command_feedback.emit(
+                "Still writing parameters - wait for that to finish, "
+                "then read")
+            return
         self._params = {}
         self._param_index = {}
         self._param_total = None
@@ -1830,6 +1836,17 @@ class MavlinkLink(QThread):
             self.command_feedback.emit("Not connected - can't write parameters")
             return
         if not changes:
+            return
+        if self._param_active:
+            # A read streams every parameter past, old values and all, and
+            # a write is confirmed by nothing more than the aircraft
+            # echoing the name back. Let the two overlap and the stream
+            # answers the write with the value it is replacing - the write
+            # would be reported as landed, or as clamped back to what it
+            # already was, without a single one of them having been sent.
+            self.command_feedback.emit(
+                "Still reading parameters - wait for that to finish, "
+                "then write")
             return
         now = time.time()
         self._param_writes = {}
