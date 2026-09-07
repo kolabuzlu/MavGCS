@@ -213,6 +213,10 @@ class MavlinkLink(QThread):
     # The vehicle accepted a fence, so the map may stop showing it as
     # pending.
     fence_uploaded = Signal()
+    # The upload did not get there, and why. Without this the map has
+    # no way to know, and a fence that was never sent looks exactly
+    # like one still being drawn.
+    fence_failed = Signal(str)
     # (accepted, the vehicle's own word for why) - so the map can put
     # a refused home marker back where it was.
     set_home_result = Signal(bool, str)
@@ -359,6 +363,10 @@ class MavlinkLink(QThread):
         # losing it is what sends the enable down the polygon-only path.
         # One more ask costs three small packets.
         self._fence_read_retry = None
+        # Kept so a failed upload can be tried again without making
+        # the pilot draw the whole thing a second time.
+        self._fence_retry_left = 0
+        self._fence_retry_points = None
         # The full parameter list, while it is arriving.
         self._params = {}            # name -> (value, type)
         self._param_index = {}       # index -> name, to spot the gaps
@@ -508,14 +516,30 @@ class MavlinkLink(QThread):
                 and self._mission_deadline is not None
                 and now >= self._mission_deadline
             ):
+                was_fence = self._mission_kind == "fence"
                 self._mission_state = None
                 self._mission_pending = None
                 self._mission_deadline = None
                 self._mission_kind = "mission"
-                self.command_feedback.emit(
-                    "Mission upload timed out - no reply from the vehicle. "
-                    "Try Start Mission again."
-                )
+                if was_fence:
+                    # Saying "try Start Mission again" for a fence sent the
+                    # pilot to the wrong button entirely.
+                    if self._fence_retry_left > 0 and self._fence_retry_points:
+                        self._fence_retry_left -= 1
+                        self.command_feedback.emit(
+                            "No reply to the fence upload - trying again")
+                        self.upload_fence(self._fence_retry_points,
+                                          _retry=True)
+                    else:
+                        self.command_feedback.emit(
+                            "Fence upload failed - no reply from the vehicle. "
+                            "The aircraft does NOT have this fence.")
+                        self.fence_failed.emit("no reply from the vehicle")
+                else:
+                    self.command_feedback.emit(
+                        "Mission upload timed out - no reply from the vehicle. "
+                        "Try Start Mission again."
+                    )
 
             # Halfway through the wait with still no answer: ask once more
             # before falling back to the lossy path.
@@ -701,6 +725,16 @@ class MavlinkLink(QThread):
                                 f"Mission updated ({n_real_waypoints} waypoints) - "
                                 "continuing on the current leg"
                             )
+                    elif self._mission_kind == "fence":
+                        try:
+                            why = mavutil.mavlink.enums[
+                                "MAV_MISSION_RESULT"][msg.type].name
+                        except (KeyError, AttributeError):
+                            why = "result %s" % msg.type
+                        self.command_feedback.emit(
+                            "Fence refused by the aircraft (%s). "
+                            "The aircraft does NOT have this fence." % why)
+                        self.fence_failed.emit(why)
                     else:
                         try:
                             result_name = mavutil.mavlink.enums["MAV_MISSION_RESULT"][msg.type].name
@@ -1245,10 +1279,16 @@ class MavlinkLink(QThread):
     # instead. What already arrived is kept either way.
     PARAM_MAX_CHASE = 60
 
+    # A fence upload is a conversation of a dozen messages over a radio
+    # that drops them. One lost item stalls the whole thing, and the pilot
+    # is left looking at a shape that never changed - so try again before
+    # saying it failed.
+    FENCE_UPLOAD_RETRIES = 1
+
     FENCE_ACTION_RTL = 1
     FENCE_TYPE_POLYGON_BIT = 4
 
-    def upload_fence(self, vertices):
+    def upload_fence(self, vertices, _retry=False):
         """Send a polygon inclusion fence and switch it on.
 
         Uses the same upload machinery as a mission, told to speak about
@@ -1274,6 +1314,11 @@ class MavlinkLink(QThread):
 
         # No home placeholder here - that is a flight-plan convention, and
         # a fence's first item is a real corner.
+        if not _retry:
+            # A fresh request gets a fresh allowance of retries; a retry
+            # must not top its own allowance back up.
+            self._fence_retry_left = self.FENCE_UPLOAD_RETRIES
+            self._fence_retry_points = list(vertices)
         self._mission_pending = [(lat, lon, 0.0) for lat, lon in vertices]
         self._mission_kind = "fence"
         self._mission_restart = False
@@ -1294,6 +1339,7 @@ class MavlinkLink(QThread):
             self._mission_deadline = None
             self._mission_kind = "mission"
             self.command_feedback.emit(f"Fence upload failed: {e}")
+            self.fence_failed.emit(str(e))
 
     def set_fence_enabled(self, on: bool):
         """Turn the fence on or off, and make sure it is a fence.

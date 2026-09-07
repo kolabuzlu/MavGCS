@@ -170,6 +170,16 @@ LEAFLET_HTML = """
   /* Sits directly under Leaflet's own +/- buttons, matching their width so
      it reads as part of that control. Useful when caching for offline use:
      the cache is per zoom level, so it tells you which one you're filling. */
+  /* The fence's own state, written on it. Deliberately loud: this is
+     the difference between the aircraft having a fence and not. */
+  .fence-state {
+    background: rgba(20,20,20,0.82); border: none; box-shadow: none;
+    font-family: sans-serif; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.4px; padding: 2px 7px; border-radius: 3px;
+  }
+  .fence-state::before { display: none; }
+  .fence-state-wait   { color: #ffc107; }
+  .fence-state-failed { color: #ff6b6b; }
   #zoom-indicator {
     position: absolute; top: 76px; left: 10px; width: 30px;
     background: rgba(0,0,0,0.6); color: white;
@@ -1657,6 +1667,7 @@ function finishFence() {
 }
 
 function clearFence() {
+    if (fenceLive) { fenceLive.unbindTooltip(); }
     for (var i = 0; i < fenceMarkers.length; i++) { map.removeLayer(fenceMarkers[i]); }
     fenceMarkers = [];
     fencePoints = [];
@@ -1681,7 +1692,13 @@ function setFenceAccepted(pts) {
         fenceLive = L.polygon(pts, {color: '#ff9800', weight: 2,
                                     fillOpacity: 0.05,
                                     dashArray: '6,5'}).addTo(map);
-        fenceLive.bindTooltip('Fence sent - not yet confirmed by the aircraft');
+        // A label that is always on, not a hover tooltip. Dashed-while-
+        // waiting looked all but identical to dashed-while-drawing - two
+        // states a pilot has to be able to tell apart, since one means the
+        // aircraft has the fence and the other means it has nothing.
+        fenceLive.bindTooltip('SENDING - waiting for the aircraft',
+                              {permanent: true, direction: 'center',
+                               className: 'fence-state fence-state-wait'});
     }
     fencePoints = [];
     fenceArmed = false;
@@ -1696,11 +1713,38 @@ function setFenceArmed(on) {
     fenceArmed = !!on;
     if (!fenceLive) { return; }
     fenceLive.setStyle(fenceArmed
-        ? {dashArray: null, weight: 3, fillOpacity: 0.08}
-        : {dashArray: '6,5', weight: 2, fillOpacity: 0.05});
-    fenceLive.bindTooltip(fenceArmed
-        ? 'Geofence armed - RTL on breach'
-        : 'Fence sent - not yet confirmed by the aircraft');
+        ? {color: '#ff9800', dashArray: null, weight: 3, fillOpacity: 0.08}
+        : {color: '#ff9800', dashArray: '6,5', weight: 2, fillOpacity: 0.05});
+    fenceLive.unbindTooltip();
+    if (fenceArmed) {
+        // Armed is the state it should be in, so it gets no shouting
+        // label - solid says it, and the detail is there on hover.
+        fenceLive.bindTooltip('Geofence armed - RTL on breach',
+                              {direction: 'center'});
+    } else {
+        fenceLive.bindTooltip('SENDING - waiting for the aircraft',
+                              {permanent: true, direction: 'center',
+                               className: 'fence-state fence-state-wait'});
+    }
+}
+
+// The upload did not get there. Red, and it says so on the map rather
+// than only in the message log, because the shape is what the pilot is
+// looking at when they wonder whether it worked.
+function setFenceFailed(reason) {
+    if (!fenceLive) {
+        // Nothing was ever accepted, so it is the drawing that failed.
+        if (!fenceShape) { return; }
+        fenceLive = fenceShape;
+        fenceShape = null;
+    }
+    fenceArmed = false;
+    fenceLive.setStyle({color: '#d32f2f', weight: 3, dashArray: '6,5',
+                        fillOpacity: 0.06});
+    fenceLive.unbindTooltip();
+    fenceLive.bindTooltip('NOT SENT - ' + (reason || 'upload failed'),
+                          {permanent: true, direction: 'center',
+                           className: 'fence-state fence-state-failed'});
 }
 
 map.on('click', function(e) {
@@ -2705,6 +2749,10 @@ class MapView(QWebEngineView):
     def revert_home(self):
         """Put the home marker back where the vehicle last said it was."""
         self.page().runJavaScript("revertHome();")
+
+    def set_fence_failed(self, reason):
+        """The upload did not get there - say so on the shape itself."""
+        self.page().runJavaScript("setFenceFailed(%s);" % json.dumps(str(reason)))
 
     def set_fence_armed(self, on):
         """Draw the fence as armed only once the aircraft has said so."""

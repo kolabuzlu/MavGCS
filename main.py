@@ -4631,6 +4631,18 @@ class MainWindow(QMainWindow):
             self._pending_fence = []
             self._recheck_fence_containment()
 
+    def on_fence_failed(self, reason):
+        """The fence never reached the aircraft.
+
+        The map is told as well as the message log: the shape is what the
+        pilot is looking at while wondering whether it worked, and a fence
+        that was never sent has to look nothing like one that was.
+        """
+        self._pending_fence = []
+        self._fence_points = []
+        self._recheck_fence_containment()
+        self.map_view.set_fence_failed(reason)
+
     def on_fence_enabled(self, enabled):
         """What the aircraft says its fence is doing.
 
@@ -4996,6 +5008,7 @@ class MainWindow(QMainWindow):
         self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
         self.link.fence_uploaded.connect(self.on_fence_uploaded)
         self.link.fence_enabled_update.connect(self.on_fence_enabled)
+        self.link.fence_failed.connect(self.on_fence_failed)
         self.link.set_home_result.connect(self.on_set_home_result)
         self.link.param_progress.connect(self.on_param_progress)
         self.link.params_ready.connect(self.on_params_ready)
