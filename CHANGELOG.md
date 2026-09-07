@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.0.6 - Parameter writing added.
+Bug fixes and improvements.
+
 ## V2.0.5 - Terrain altitude fallback added.
 Bug fixes and improvements.
 
