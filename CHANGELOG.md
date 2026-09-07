@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.0.5 - Terrain altitude falls back to local terrain data.
+Bug fixes and improvements.
+
 ## V2.0.4 - Link throughput meter added.
 Bug fixes and improvements.
 
