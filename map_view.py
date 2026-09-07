@@ -1034,6 +1034,15 @@ function mavgcsDrawState() {
         // composited layer, which is the thing that multiplies draw calls.
         transformed: transformed,
         canvases: document.querySelectorAll('canvas').length,
+        // The vector overlay redraws differently in a turn: the turn arc
+        // is up to 49 points that are REPLACED, not appended to, twice a
+        // second, and in straight flight it is empty. The trail was ruled
+        // out by flying with it capped, and the crash follows LOITER and
+        // the loiter after RTL, so what the turn draws is the question.
+        vectors: vectorsEnabled ? 1 : 0,
+        arc: turnArc.getLatLngs().length,
+        track: trackLine.getLatLngs().length,
+        nav: navLine.getLatLngs().length,
         nodes: pane ? pane.querySelectorAll('*').length : -1
     };
 }

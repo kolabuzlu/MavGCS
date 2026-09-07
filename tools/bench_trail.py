@@ -2,8 +2,8 @@
 Reproduce the WebEngine compositor crash on the bench, with no aircraft.
 
     bench.bat                 (in PowerShell:  .\\bench.bat)
+    bench.bat straight
     bench.bat notrail
-    bench.bat frozen
 
 Flies a synthetic circuit at 2Hz - the rate ArduPilot sends position -
 with every overlay off, and watches for the two things that mark the
@@ -16,15 +16,21 @@ reproduces in about seven minutes at a desk.
 
 Modes:
 
-  moving   (default)  the aircraft flies, so the trail grows, the map
-                      pans and the marker turns. This is the one that
-                      reproduces the crash.
-  notrail             identical, except the trail is capped at 2 points.
-                      Everything movement causes still happens EXCEPT the
-                      growing polyline, so this is what separates the
-                      trail from panning and rotation.
+  loiter   (default)  the aircraft circles, as it does in LOITER or
+                      after RTL. The heading sweeps through 360 degrees
+                      and the map pans round. This reproduces the crash.
+  straight            the same ground speed on a constant bearing. The
+                      map still pans and the trail still grows; the only
+                      thing missing is the turning. This is the control
+                      for the loiter theory.
+  novectors           circling, with the vector overlays off. Those are
+                      replaced wholesale on every update, unlike the
+                      trail which is only appended to.
+  notrail             circling, but the trail capped at 2 points. Ruled
+                      the trail out - it crashed anyway, in the air and
+                      with the overlays off.
   frozen              the aircraft holds position. Same 2Hz of updates,
-                      but nothing moves at all.
+                      but nothing moves at all. Survives.
 
 Prints REPRODUCED or SURVIVED at the end, and keeps the full output in
 logs\\ either way.
@@ -41,7 +47,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 LOGS = ROOT / "logs"
 RUN_FOR_S = 660          # 11 minutes - past every crash seen so far
-MODES = ("moving", "notrail", "frozen")
+MODES = ("loiter", "straight", "novectors", "notrail", "frozen")
 
 
 # --------------------------------------------------------------- child --
@@ -73,6 +79,7 @@ def drive(mode):
 
     # A circuit the size of a real one, over Anitkabir.
     LAT0, LON0, RADIUS_DEG = 39.9250, 32.8360, 0.004
+    ANGLE_STEP = 0.01
     started = time.time()
     n = {"i": 0}
 
@@ -80,8 +87,16 @@ def drive(mode):
         n["i"] += 1
         if mode == "frozen":
             lat, lon, hdg = LAT0, LON0, 0.0
+        elif mode == "straight":
+            # The same ground speed as the circuit - one arc step is
+            # RADIUS_DEG * ANGLE_STEP - but on a constant bearing, so the
+            # heading never changes and the map pans one way instead of
+            # sweeping round. Everything else is identical.
+            lat = LAT0 + n["i"] * RADIUS_DEG * ANGLE_STEP
+            lon = LON0
+            hdg = 0.0
         else:
-            a = n["i"] * 0.01
+            a = n["i"] * ANGLE_STEP
             lat = LAT0 + RADIUS_DEG * math.sin(a)
             lon = LON0 + RADIUS_DEG * math.cos(a)
             hdg = (math.degrees(a) + 90.0) % 360.0
@@ -98,6 +113,11 @@ def drive(mode):
         if mode == "notrail":
             win.map_view.page().runJavaScript(
                 "TRAIL_MAX_POINTS = 2; path.setLatLngs([]);")
+        elif mode == "novectors":
+            # Circling as usual, but with the track, heading, nav and turn
+            # arc lines switched off - the overlays that are rebuilt from
+            # scratch on every update rather than appended to.
+            win.map_view.page().runJavaScript("setVectorsEnabled(false);")
         step()
 
     def stop():
@@ -113,7 +133,7 @@ def drive(mode):
 
 # -------------------------------------------------------------- parent --
 def main():
-    mode = (sys.argv[1] if len(sys.argv) > 1 else "moving").lower()
+    mode = (sys.argv[1] if len(sys.argv) > 1 else "loiter").lower()
     if mode not in MODES:
         sys.exit("Modes are: %s" % ", ".join(MODES))
 
