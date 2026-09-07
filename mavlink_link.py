@@ -228,6 +228,10 @@ class MavlinkLink(QThread):
     # How hard the radio is working: bytes and messages a second each
     # way, and what fraction of the vehicle's frames never arrived.
     link_stats_update = Signal(dict)
+    # What the aircraft says about the ground beneath it, and whether
+    # it actually knows: spacing is the grid size of its terrain data
+    # and comes back zero when it has none.
+    vehicle_terrain_update = Signal(float, float, int)
 
     # The five EKF variances, sent apart from the single worst-of figure
     # the HUD flag uses. Buried in that max() a variance can only say the
@@ -1031,10 +1035,24 @@ class MavlinkLink(QThread):
                 # current_height is the vehicle's height above the terrain
                 # right beneath it - true AGL, which the 3D view needs to
                 # place its camera without depending on a sea-level datum.
-                self.status_update.emit({
-                    "terrain_gl": f"{msg.terrain_height:.2f}",
-                    "agl": f"{msg.current_height:.2f}",
-                })
+                #
+                # spacing is the grid size of the terrain data the aircraft
+                # holds. Zero means it holds none - no card, no tiles for
+                # here, or the feature switched off - and then the heights
+                # it reports are zero, which is a perfectly ordinary
+                # altitude and so indistinguishable from a real reading.
+                # Handing the number on with that flag lets the display
+                # fall back to our own terrain rather than showing a zero
+                # that means nothing.
+                spacing = int(getattr(msg, "spacing", 0))
+                self.vehicle_terrain_update.emit(
+                    float(msg.terrain_height), float(msg.current_height),
+                    spacing)
+                if spacing > 0:
+                    self.status_update.emit({
+                        "terrain_gl": f"{msg.terrain_height:.2f}",
+                        "agl": f"{msg.current_height:.2f}",
+                    })
 
             elif mtype == "BATTERY_STATUS":
                 # Consumed capacity is the number that actually tells you

@@ -430,6 +430,79 @@ class TerrainRadarWorker(QThread):
             self.wait(1000)
 
 
+class VehicleTerrainWorker(QThread):
+    """Ground height under the aircraft, from our own terrain data.
+
+    A standing worker rather than a thread per sample: the aircraft moves
+    continuously, and starting a thread every few seconds for the rest of
+    a flight is a lot of threads for one number.
+
+    Only used when the aircraft cannot answer for itself. It carries its
+    own terrain database on an SD card, and when that is missing or the
+    feature is off it reports a ground height of zero - which is a real
+    altitude, so it cannot be told apart from a correct reading by its
+    value alone.
+    """
+
+    # lat, lon, metres above sea level (or None where the ground is unknown)
+    ready = Signal(float, float, object)
+
+    # How often to look. The ground moves slowly under an aeroplane
+    # compared with everything else on the screen, and each look can cost
+    # a tile download.
+    INTERVAL_S = 3.0
+    POLL_INTERVAL_S = 0.25
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._running = True
+        self._lock = threading.Lock()
+        self._where = None          # (lat, lon) asked for
+        self._done = None           # (lat, lon) last answered
+        self._next_at = 0.0
+        self._provider = TerrainProvider()
+
+    def set_position(self, lat, lon):
+        """Thread-safe; call from the GUI thread as position arrives."""
+        with self._lock:
+            self._where = (float(lat), float(lon))
+
+    def clear(self):
+        with self._lock:
+            self._where = None
+            self._done = None
+
+    def run(self):
+        while self._running:
+            with self._lock:
+                where = self._where
+            now = time.time()
+            if where is None or now < self._next_at:
+                self.msleep(int(self.POLL_INTERVAL_S * 1000))
+                continue
+            # Moving less than about a tenth of a tile is not worth a new
+            # answer; the ground has not meaningfully changed.
+            if self._done is not None and \
+                    abs(where[0] - self._done[0]) < 0.0005 and \
+                    abs(where[1] - self._done[1]) < 0.0005:
+                self._next_at = now + self.INTERVAL_S
+                continue
+            try:
+                elev = self._provider.elevation(where[0], where[1])
+            except Exception:
+                elev = None
+            self._done = where
+            self._next_at = time.time() + self.INTERVAL_S
+            if self._running:
+                self.ready.emit(where[0], where[1], elev)
+
+    def stop(self):
+        self._running = False
+        if not self.wait(5000):
+            self.terminate()
+            self.wait(1000)
+
+
 class PointElevationWorker(QThread):
     """One ground height, off the GUI thread, then finished.
 

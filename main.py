@@ -113,9 +113,21 @@ class TelemetryPanel(QFrame):
             grid.addWidget(value_label, row + 1, col)
             self.labels[key] = value_label
 
-    def set_value(self, key, value):
-        if key in self.labels:
-            self.labels[key].setText(str(value))
+    # A reading that did not come from the aircraft. Grey rather than
+    # white, so a borrowed number never passes for one the vehicle
+    # measured itself.
+    BORROWED_STYLE = ("color: #9aa4ad; font-size: 14px; font-weight: bold; "
+                      "font-style: italic;")
+    NORMAL_STYLE = "color: white; font-size: 14px; font-weight: bold;"
+
+    def set_value(self, key, value, borrowed=False):
+        label = self.labels.get(key)
+        if label is None:
+            return
+        label.setText(str(value))
+        want = self.BORROWED_STYLE if borrowed else self.NORMAL_STYLE
+        if label.styleSheet() != want:
+            label.setStyleSheet(want)
 
 
 def _rate_text(bytes_per_s) -> str:
@@ -3446,6 +3458,14 @@ class MainWindow(QMainWindow):
         self._home_move_timer = None
         # Remembered so the same warning is not announced on every recheck.
         self._last_terrain_warning = ([], [])
+        # When the aircraft last reported ground it actually knew.
+        # Until it does, anything shown is borrowed from our own
+        self._vehicle_terrain_at = None
+        # The last answer from our own terrain, kept so the display can
+        # fall back to it the moment the aircraft's own reading goes
+        # stale - without waiting for the aeroplane to move far enough
+        # for a fresh lookup to be worth doing.
+        self._own_terrain_elev = None
         self._last_fence_warning = ([], [])
         self._last_amsl_alt = 0.0
         # True height above the terrain below, from TERRAIN_REPORT. None
@@ -3465,6 +3485,9 @@ class MainWindow(QMainWindow):
         self.terrain_worker = TerrainRadarWorker(self)
         self.terrain_worker.fan_ready.connect(self.on_terrain_fan_ready)
         self.terrain_worker.start()
+        self.vehicle_terrain_worker = terrain_provider.VehicleTerrainWorker(self)
+        self.vehicle_terrain_worker.ready.connect(self.on_own_terrain)
+        self.vehicle_terrain_worker.start()
 
         # Checks the mission against the ground under it. Its own thread
         # because a waypoint over unvisited country means downloading a
@@ -3898,6 +3921,10 @@ class MainWindow(QMainWindow):
 
     def on_position(self, lat, lon, alt, heading):
         self.horizon.set_altitude(alt)
+        # So the ground height can be looked up locally if the aircraft
+        # turns out not to know its own. The worker decides how often it
+        # is worth actually sampling.
+        self.vehicle_terrain_worker.set_position(lat, lon)
         self.horizon.set_heading(heading)
         self.horizon.set_position(lat, lon)
         self._flight_stats.on_position(lat, lon, alt)
@@ -4736,6 +4763,50 @@ class MainWindow(QMainWindow):
     # a link that has stopped.
     LINK_LOSS_WARN_PCT = 2.0
 
+    # How long the aircraft's own terrain reading stays good for. Longer
+    # than the message interval, so one dropped report does not make the
+    # display flicker between sources.
+    VEHICLE_TERRAIN_GOOD_S = 6.0
+
+    def on_vehicle_terrain(self, terrain_height, agl, spacing):
+        """What the aircraft says about the ground under it.
+
+        spacing is zero when it has no terrain data of its own, and then
+        the heights are zero too - which is why this cannot be left to the
+        number alone. Only a reading it actually made counts.
+        """
+        if spacing > 0:
+            self._vehicle_terrain_at = time.time()
+        else:
+            # It is still reporting, just with nothing behind the figure.
+            self._show_borrowed_terrain()
+
+    def on_own_terrain(self, lat, lon, elev):
+        """Ground height from our own terrain data."""
+        self._own_terrain_elev = elev
+        self._show_borrowed_terrain()
+
+    def _show_borrowed_terrain(self):
+        """Put our own ground height up, greyed, unless the aircraft has
+        given a real one recently.
+
+        Driven from the incoming reports rather than only from a fresh
+        lookup: an aeroplane that is holding station still needs the
+        display to change the moment its own terrain data runs out, and
+        by then the lookup has nothing new to say.
+        """
+        if self._vehicle_terrain_is_good():
+            return
+        elev = self._own_terrain_elev
+        self.telemetry.set_value(
+            "terrain_gl", "--" if elev is None else "%.2f" % elev,
+            borrowed=True)
+
+    def _vehicle_terrain_is_good(self):
+        return (self._vehicle_terrain_at is not None
+                and time.time() - self._vehicle_terrain_at
+                <= self.VEHICLE_TERRAIN_GOOD_S)
+
     def on_link_stats(self, stats):
         """The radio meter, once a second."""
         rx = stats.get("rx_bps", 0.0)
@@ -4994,6 +5065,7 @@ class MainWindow(QMainWindow):
         self.link.param_progress.connect(self.on_param_progress)
         self.link.params_ready.connect(self.on_params_ready)
         self.link.link_stats_update.connect(self.on_link_stats)
+        self.link.vehicle_terrain_update.connect(self.on_vehicle_terrain)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
@@ -5117,6 +5189,12 @@ class MainWindow(QMainWindow):
         # screen they read as this one's, and the next vehicle may not be
         # the same airframe at all.
         self._forget_parameters()
+        # Same for what it knew about the ground: the next aircraft may
+        # carry terrain data where this one did not, and the worker should
+        # stop sampling a position nothing is flying over any more.
+        self._vehicle_terrain_at = None
+        self._own_terrain_elev = None
+        self.vehicle_terrain_worker.clear()
 
     # The middle state says what to do about it rather than what it is.
     # "MARGINAL" described the margin; by the time the margin is that
@@ -5194,6 +5272,7 @@ class MainWindow(QMainWindow):
             self.link.stop()
         self.terrain_worker.stop()
         self.wp_terrain_worker.stop()
+        self.vehicle_terrain_worker.stop()
         self.adsb_worker.stop()
         self.tile_server.stop()
         # The update check is a child of this window and gives GitHub
