@@ -93,8 +93,16 @@ LEAFLET_HTML = """
   .leaflet-control-layers,
   .leaflet-touch .leaflet-bar,
   .leaflet-touch .leaflet-control-layers {
-    border: 1px solid rgba(255,255,255,0.25);
-    box-shadow: 0 1px 5px rgba(0,0,0,0.5);
+    /* No outline and no shadow. Leaflet gives both of these a light
+       border, and a pale edge against the map read as a faint glow around
+       the only two boxes that had one - every other box laid over this map
+       is a plain rgba(0,0,0,0.6) panel with rounded corners and nothing
+       else. These now match them exactly.
+
+       Still written twice over: Leaflet sets that border in a
+       .leaflet-touch variant as well, and two classes beat one. */
+    border: none;
+    box-shadow: none;
   }
   .leaflet-bar a,
   .leaflet-bar a:hover,
