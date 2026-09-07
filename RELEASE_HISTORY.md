@@ -35,3 +35,4 @@ through dates. Restore any of them with:
 | V2.0.1 | `9248c6fc62` | 2026-09-05 | Record V2.0.1 in the release history |
 | V2.0.2 | `adc6540162` | 2026-09-05 | Record V2.0.2 in the release history |
 | V2.0.3 | `16ae8a36ca` | 2026-09-07 | Rebuilt: parameter window, and the WebEngine compositor crash fix |
+| V2.0.4 | `PENDING` | 2026-09-07 | Record V2.0.4 in the release history |
