@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.0.4 - Link throughput meter added.
+Bug fixes and improvements.
+
 ## V2.0.3 - Bug fixes and improvements.
 
 ## V2.0.2 - Bug fixes and improvements.
