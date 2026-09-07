@@ -75,6 +75,70 @@ LEAFLET_HTML = """
      raising .leaflet-control-layers on its own would do nothing. Only
      this corner moves, and the selector is the only thing in it. */
   .leaflet-top.leaflet-right { z-index: 1200; }
+  /* ---- Leaflet's own two controls, in the dark livery everything else
+     laid over this map already wears. They ship black-on-white, which
+     left the zoom buttons and the basemap selector as the only bright
+     boxes on the screen.
+
+     The background is the same rgba(0,0,0,0.6) as the overlay toggles,
+     the cache panel and the zoom indicator - and the indicator sits
+     directly beneath the +/- buttons deliberately, so matching it
+     exactly is what makes those two finally read as one control. ---- */
+  /* Both selectors twice over: Leaflet ships a .leaflet-touch variant of
+     each of these that sets a dark 2px border, and two classes beat one,
+     so on a touchscreen machine the single-class form is simply ignored.
+     This laptop has a touchscreen, which is how that was caught. */
+  .leaflet-bar,
+  .leaflet-control-layers,
+  .leaflet-touch .leaflet-bar,
+  .leaflet-touch .leaflet-control-layers {
+    border: 1px solid rgba(255,255,255,0.25);
+    box-shadow: 0 1px 5px rgba(0,0,0,0.5);
+  }
+  .leaflet-bar a,
+  .leaflet-bar a:hover,
+  .leaflet-bar a:focus {
+    background-color: rgba(0,0,0,0.6);
+    color: #ffffff;
+    border-bottom-color: rgba(255,255,255,0.15);
+  }
+  .leaflet-bar a:hover,
+  .leaflet-bar a:focus { background-color: rgba(255,255,255,0.22); }
+  /* At the zoom limits the button does nothing. Leaflet greys it to
+     #f4f4f4 on #bbb, which on a dark ground reads as the enabled state
+     rather than the dead one - so it is dimmed instead. */
+  .leaflet-bar a.leaflet-disabled,
+  .leaflet-bar a.leaflet-disabled:hover {
+    background-color: rgba(0,0,0,0.6);
+    color: rgba(255,255,255,0.28);
+  }
+  .leaflet-control-layers {
+    background: rgba(0,0,0,0.6);
+    color: #ffffff;
+    border-radius: 4px;
+  }
+  /* Leaflet's own layers glyph is a dark PNG meant for a white button,
+     and it all but vanishes once the button goes dark. Drawn here in
+     white instead, as an inline SVG so it stays sharp at any scale and
+     the retina variant needs no separate file. */
+  .leaflet-control-layers-toggle,
+  .leaflet-retina .leaflet-control-layers-toggle {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23ffffff'%3E%3Cpath d='M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z'/%3E%3C/svg%3E");
+    background-size: 20px 20px;
+  }
+  .leaflet-control-layers-expanded {
+    background: rgba(0,0,0,0.6);
+    color: #ffffff;
+    font-family: sans-serif;
+  }
+  .leaflet-control-layers label { cursor: pointer; user-select: none; }
+  /* The same blue the cache bar and the radar's focus ring use, so the
+     selected basemap is marked in the app's accent rather than the
+     browser's default. */
+  .leaflet-control-layers-selector { accent-color: #37a8db; cursor: pointer; }
+  .leaflet-control-layers-separator {
+    border-top-color: rgba(255,255,255,0.15);
+  }
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
        same size and position so the two read as one stack of instruments.
