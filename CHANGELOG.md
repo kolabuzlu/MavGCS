@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V2.0.8 - Bug fixes and improvements.
+
 ## V2.0.7 - Map compositor crash while loitering fixed.
 Bug fixes and improvements.
 
