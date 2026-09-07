@@ -1,3 +1,5 @@
+<img width="250" height="250" alt="mavgcsback" src="https://github.com/user-attachments/assets/633a5d83-a218-4c7d-9f69-fe651778ad25" />
+
 # MavGCS - Ground Control Station for MAVLink
 
 ![MavGCS screenshot](mavgcs2.png)
