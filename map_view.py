@@ -1089,6 +1089,41 @@ function addTrailPoint(latlng) {
 }
 var followDrone = true;
 var haveCentered = false;
+
+// Follow UAV used to put the aircraft at the geometric centre of the map
+// widget. That is the true centre, and it is also not where the middle of
+// the map LOOKS to be: the instrument column runs down the right, the
+// controls sit across the top, and the readouts are bottom left, so the
+// part you actually see the map through is a rectangle well left of and
+// below the widget's centre. The aircraft therefore read as high and to
+// the right even though it was pixel-perfect centred.
+//
+// These are how much of each edge the panels cover. They are pixels
+// because the panels are anchored in pixels - the instrument column is
+// 200px wide against the right edge whatever the window does - so they
+// stay right as the window resizes.
+var FOLLOW_INSET = {left: 150, top: 95, right: 262, bottom: 20};
+
+function followTargetPoint() {
+    var s = map.getSize();
+    var l = FOLLOW_INSET.left, t = FOLLOW_INSET.top;
+    var r = s.x - FOLLOW_INSET.right, b = s.y - FOLLOW_INSET.bottom;
+    // On a window too small to hold the panels the clear area collapses,
+    // and offsetting would put the aircraft off the edge. Plain centre is
+    // the safe answer there.
+    if (r - l < s.x * 0.25 || b - t < s.y * 0.25) { return s.divideBy(2); }
+    return L.point((l + r) / 2, (t + b) / 2);
+}
+
+// Move the map so the aircraft sits at that point rather than at the
+// centre. panTo/setView both take the latlng that ends up in the middle,
+// so the shift is applied to the centre we ask for.
+function followCentreFor(latlng) {
+    var want = followTargetPoint();
+    var mid = map.getSize().divideBy(2);
+    var here = map.latLngToContainerPoint(latlng);
+    return map.containerPointToLatLng(mid.add(here.subtract(want)));
+}
 var targetMarker = null;
 
 // Waypoint queue mode - clicking the map adds numbered points to a
@@ -1306,7 +1341,7 @@ function updatePosition(lat, lon, heading) {
         // threw away a deliberate wider view even for someone who did want
         // to follow the aircraft.
         if (followDrone) {
-            map.setView(latlng, map.getZoom());
+            map.setView(followCentreFor(latlng), map.getZoom());
         }
         // Set either way: _animateMarker gates its panning on this, so
         // ticking Follow UAV later still starts tracking immediately.
@@ -1758,9 +1793,9 @@ function _animateMarker(now) {
             // real work while changing nothing on screen. Drift accumulates
             // until it crosses the threshold, so motion stays smooth.
             var target = map.latLngToContainerPoint([lat, lon]);
-            var centre = map.latLngToContainerPoint(map.getCenter());
-            if (Math.abs(target.x - centre.x) >= 1 || Math.abs(target.y - centre.y) >= 1) {
-                map.panTo([lat, lon], {animate: false});
+            var want = followTargetPoint();
+            if (Math.abs(target.x - want.x) >= 1 || Math.abs(target.y - want.y) >= 1) {
+                map.panTo(followCentreFor([lat, lon]), {animate: false});
             }
         }
     }
