@@ -1006,6 +1006,37 @@ var path = L.polyline([], {color: 'red', weight: 2}).addTo(map);
 // on the GUI thread.
 var TRAIL_MAX_POINTS = 8000;      // about 45 minutes at ArduPilot's 3Hz
 
+// What is on the map right now, as counts. Only ever called by the
+// watcher: the ANGLE cache that overflows just before the compositor
+// faults is keyed on what is being drawn, and nothing in the log said
+// what that was - the run-up to a crash reads as completely idle. These
+// are the quantities that could plausibly drive it.
+function mavgcsDrawState() {
+    var pane = document.querySelector('.leaflet-map-pane');
+    var transformed = 0;
+    if (pane) {
+        var all = pane.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+            var t = getComputedStyle(all[i]).transform;
+            if (t && t !== 'none') { transformed++; }
+        }
+    }
+    return {
+        zoom: map.getZoom(),
+        layers: Object.keys(map._layers).length,
+        adsb: adsbEnabled ? Object.keys(adsbMarkers).length : -1,
+        weather: weatherEnabled ? 1 : 0,
+        trail: path.getLatLngs().length,
+        wps: waypointMarkers.length,
+        fence: fenceLegLayers.length,
+        // Every element carrying a transform is a candidate for its own
+        // composited layer, which is the thing that multiplies draw calls.
+        transformed: transformed,
+        canvases: document.querySelectorAll('canvas').length,
+        nodes: pane ? pane.querySelectorAll('*').length : -1
+    };
+}
+
 function addTrailPoint(latlng) {
     path.addLatLng(latlng);
     var pts = path.getLatLngs();
@@ -2813,6 +2844,11 @@ class MapView(QWebEngineView):
     def revert_home(self):
         """Put the home marker back where the vehicle last said it was."""
         self.page().runJavaScript("revertHome();")
+
+    def dump_draw_state(self, callback):
+        """Ask the page what it is currently drawing (watcher only)."""
+        self.page().runJavaScript("JSON.stringify(mavgcsDrawState());",
+                                  callback)
 
     def set_fence_failed(self, reason):
         """The upload did not get there - say so on the shape itself."""

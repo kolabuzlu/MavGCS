@@ -3783,6 +3783,17 @@ class MainWindow(QMainWindow):
         self.map_view.fence_cleared.connect(self.on_fence_cleared)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
+        # Under the watcher only, say what the map is drawing every few
+        # seconds. ANGLE's input layout cache overflows in a burst just
+        # before the compositor faults, and that cache is keyed on what is
+        # being drawn - but the log's run-up to a crash reads as entirely
+        # idle, so there was nothing to correlate the burst against. Off
+        # by default and costs nothing; watch.bat turns it on.
+        self._draw_state_timer = None
+        if os.environ.get("MAVGCS_WATCH_STATE") == "1":
+            self._draw_state_timer = QTimer(self)
+            self._draw_state_timer.timeout.connect(self._log_draw_state)
+            self._draw_state_timer.start(5000)
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
         self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
         self.map_view.terrain_cache_limit_changed.connect(self.on_terrain_cache_limit)
@@ -4191,6 +4202,17 @@ class MainWindow(QMainWindow):
         self._update_checker.result_ready.connect(self._on_update_result)
         self._update_checker.finished.connect(self._clear_update_checker)
         self._update_checker.start()
+
+    def _log_draw_state(self):
+        """One line of map state into the watcher's log."""
+        try:
+            self.map_view.dump_draw_state(self._print_draw_state)
+        except Exception as exc:          # never let the probe stop a flight
+            print("DRAWSTATE failed: %r" % exc, flush=True)
+
+    @staticmethod
+    def _print_draw_state(payload):
+        print("DRAWSTATE %s" % payload, flush=True)
 
     def _clear_update_checker(self):
         self._update_checker = None

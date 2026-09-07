@@ -126,6 +126,8 @@ def main():
     # what we were asking it to do.
     env["PYTHONFAULTHANDLER"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
+    # Ask the map to report what it is drawing; see main.py.
+    env["MAVGCS_WATCH_STATE"] = "1"
     # Chromium's own log, turned up, on stderr where it can be captured.
     existing = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = (
@@ -161,7 +163,11 @@ def main():
         # what was on screen when it started.
         try:
             for line in proc.stdout:
-                if "angle_platform_impl" in line or "TrimCache" in line:
+                if line.startswith("DRAWSTATE"):
+                    log.write("[watch %7.1fs] %s"
+                              % ((datetime.now() - started).total_seconds(),
+                                 line))
+                elif "angle_platform_impl" in line or "TrimCache" in line:
                     log.write("[watch %7.1fs] *** GPU: %s"
                               % ((datetime.now() - started).total_seconds(),
                                  line.lstrip()))
