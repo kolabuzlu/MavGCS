@@ -1554,11 +1554,13 @@ class ParametersDialog(QDialog):
         top.addWidget(self.write_btn)
         layout.addLayout(top)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Name", "Value", "Type"])
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Name", "Value"])
         self.table.verticalHeader().setVisible(False)
-        # Only the value column is editable; the name and type are the
-        # vehicle's to state, not ours.
+        # Only the value column is editable; the name is the vehicle's to
+        # state, not ours. The type is still tracked - it decides how a
+        # value is written and whether it is a whole number - it just does
+        # not need a column of its own to say so.
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
             | QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -1570,7 +1572,10 @@ class ParametersDialog(QDialog):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        # By name, A to Z. Turning sorting on applies whatever the header
+        # is already indicating, which starts out descending - so a list
+        # read in alphabetical order came back on screen reversed.
+        self.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         layout.addWidget(self.table, stretch=1)
 
         self.status_label = QLabel("Not read yet - press GET PARAMS.")
@@ -1605,13 +1610,14 @@ class ParametersDialog(QDialog):
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 0, name_item)
             # Sorts by number, shows the formatted text.
-            self.table.setItem(
-                row, 1,
-                NumericItem(format_param_value(value, ptype), value))
-            type_item = QTableWidgetItem(PARAM_TYPE_NAMES.get(ptype, str(ptype)))
-            type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 2, type_item)
+            value_item = NumericItem(format_param_value(value, ptype), value)
+            value_item.setToolTip(
+                "%s  (%s)" % (name, PARAM_TYPE_NAMES.get(ptype, str(ptype))))
+            self.table.setItem(row, 1, value_item)
         self.table.setSortingEnabled(True)
+        # Whatever the header was left indicating, a freshly read list
+        # comes back in the order it reads best.
+        self.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self._loading = False
         self._refresh_write_button()
         self._apply_filter()
