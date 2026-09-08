@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V2.0.9 - Land waypoints added.
+## V2.0.9 - Land waypoint added.
 Bug fixes and improvements.
 
 ## V2.0.8 - Bug fixes and improvements.
