@@ -40,4 +40,4 @@ through dates. Restore any of them with:
 | V2.0.6 | `7b405833a0` | 2026-09-07 | Dark zoom and basemap controls (re-cut) |
 | V2.0.7 | `aa1a49d471` | 2026-09-07 | Release V2.0.7 |
 | V2.0.8 | `4620638120` | 2026-09-07 | Follow UAV centring (re-cut) |
-| V2.0.9 | `5e6de1a998` | 2026-09-08 | Active waypoint in blue (re-cut) |
+| V2.0.9 | `cd93eef466` | 2026-09-08 | Aircraft datum on the wing line (re-cut) |
