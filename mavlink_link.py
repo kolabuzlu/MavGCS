@@ -775,7 +775,9 @@ class MavlinkLink(QThread):
                     and msg.seq < len(self._mission_pending)
                     and getattr(msg, "mission_type", 0) == self.MISSION_TYPES[self._mission_kind]
                 ):
-                    lat, lon, alt = self._mission_pending[msg.seq]
+                    item = self._mission_pending[msg.seq]
+                    lat, lon, alt = item[0], item[1], item[2]
+                    wp_cmd = item[3] if len(item) >= 4 else "WAYPOINT"
                     # The vehicle is still asking for items, so the upload is
                     # alive however long the whole mission takes.
                     self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
@@ -805,7 +807,9 @@ class MavlinkLink(QThread):
                                 self.master.target_component,
                                 msg.seq,
                                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                                self.MISSION_COMMANDS.get(
+                                    wp_cmd,
+                                    mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
                                 0,  # current
                                 1,  # autocontinue
                                 0, 0, 0, 0,  # param1-4
@@ -2073,6 +2077,15 @@ class MavlinkLink(QThread):
         except Exception as e:
             self.command_feedback.emit(f"Failed to run preflight calibration: {e}")
 
+    # What a waypoint's type means on the wire. Only these two for now:
+    # an ordinary point to fly through, and one to land at. Anything not
+    # named here falls back to an ordinary waypoint rather than being
+    # dropped, so an unknown type cannot silently shorten a mission.
+    MISSION_COMMANDS = {
+        "WAYPOINT": mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+        "LAND": mavutil.mavlink.MAV_CMD_NAV_LAND,
+    }
+
     def upload_and_start_mission(self, waypoints, alt_relative_m: float,
                                  restart: bool = True):
         """
@@ -2112,14 +2125,23 @@ class MavlinkLink(QThread):
             placeholder = (waypoints[0][0], waypoints[0][1], 0.0)
 
         # Each point may carry its own altitude; those that don't take the
-        # mission default. Written as (lat, lon) or (lat, lon, alt).
+        # mission default. Each may also say what kind of item it is -
+        # an ordinary waypoint or a landing. Written as (lat, lon),
+        # (lat, lon, alt) or (lat, lon, alt, command).
         resolved = []
         for wp in waypoints:
+            cmd = wp[3] if len(wp) >= 4 and wp[3] else "WAYPOINT"
             if len(wp) >= 3 and wp[2] is not None:
-                resolved.append((wp[0], wp[1], float(wp[2])))
+                alt = float(wp[2])
+            elif str(cmd).upper() == "LAND":
+                # A landing's altitude is where it touches down. Falling
+                # back to the mission's cruise height here would upload a
+                # landing thirty metres above the ground.
+                alt = 0.0
             else:
-                resolved.append((wp[0], wp[1], float(alt_relative_m)))
-        self._mission_pending = [placeholder] + resolved
+                alt = float(alt_relative_m)
+            resolved.append((wp[0], wp[1], alt, str(cmd).upper()))
+        self._mission_pending = [placeholder + ("WAYPOINT",)] + resolved
         # An update to a mission already flying must not send the aircraft
         # back to waypoint 1 - it carries on from wherever it is and picks
         # up the new altitudes on the legs it hasn't flown yet.

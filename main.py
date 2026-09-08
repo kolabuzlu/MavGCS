@@ -3778,6 +3778,7 @@ class MainWindow(QMainWindow):
         self.map_view.fly_to_here.connect(self.on_fly_to_here)
         self.map_view.waypoint_added.connect(self.on_waypoint_added)
         self.map_view.waypoint_alt_changed.connect(self.on_waypoint_alt_changed)
+        self.map_view.waypoint_cmd_changed.connect(self.on_waypoint_cmd_changed)
         self.map_view.fence_requested.connect(self.on_fence_requested)
         self.map_view.home_moved.connect(self.on_home_moved)
         self.map_view.fence_cleared.connect(self.on_fence_cleared)
@@ -5088,11 +5089,33 @@ class MainWindow(QMainWindow):
 
     def on_waypoint_added(self, lat, lon, wp_id):
         self._waypoint_queue.append(
-            {"id": int(wp_id), "lat": lat, "lon": lon, "alt": None}
+            {"id": int(wp_id), "lat": lat, "lon": lon, "alt": None,
+             "cmd": "WAYPOINT"}
         )
         self.waypoint_panel.set_count(len(self._waypoint_queue))
         self._recheck_waypoint_terrain()
         self._recheck_fence_containment()
+
+    def on_waypoint_cmd_changed(self, wp_id, cmd):
+        """A waypoint was made a landing point, or made an ordinary one.
+
+        Looks in the sent mission as well as the queue, for the same reason
+        the altitude does: a point stays editable after it has flown to the
+        vehicle, and Update re-sends it.
+        """
+        cmd = "LAND" if str(cmd).upper() == "LAND" else "WAYPOINT"
+        for wp in self._waypoint_queue + self._sent_mission:
+            if wp["id"] == int(wp_id):
+                if wp.get("cmd") == cmd:
+                    return
+                wp["cmd"] = cmd
+                sent = wp in self._sent_mission
+                self.on_command_feedback(
+                    "Waypoint set to %s"
+                    % ("LAND" if cmd == "LAND" else "ordinary waypoint")
+                    + (" - press Update to send it" if sent else "")
+                )
+                return
 
     def on_waypoint_alt_changed(self, wp_id, alt):
         """An altitude typed into a waypoint's popup on the map.
@@ -5149,7 +5172,8 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         link.upload_and_start_mission(
-            [(w["lat"], w["lon"], w["alt"]) for w in self._waypoint_queue], alt
+            [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"))
+             for w in self._waypoint_queue], alt
         )
         # Pin down what each point was actually sent with, so the record on
         # the map can't drift when a later mission uses a different default.
@@ -5193,7 +5217,8 @@ class MainWindow(QMainWindow):
             return
         default = self._mission_default_alt if self._mission_default_alt else self._last_alt
         link.upload_and_start_mission(
-            [(w["lat"], w["lon"], w["alt"]) for w in self._sent_mission],
+            [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"))
+             for w in self._sent_mission],
             default,
             restart=False,
         )

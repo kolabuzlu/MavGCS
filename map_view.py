@@ -320,6 +320,13 @@ LEAFLET_HTML = """
     text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
     pointer-events: none;
   }
+  .waypoint-icon .wp-cmd-label {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    white-space: nowrap; font-family: sans-serif; font-size: 9px;
+    font-weight: 700; letter-spacing: 0.5px; color: #7ee08a;
+    text-shadow: 0 0 3px #000, 0 0 3px #000, 0 0 3px #000;
+    pointer-events: none;
+  }
   .waypoint-icon .wp-agl-label {
     position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
     white-space: nowrap; font-family: sans-serif; font-size: 9px;
@@ -717,9 +724,7 @@ function refreshWaypointIcons() {
     for (var i = 0; i < allWaypointLayers.length; i++) {
         var m = allWaypointLayers[i];
         if (m && m._wpId) {
-            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
-                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m),
-                                   !!m._outsideFence));
+            refreshWpIcon(m);
         }
     }
 }
@@ -823,36 +828,81 @@ function wpPopupHtml(m) {
         hint = '<div style="font-size:10px;color:#ffc107">not sent yet - ' +
                'press Update</div>';
     }
-    return '<div style="text-align:center;min-width:130px">' +
+    var isLand = (m._wpCmd === 'LAND');
+    wpAltBeforeLand = null;
+    // A landing point's altitude is where it touches down, which is the
+    // ground - so it says 0 rather than inheriting the mission's cruise
+    // height, which would be a landing thirty metres up.
+    var landNote = isLand
+        ? '<div style="font-size:10px;color:#7ee08a">touchdown height</div>'
+        : '';
+    return '<div style="text-align:center;min-width:150px">' +
            '<b>Waypoint ' + m._wpNum + '</b>' +
+           '<div style="margin:4px 0">Type</div>' +
+           '<select id="wp-cmd-input" onchange="wpTypeChanged()" ' +
+           'style="width:96px;text-align:center">' +
+           '<option value="WAYPOINT"' + (isLand ? '' : ' selected') +
+           '>Waypoint</option>' +
+           '<option value="LAND"' + (isLand ? ' selected' : '') +
+           '>Land</option></select>' +
            '<div style="margin:4px 0">Altitude (m)</div>' +
            '<input id="wp-alt-input" type="text" value="' + shown + '" ' +
            'style="width:70px;text-align:center" ' +
-           'onkeydown="if(event.key===&quot;Enter&quot;){applyWaypointAlt(' +
-           m._wpId + ');}">' + hint +
+           'onkeydown="if(event.key===&quot;Enter&quot;){applyWaypoint(' +
+           m._wpId + ');}">' + (isLand ? landNote : hint) +
            '<div style="margin-top:6px">' +
-           '<button class="fly-to-btn" onclick="applyWaypointAlt(' + m._wpId +
+           '<button class="fly-to-btn" onclick="applyWaypoint(' + m._wpId +
            ')">Apply</button></div></div>';
 }
 
+// Height held aside while a point is switched to Land, so switching back
+// in the same popup puts it back rather than leaving the pilot to retype
+// what they had.
+var wpAltBeforeLand = null;
+
+// Choosing Land drops the altitude to 0 there and then, where it can be
+// seen, rather than silently at upload. The altitude of a landing is
+// where it touches down, and inheriting the mission's cruise height would
+// upload a landing fifty metres up - which is what this used to do, since
+// the box arrives pre-filled with that default and a filled box was taken
+// as a deliberate choice.
+function wpTypeChanged() {
+    var cmdEl = document.getElementById('wp-cmd-input');
+    var altEl = document.getElementById('wp-alt-input');
+    if (!cmdEl || !altEl) { return; }
+    if (cmdEl.value === 'LAND') {
+        if (String(altEl.value) !== '0') { wpAltBeforeLand = altEl.value; }
+        altEl.value = '0';
+    } else if (wpAltBeforeLand !== null) {
+        altEl.value = wpAltBeforeLand;
+        wpAltBeforeLand = null;
+    }
+}
+
 // Applied to the marker and reported to Python, which owns the mission.
-// Nothing reaches the vehicle until Update Mission is pressed.
-function applyWaypointAlt(id) {
-    var el = document.getElementById('wp-alt-input');
-    if (!el) return;
-    var v = parseFloat(String(el.value).replace(/[^0-9.]/g, ''));
-    if (!isFinite(v)) return;
+// Nothing reaches the vehicle until Start or Update Mission is pressed.
+function applyWaypoint(id) {
+    var altEl = document.getElementById('wp-alt-input');
+    var cmdEl = document.getElementById('wp-cmd-input');
+    var cmd = cmdEl ? cmdEl.value : 'WAYPOINT';
+    var v = altEl
+        ? parseFloat(String(altEl.value).replace(/[^0-9.]/g, ''))
+        : NaN;
     for (var i = 0; i < allWaypointLayers.length; i++) {
         var m = allWaypointLayers[i];
-        if (m && m._wpId === id) {
+        if (!m || m._wpId !== id) { continue; }
+        m._wpCmd = cmd;
+        // wpTypeChanged() has normally put 0 in the box already; this
+        // catches a landing applied with nothing usable in it at all.
+        if (cmd === 'LAND' && !isFinite(v)) { v = 0; }
+        if (isFinite(v)) {
             m._wpAlt = v;
-            m.setIcon(waypointIcon(m._wpNum, m._wpSent, wpAltText(m),
-                                   wpIsDirty(m), !!m._belowTerrain, wpAglText(m),
-                                   !!m._outsideFence));
             if (bridge) { bridge.waypointAltChanged(id, v); }
-            map.closePopup();
-            break;
         }
+        if (bridge) { bridge.waypointCmdChanged(id, cmd); }
+        refreshWpIcon(m);
+        map.closePopup();
+        break;
     }
 }
 
@@ -1232,8 +1282,17 @@ function clearHome() {
 // Numbering restarts at 1 for each mission because that is what the
 // vehicle receives - so without a visual difference a map holding two
 // batches shows two markers labelled "1" and no way to tell them apart.
+// Draw a waypoint from the marker itself. The argument list below had
+// grown to seven and was written out at every call site, so anything new
+// meant editing all of them - the waypoint type included.
+function refreshWpIcon(m) {
+    m.setIcon(waypointIcon(m._wpNum, !!m._wpSent, wpAltText(m), wpIsDirty(m),
+                           !!m._belowTerrain, wpAglText(m), !!m._outsideFence,
+                           m._wpCmd === 'LAND'));
+}
+
 function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
-                      outsideFence) {
+                      outsideFence, isLand) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
@@ -1264,6 +1323,15 @@ function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
               (belowTerrain ? ' style="color:#ff8a80"' : '') + '>' +
               aglText + '</div>';
     }
+    // A landing point is marked by a badge rather than a colour: the
+    // colours here already carry state - sent, unsent, outside the fence,
+    // into the ground - and a landing waypoint can be any of those at the
+    // same time. The badge sits above the altitude so the stack reads
+    // downwards as type, height, clearance.
+    var cmd = isLand
+        ? '<div class="wp-cmd-label" style="bottom:' +
+          (aglText ? 48 : (altText ? 36 : 24)) + 'px">LAND</div>'
+        : '';
     var label  = altText
         ? '<div class="wp-alt-label"' +
           ' style="bottom:' + (aglText ? 36 : 24) + 'px' +
@@ -1272,7 +1340,7 @@ function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
         : '';
     return L.divIcon({
         className: 'waypoint-icon',
-        html: label + agl +
+        html: cmd + label + agl +
               '<div style="width:22px;height:22px;border-radius:50%;' +
               'background:' + fill + ';color:' + text + ';font-family:sans-serif;' +
               'font-size:12px;font-weight:bold;display:flex;' +
@@ -1985,8 +2053,9 @@ map.on('click', function(e) {
         m._wpId = ++wpSeq;
         m._wpNum = waypointMarkers.length + 1;
         m._wpAlt = null;                 // null = fly the mission default
+        m._wpCmd = 'WAYPOINT';           // or 'LAND'; set from the popup
         m._wpSent = false;
-        m.setIcon(waypointIcon(m._wpNum, false, wpAltText(m), false));
+        refreshWpIcon(m);
         // A function, not a fixed string: the popup is rebuilt each time it
         // opens, so it shows the current altitude and picks up the mission
         // default once one has been set.
@@ -2059,9 +2128,8 @@ function commitWaypoints() {
         // vehicle was never given.
         if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
         m._wpSent = true;
-        m.setIcon(waypointIcon(m._wpNum, true, wpAltText(m),
-                               wpIsDirty(m), !!m._belowTerrain, wpAglText(m),
-                               !!m._outsideFence));
+        m._wpSent = true;
+        refreshWpIcon(m);
     }
     // The next batch has no altitude decided yet, so it shows none rather
     // than borrowing this mission's.
@@ -2716,6 +2784,7 @@ class Bridge(QObject):
     fly_to_here = Signal(float, float)
     waypoint_added = Signal(float, float, int)
     waypoint_alt_changed = Signal(int, float)
+    waypoint_cmd_changed = Signal(int, str)
     adsb_toggled = Signal(bool)
     adsb_center_changed = Signal(float, float)
     tile_cache_limit_changed = Signal(int)
@@ -2737,6 +2806,11 @@ class Bridge(QObject):
     @Slot(float, float, int)
     def waypointAdded(self, lat, lon, wp_id):
         self.waypoint_added.emit(lat, lon, wp_id)
+
+    @Slot(int, str)
+    def waypointCmdChanged(self, wp_id, cmd):
+        """Waypoint or Land, chosen in the point's own popup."""
+        self.waypoint_cmd_changed.emit(int(wp_id), str(cmd))
 
     @Slot(int, float)
     def waypointAltChanged(self, wp_id, alt):
@@ -2789,6 +2863,7 @@ class MapView(QWebEngineView):
     fly_to_here = Signal(float, float)
     waypoint_added = Signal(float, float, int)
     waypoint_alt_changed = Signal(int, float)
+    waypoint_cmd_changed = Signal(int, str)
     adsb_toggled = Signal(bool)
     adsb_center_changed = Signal(float, float)
     tile_cache_limit_changed = Signal(int)
@@ -2825,6 +2900,8 @@ class MapView(QWebEngineView):
             self.waypoint_added, Qt.ConnectionType.QueuedConnection)
         self._bridge.waypoint_alt_changed.connect(
             self.waypoint_alt_changed, Qt.ConnectionType.QueuedConnection)
+        self._bridge.waypoint_cmd_changed.connect(
+            self.waypoint_cmd_changed, Qt.ConnectionType.QueuedConnection)
         self._bridge.fence_requested.connect(
             self.fence_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.fence_cleared.connect(
