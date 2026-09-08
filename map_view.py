@@ -2159,7 +2159,6 @@ function commitWaypoints() {
         // vehicle was never given.
         if (m._wpAlt === null || m._wpAlt === undefined) { m._wpAlt = wpDefaultAlt; }
         m._wpSent = true;
-        m._wpSent = true;
         refreshWpIcon(m);
     }
     // The next batch has no altitude decided yet, so it shows none rather
