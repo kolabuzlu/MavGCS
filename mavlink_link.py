@@ -144,6 +144,11 @@ class MavlinkLink(QThread):
     # bearings in the same message.
     nav_target_update = Signal(float, float)     # bearing deg, distance m
 
+    # Which mission item the aircraft is flying to. ArduPilot sends
+    # MISSION_CURRENT on its own whenever the leg changes, so the map can
+    # mark the active waypoint without the GCS tracking progress itself.
+    mission_current_update = Signal(int)         # mission sequence number
+
     # Yaw rate, for drawing where the current turn leads.
     turn_rate_update = Signal(float)             # deg/s
 
@@ -266,6 +271,7 @@ class MavlinkLink(QThread):
         "EKF_STATUS_REPORT": 0.5,       # EKF indicator
         "VIBRATION": 0.5,               # vibe indicator
         "SCALED_PRESSURE": 0.5,         # QNH
+        "MISSION_CURRENT": 1.0,         # which waypoint is being flown to
         "RANGEFINDER": 1.0,
         "DISTANCE_SENSOR": 0.5,
     }
@@ -1027,6 +1033,13 @@ class MavlinkLink(QThread):
                 # waypoint without downloading the mission.
                 self.nav_target_update.emit(float(msg.target_bearing),
                                             float(msg.wp_dist))
+
+            elif mtype == "MISSION_CURRENT":
+                # The sequence the vehicle is steering at. Item 0 is the
+                # home placeholder every ArduPilot mission starts with, so
+                # this is one ahead of our own list - main.py does that
+                # subtraction, since it owns the list.
+                self.mission_current_update.emit(int(msg.seq))
 
             elif mtype == "RANGEFINDER":
                 self.status_update.emit({"rangefinder_m": f"{msg.distance:.2f}"})

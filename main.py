@@ -3597,6 +3597,9 @@ class MainWindow(QMainWindow):
         # to the very same dicts, so editing an altitude reaches both.
         self._waypoint_queue = []
         self._sent_mission = []
+        # Which waypoint the aircraft is flying to, as a waypoint id. -1 is
+        # none: not in AUTO, mission done, or nothing uploaded by us.
+        self._active_wp_id = -1
         self._mission_default_alt = None
         # Home's own height above sea level, which is what turns a
         # waypoint's relative altitude into something the terrain can be
@@ -5096,6 +5099,24 @@ class MainWindow(QMainWindow):
         self._recheck_waypoint_terrain()
         self._recheck_fence_containment()
 
+    def on_mission_current(self, seq):
+        """Mark on the map which waypoint the aircraft is flying to.
+
+        Every ArduPilot mission starts with a home placeholder at item 0,
+        so the vehicle's sequence is one ahead of our own list. A sequence
+        outside it - item 0 itself, or a mission we did not upload - marks
+        nothing rather than guessing.
+        """
+        index = int(seq) - 1
+        if 0 <= index < len(self._sent_mission):
+            wp_id = int(self._sent_mission[index]["id"])
+        else:
+            wp_id = -1
+        if wp_id == self._active_wp_id:
+            return
+        self._active_wp_id = wp_id
+        self.map_view.set_active_waypoint(wp_id)
+
     def on_waypoint_cmd_changed(self, wp_id, cmd):
         """A waypoint was made a landing point, or made an ordinary one.
 
@@ -5141,6 +5162,10 @@ class MainWindow(QMainWindow):
     def on_clear_waypoints(self):
         self._waypoint_queue = []
         self._sent_mission = []
+        # Nothing left to be flying to. Without this the next MISSION_CURRENT
+        # would be measured against an empty list and mark nothing anyway,
+        # but the id would go stale in the meantime.
+        self._active_wp_id = -1
         self.map_view.clear_waypoints()
         self.waypoint_panel.set_count(0)
         self.waypoint_panel.set_can_update(False)
@@ -5292,6 +5317,7 @@ class MainWindow(QMainWindow):
         self.link.set_home_result.connect(self.on_set_home_result)
         self.link.param_progress.connect(self.on_param_progress)
         self.link.params_ready.connect(self.on_params_ready)
+        self.link.mission_current_update.connect(self.on_mission_current)
         self.link.param_write_progress.connect(self.on_param_write_progress)
         self.link.param_write_done.connect(self.on_param_write_done)
         self.link.link_stats_update.connect(self.on_link_stats)
@@ -5488,6 +5514,11 @@ class MainWindow(QMainWindow):
         # it does. Nothing recomputes it either - it is pushed by incoming
         # messages - so left alone it sits there indefinitely.
         self._wp_dist = None
+        # Same reasoning as the ETA: with the link down there is no longer
+        # a leg being flown that we know of, and a blue waypoint left on
+        # the map would keep saying there is.
+        self._active_wp_id = -1
+        self.map_view.set_active_waypoint(-1)
         self.map_view.set_eta("")
         self.arm_panel.set_prearm_reason("")
         self.arm_panel.set_armed_state(None)

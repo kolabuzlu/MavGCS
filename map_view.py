@@ -906,6 +906,19 @@ function applyWaypoint(id) {
     }
 }
 
+// Mark one waypoint as the leg being flown, and clear the rest. -1 means
+// none - not in AUTO, mission finished, or the link dropped.
+function setActiveWaypoint(id) {
+    for (var i = 0; i < allWaypointLayers.length; i++) {
+        var m = allWaypointLayers[i];
+        if (!m) { continue; }
+        var want = (m._wpId === id);
+        if (!!m._wpActive === want) { continue; }
+        m._wpActive = want;
+        refreshWpIcon(m);
+    }
+}
+
 function waypointAdded(lat, lon, id) {
     if (bridge) {
         bridge.waypointAdded(lat, lon, id);
@@ -1288,14 +1301,24 @@ function clearHome() {
 function refreshWpIcon(m) {
     m.setIcon(waypointIcon(m._wpNum, !!m._wpSent, wpAltText(m), wpIsDirty(m),
                            !!m._belowTerrain, wpAglText(m), !!m._outsideFence,
-                           m._wpCmd === 'LAND'));
+                           m._wpCmd === 'LAND', !!m._wpActive));
 }
 
 function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
-                      outsideFence, isLand) {
+                      outsideFence, isLand, isActive) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
+    var ring   = '';
+    // The one the aircraft is flying to. Once a mission is sent every
+    // point goes the same grey, and picking out which leg is being flown
+    // meant reading the numbers. Blue against that grey is immediate.
+    if (isActive) {
+        fill   = '#2979ff';
+        text   = 'white';
+        border = '#ffffff';
+        ring   = 'box-shadow:0 0 0 3px rgba(41,121,255,0.45);';
+    }
     // Outside the fence: the fence's own orange, so the warning points
     // at the thing that caused it rather than being a second kind of
     // red to work out.
@@ -1311,6 +1334,13 @@ function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
         fill = '#d32f2f';
         text = 'white';
         border = '#ff8a80';
+    }
+    // A hazard colour above has taken the fill back off an active point -
+    // a hill or a fence breach matters more than which leg is being flown.
+    // The halo stays either way, so the active point is never lost.
+    if (isActive) {
+        border = '#ffffff';
+        ring = 'box-shadow:0 0 0 3px rgba(41,121,255,0.45);';
     }
     var labelColour = belowTerrain ? '#ff8a80'
                     : (outsideFence ? '#ffcc80' : (dirty ? '#ffc107' : ''));
@@ -1345,7 +1375,8 @@ function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
               'background:' + fill + ';color:' + text + ';font-family:sans-serif;' +
               'font-size:12px;font-weight:bold;display:flex;' +
               'align-items:center;justify-content:center;' +
-              'border:2px solid ' + border + ';">' + number + '</div>',
+              'border:2px solid ' + border + ';' + ring + '">' +
+              number + '</div>',
         iconSize: [22, 22],
         iconAnchor: [11, 11],
     });
@@ -3078,6 +3109,10 @@ class MapView(QWebEngineView):
     def set_fence_failed(self, reason):
         """The upload did not get there - say so on the shape itself."""
         self.page().runJavaScript("setFenceFailed(%s);" % json.dumps(str(reason)))
+
+    def set_active_waypoint(self, wp_id):
+        """Mark the leg being flown. -1 clears it."""
+        self.page().runJavaScript("setActiveWaypoint(%d);" % int(wp_id))
 
     def set_fence_armed(self, on):
         """Draw the fence as armed only once the aircraft has said so."""
