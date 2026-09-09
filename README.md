@@ -1,4 +1,6 @@
+<p align="center">
 <img width="300" height="150" alt="mavgcsbacksocial" src="https://github.com/user-attachments/assets/995634de-93ff-432d-8484-83e8f4dd8d6b" />
+</p>
 
 ## Ground Control Station for MAVLink
 
