@@ -4216,18 +4216,36 @@ class MainWindow(QMainWindow):
         self._update_checker.start()
 
     def _prefer_high_performance_gpu(self):
-        """Set the Windows graphics preference, and say what happened.
+        """Set the Windows graphics preference once, then leave it alone.
 
-        Only ever writes when the value is not already right, so a normal
-        start touches nothing. Says it plainly either way: this changes a
-        Windows setting the user can see for themselves, and doing that
-        silently would be worse than the crash it is meant to avoid.
+        The first start on a machine asks Windows to put MavGCS on the
+        discrete card, which is where the WebEngine compositor crashes
+        stop appearing. After that the choice belongs to the user:
+        someone who moves it back to the integrated card - for battery,
+        or because a discrete driver misbehaves - keeps that, rather than
+        having it quietly overwritten on every launch.
+
+        Remembered per executable, because Windows keys the preference on
+        the .exe and a new release unzips to a new folder. Seeing it
+        already set counts as remembering, so that removing it later is
+        respected too.
         """
         try:
+            done = load_settings().get(self.SETTING_GPU_APPLIED) or []
+            exe = gpu_preference.target_executable()
+            if not exe:
+                return
             if gpu_preference.is_high_performance():
+                if exe not in done:
+                    save_setting(self.SETTING_GPU_APPLIED,
+                                 (done + [exe])[-20:])
                 return                      # already set; nothing to say
+            if exe in done:
+                return                      # we set it once, and it has
+                                            # since been changed. Respect it.
             if not gpu_preference.apply():
                 return                      # not Windows, or refused
+            save_setting(self.SETTING_GPU_APPLIED, (done + [exe])[-20:])
             if is_frozen():
                 self.on_command_feedback(
                     "Graphics: asked Windows to run MavGCS on the "
@@ -4291,6 +4309,7 @@ class MainWindow(QMainWindow):
     # only what a fresh install starts with.
     MAP_CACHE_MB_DEFAULT = 500
     TERRAIN_CACHE_MB_DEFAULT = 2048
+    SETTING_GPU_APPLIED = "gpu_preference_applied_for"
     SETTING_MAP_CACHE = "map_cache_mb"
     SETTING_TERRAIN_CACHE = "terrain_cache_mb"
 

@@ -15,14 +15,18 @@ a say, and the only thing that changes it is the per-application
 preference Windows keeps here, which is exactly what the Graphics page in
 Settings writes.
 
-Two things worth knowing:
+Three things worth knowing:
 
   * It applies from the NEXT start. The adapter for a running process is
     already chosen, so setting this cannot move the current one.
   * It is keyed on the executable. Frozen, that is MavGCS.exe and the
-    setting affects nothing else. From source it is python.exe, and that
-    is shared with every other Python program on the machine - so from
-    source this asks rather than assumes.
+    setting affects nothing else. From source it is python.exe, which is
+    shared with every other Python program on the machine, so the app
+    says so plainly in the message log when it writes it.
+  * The caller writes it once and then leaves it alone - see
+    MainWindow._prefer_high_performance_gpu. A user who moves MavGCS back
+    to the integrated card, for battery or a bad discrete driver, keeps
+    that choice instead of having it overwritten on the next launch.
 
 HKEY_CURRENT_USER only: no administrator rights, and it is the same value
 the Settings page edits, so a user can see and undo it there.
@@ -36,7 +40,8 @@ _HIGH_PERFORMANCE = "GpuPreference=2;"
 _KEY = r"SOFTWARE\Microsoft\DirectX\UserGpuPreferences"
 
 
-def _target_executable() -> str:
+def target_executable() -> str:
+    """The executable Windows keys the preference on."""
     return sys.executable or ""
 
 
@@ -44,7 +49,7 @@ def current_preference(exe: str = None):
     """What Windows currently has for this executable, or None."""
     if sys.platform != "win32":
         return None
-    exe = exe or _target_executable()
+    exe = exe or target_executable()
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _KEY) as key:
@@ -66,7 +71,7 @@ def apply(exe: str = None) -> bool:
     """
     if sys.platform != "win32":
         return False
-    exe = exe or _target_executable()
+    exe = exe or target_executable()
     if not exe:
         return False
     if is_high_performance(exe):
@@ -86,7 +91,7 @@ def clear(exe: str = None) -> bool:
     """Put it back to whatever Windows would choose on its own."""
     if sys.platform != "win32":
         return False
-    exe = exe or _target_executable()
+    exe = exe or target_executable()
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _KEY, 0,
@@ -101,7 +106,7 @@ def describe() -> str:
     """One line about where this program will render, for the message log."""
     if sys.platform != "win32":
         return ""
-    exe = _target_executable()
+    exe = target_executable()
     if is_high_performance(exe):
         return "Graphics: set to prefer the high-performance GPU."
     return ("Graphics: Windows is choosing the GPU for this program. "
