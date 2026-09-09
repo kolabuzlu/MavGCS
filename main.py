@@ -62,7 +62,9 @@ from terrain_provider import (TerrainRadarWorker, WaypointTerrainWorker,
 from adsb_provider import AdsbWorker
 from tile_cache import TileCacheServer
 from fpv_view import FpvView
-from app_paths import data_dir, load_settings, resource_path, save_setting
+from app_paths import (data_dir, is_frozen, load_settings,
+                       resource_path, save_setting)
+import gpu_preference
 from update_check import UpdateChecker, UpdateDownloader, RELEASES_PAGE
 from track_export import write_track
 
@@ -3816,6 +3818,12 @@ class MainWindow(QMainWindow):
             # After the window is up, so a slow or hanging request cannot
             # delay the app appearing.
             QTimer.singleShot(4000, lambda: self.on_check_updates(silent=True))
+        # Ask Windows to run this program on the discrete GPU. Every crash
+        # the watcher caught happened while the map was on the integrated
+        # one, and none on the GeForce - and Chromium's own switches do
+        # not move it, so the per-application preference is the only lever
+        # there is. It applies from the next start, never this one.
+        QTimer.singleShot(1500, self._prefer_high_performance_gpu)
         self.waypoint_panel.mode_toggled.connect(self.on_waypoint_mode_toggled)
         self.waypoint_panel.start_requested.connect(self.on_start_mission)
         self.waypoint_panel.update_requested.connect(self.on_update_mission)
@@ -4206,6 +4214,34 @@ class MainWindow(QMainWindow):
         self._update_checker.result_ready.connect(self._on_update_result)
         self._update_checker.finished.connect(self._clear_update_checker)
         self._update_checker.start()
+
+    def _prefer_high_performance_gpu(self):
+        """Set the Windows graphics preference, and say what happened.
+
+        Only ever writes when the value is not already right, so a normal
+        start touches nothing. Says it plainly either way: this changes a
+        Windows setting the user can see for themselves, and doing that
+        silently would be worse than the crash it is meant to avoid.
+        """
+        try:
+            if gpu_preference.is_high_performance():
+                return                      # already set; nothing to say
+            if not gpu_preference.apply():
+                return                      # not Windows, or refused
+            if is_frozen():
+                self.on_command_feedback(
+                    "Graphics: asked Windows to run MavGCS on the "
+                    "high-performance GPU. Takes effect next start.")
+            else:
+                # From source the executable is python.exe, which is shared
+                # with everything else Python runs here - so say so.
+                self.on_command_feedback(
+                    "Graphics: asked Windows to run Python on the "
+                    "high-performance GPU - this covers other Python "
+                    "programs too. Undo it in Windows Settings > Display "
+                    "> Graphics. Takes effect next start.")
+        except Exception:
+            pass                            # never stop a flight over this
 
     def _log_draw_state(self):
         """One line of map state into the watcher's log."""

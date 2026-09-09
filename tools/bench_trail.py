@@ -48,7 +48,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 LOGS = ROOT / "logs"
-RUN_FOR_S = 660          # 11 minutes - past every crash seen so far
+# 11 minutes clears every crash seen while the fault was reproducing in
+# five to eight. A crash that now takes half an hour needs longer, so the
+# duration can be raised without editing this file:
+#     set MAVGCS_BENCH_SECONDS=2400
+RUN_FOR_S = int(os.environ.get("MAVGCS_BENCH_SECONDS", "660"))
 MODES = ("loiter", "straight", "norotate", "novectors",
          "notrail", "frozen")
 
