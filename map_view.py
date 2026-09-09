@@ -3115,6 +3115,27 @@ class MapView(QWebEngineView):
         """Put the home marker back where the vehicle last said it was."""
         self.page().runJavaScript("revertHome();")
 
+    # WebGL is the only thing that will name the adapter Chromium
+    # actually got. The Windows preference records what was asked for,
+    # and Chromium's own --gpu-* switches likewise report the request
+    # rather than the result - neither settles which card a run used.
+    _ADAPTER_PROBE = """
+    (function () {
+      try {
+        var c = document.createElement('canvas');
+        var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (!gl) { return ''; }
+        var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        if (!dbg) { return gl.getParameter(gl.RENDERER) || ''; }
+        return gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '';
+      } catch (e) { return ''; }
+    })()
+    """
+
+    def dump_graphics_adapter(self, callback):
+        """Which GPU the map is drawing on. Empty until the page is up."""
+        self.page().runJavaScript(self._ADAPTER_PROBE, callback)
+
     def dump_draw_state(self, callback):
         """Ask the page what it is currently drawing (watcher only)."""
         self.page().runJavaScript("JSON.stringify(mavgcsDrawState());",

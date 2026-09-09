@@ -176,6 +176,10 @@ def main():
                     log.write("[watch %7.1fs] %s"
                               % ((datetime.now() - started).total_seconds(),
                                  line))
+                elif line.startswith("GPUADAPTER"):
+                    log.write("[watch %7.1fs] *** %s"
+                              % ((datetime.now() - started).total_seconds(),
+                                 line))
                 elif "angle_platform_impl" in line or "TrimCache" in line:
                     log.write("[watch %7.1fs] *** GPU: %s"
                               % ((datetime.now() - started).total_seconds(),

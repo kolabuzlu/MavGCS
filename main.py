@@ -3800,6 +3800,15 @@ class MainWindow(QMainWindow):
             self._draw_state_timer = QTimer(self)
             self._draw_state_timer.timeout.connect(self._log_draw_state)
             self._draw_state_timer.start(5000)
+        # Every log should say which card it ran on. The compositor crash
+        # hunt turned entirely on that and no log recorded it, so the GPU
+        # had to be inferred from what else was running at the time.
+        # Retried rather than fired once: the map page takes a few
+        # seconds and there is no ready signal to hang this on.
+        self._adapter_tries = 0
+        self._adapter_timer = QTimer(self)
+        self._adapter_timer.timeout.connect(self._report_graphics_adapter)
+        self._adapter_timer.start(3000)
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
         self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
         self.map_view.terrain_cache_limit_changed.connect(self.on_terrain_cache_limit)
@@ -4260,6 +4269,30 @@ class MainWindow(QMainWindow):
                     "> Graphics. Takes effect next start.")
         except Exception:
             pass                            # never stop a flight over this
+
+    def _report_graphics_adapter(self):
+        """Ask the map which GPU it is on, and say so once."""
+        self._adapter_tries += 1
+        try:
+            self.map_view.dump_graphics_adapter(self._on_graphics_adapter)
+        except Exception:
+            self._adapter_timer.stop()
+
+    def _on_graphics_adapter(self, name):
+        """The answer, or nothing yet if the page is still coming up."""
+        name = (name or "").strip()
+        if not name:
+            if self._adapter_tries >= 10:     # the page is never coming
+                self._adapter_timer.stop()
+            return
+        self._adapter_timer.stop()
+        try:
+            # Frozen and windowed there is no console, and stdout can be
+            # None - so this must never be the thing that stops a start.
+            print("GPUADAPTER %s" % name, flush=True)
+        except Exception:
+            pass
+        self.on_command_feedback("Graphics: rendering on %s." % name)
 
     def _log_draw_state(self):
         """One line of map state into the watcher's log."""
