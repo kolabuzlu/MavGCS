@@ -4,6 +4,8 @@
 
 ## <p align="center">Ground Control Station for ArduPilot & PX4, INAV.</p>
 
+<p align="center"><a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPLv3-blue.svg"></a></p>
+
 ![MavGCS screenshot](mavgcs2r9v2.png)
 
 A ground control station software for MAVLink protocol. 🛩️
