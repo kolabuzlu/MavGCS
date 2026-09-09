@@ -100,14 +100,3 @@ def clear(exe: str = None) -> bool:
         return True
     except OSError:
         return False
-
-
-def describe() -> str:
-    """One line about where this program will render, for the message log."""
-    if sys.platform != "win32":
-        return ""
-    exe = target_executable()
-    if is_high_performance(exe):
-        return "Graphics: set to prefer the high-performance GPU."
-    return ("Graphics: Windows is choosing the GPU for this program. "
-            "See Telemetry Rates for the setting.")

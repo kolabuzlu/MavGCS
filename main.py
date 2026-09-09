@@ -22,6 +22,11 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # flown. See CHANGELOG.md.
 APP_VERSION = "V2.0.9"
 
+# Executables whose graphics preference has already been dealt with. Read
+# by the startup code and by the Telemetry Rates dialog, which both need
+# to agree about what counts as "the user has chosen".
+GPU_APPLIED_SETTING = "gpu_preference_applied_for"
+
 import sys
 import os
 
@@ -2426,6 +2431,27 @@ class WaypointMissionPanel(QGroupBox):
         # Clear with nothing to clear is harmless.
 
 
+def short_adapter(name):
+    """The card's name out of the driver's full description.
+
+    'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU (0x000028A0)
+    Direct3D11 vs_5_0 ps_5_0, D3D11)' becomes 'NVIDIA GeForce RTX 4060
+    Laptop GPU'. Anything unexpected is returned unchanged rather than
+    mangled - a name we cannot parse is still worth showing.
+    """
+    text = (name or "").strip()
+    if not text:
+        return ""
+    if text.startswith("ANGLE (") and text.endswith(")"):
+        inner = text[len("ANGLE ("):-1]
+        vendor_and_rest = inner.split(", ", 1)
+        text = vendor_and_rest[1] if len(vendor_and_rest) > 1 else inner
+    cut = text.find(" (0x")
+    if cut > 0:
+        text = text[:cut]
+    return text.strip()
+
+
 class TelemetryRatesDialog(QDialog):
     """
     How much telemetry to ask the vehicle for.
@@ -2570,6 +2596,27 @@ class TelemetryRatesDialog(QDialog):
         self.note.setStyleSheet("font-size: 11px; color: #aaa;")
         layout.addWidget(self.note)
 
+        # Which card the map is drawing on. Here because the program has
+        # always known it and had nowhere lasting to say it: the line it
+        # writes at startup goes to the status label, where the next
+        # message overwrites it within seconds. A laptop that quietly
+        # runs this on its integrated chip is worth an hour of anyone's
+        # time to discover, and this is where it stops being invisible.
+        self._adapter = ""
+        self.gpu_box = QCheckBox("Prefer the high-performance graphics card")
+        self.gpu_box.setToolTip(
+            "Writes the same per-application preference as Windows "
+            "Settings > Display > Graphics, for your user account only and "
+            "without administrator rights. Applies the next time MavGCS "
+            "starts: a running program has already been given its adapter.")
+        self.gpu_box.toggled.connect(lambda _on: self._refresh_gpu_detail())
+        layout.addWidget(self.gpu_box)
+
+        self.gpu_detail = QLabel()
+        self.gpu_detail.setWordWrap(True)
+        self.gpu_detail.setStyleSheet("font-size: 11px; color: #aaa;")
+        layout.addWidget(self.gpu_detail)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -2594,6 +2641,53 @@ class TelemetryRatesDialog(QDialog):
         self.cog_detail.setStyleSheet(
             "font-size: 11px; color: %s;" % ("#8fd18f" if text else "#aaa"))
 
+    def set_graphics(self, adapter):
+        """Show the card in use and reflect the current Windows setting."""
+        self._adapter = adapter or ""
+        windows = sys.platform == "win32"
+        self.gpu_box.setVisible(windows)
+        self.gpu_box.blockSignals(True)
+        self.gpu_box.setChecked(windows
+                                and gpu_preference.is_high_performance())
+        self.gpu_box.blockSignals(False)
+        self._refresh_gpu_detail()
+
+    def _refresh_gpu_detail(self):
+        """Two facts: the card now, and what the next start will use."""
+        now = short_adapter(self._adapter)
+        lines = ["Now rendering on: %s" % (now or "not reported yet")]
+        if sys.platform == "win32":
+            wanted = self.gpu_box.isChecked()
+            if wanted != gpu_preference.is_high_performance():
+                lines.append(
+                    "This takes effect the next time MavGCS starts."
+                    if wanted else
+                    "Windows will choose again from the next start.")
+            elif wanted and now and "intel" in now.lower():
+                # Set, but this session did not get it: the classic
+                # first-run-after-enabling case, which otherwise looks
+                # like the setting having no effect at all.
+                lines.append("The setting is on but this session started "
+                             "before it applied. Restart to use it.")
+        self.gpu_detail.setText("  ".join(lines))
+
+    def _save_graphics(self):
+        """Apply the graphics choice, and record it as deliberate.
+
+        Recorded either way. The startup code only sets the preference
+        for an executable it has never dealt with, so without this an
+        unticked box would be quietly re-ticked by the next launch.
+        """
+        if sys.platform != "win32":
+            return
+        want = self.gpu_box.isChecked()
+        if want != gpu_preference.is_high_performance():
+            gpu_preference.apply() if want else gpu_preference.clear()
+        exe = gpu_preference.target_executable()
+        done = load_settings().get(GPU_APPLIED_SETTING) or []
+        if exe and exe not in done:
+            save_setting(GPU_APPLIED_SETTING, (done + [exe])[-20:])
+
     def values(self):
         return (self.attitude_combo.currentData(),
                 self.position_combo.currentData(),
@@ -2606,6 +2700,7 @@ class TelemetryRatesDialog(QDialog):
         save_setting(self.SETTING_ELEV_DIR, self.elev_combo.currentData())
         save_setting(self.SETTING_FULL, full)
         save_setting(self.SETTING_COG, self.cog_box.isChecked())
+        self._save_graphics()
         return att, pos, full
 
 
@@ -3806,6 +3901,7 @@ class MainWindow(QMainWindow):
         # Retried rather than fired once: the map page takes a few
         # seconds and there is no ready signal to hang this on.
         self._adapter_tries = 0
+        self._graphics_adapter = ""
         self._adapter_timer = QTimer(self)
         self._adapter_timer.timeout.connect(self._report_graphics_adapter)
         self._adapter_timer.start(3000)
@@ -4193,6 +4289,7 @@ class MainWindow(QMainWindow):
     def on_telemetry_settings(self):
         """Edit the requested rates, and push them to a live link at once."""
         dialog = TelemetryRatesDialog(self)
+        dialog.set_graphics(self._graphics_adapter)
         # Show what the link has worked out about this aircraft's elevator,
         # so a wrong direction is visible before a flight rather than after.
         dialog.set_elevator_detail(
@@ -4286,6 +4383,7 @@ class MainWindow(QMainWindow):
                 self._adapter_timer.stop()
             return
         self._adapter_timer.stop()
+        self._graphics_adapter = name
         try:
             # Frozen and windowed there is no console, and stdout can be
             # None - so this must never be the thing that stops a start.
@@ -4342,7 +4440,7 @@ class MainWindow(QMainWindow):
     # only what a fresh install starts with.
     MAP_CACHE_MB_DEFAULT = 500
     TERRAIN_CACHE_MB_DEFAULT = 2048
-    SETTING_GPU_APPLIED = "gpu_preference_applied_for"
+    SETTING_GPU_APPLIED = GPU_APPLIED_SETTING
     SETTING_MAP_CACHE = "map_cache_mb"
     SETTING_TERRAIN_CACHE = "terrain_cache_mb"
 
