@@ -4,9 +4,10 @@
 
 ## <p align="center">Ground Control Station for ArduPilot & PX4, INAV.</p>
 
-<p align="center"><a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPLv3-blue.svg"></a></p>
+<p align="center">
+ <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPLv3-blue.svg"></a>
  <a href="https://github.com/kolabuzlu/MavGCS/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/kolabuzlu/MavGCS?label=release&color=59aa29"></a>
-
+</p>
 
 ![MavGCS screenshot](mavgcs2r9v2.png)
 
