@@ -22,10 +22,10 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # flown. See CHANGELOG.md.
 APP_VERSION = "V2.0.9"
 
-# Executables whose graphics preference has already been dealt with. Read
-# by the startup code and by the Telemetry Rates dialog, which both need
-# to agree about what counts as "the user has chosen".
-GPU_APPLIED_SETTING = "gpu_preference_applied_for"
+# Whether to ask Windows for the discrete graphics card. Absent means
+# never chosen, which counts as yes: this is on unless it is turned off.
+# Only the Telemetry Rates checkbox writes it.
+GPU_CHOICE_SETTING = "gpu_preference_enabled"
 
 import sys
 import os
@@ -2647,8 +2647,11 @@ class TelemetryRatesDialog(QDialog):
         windows = sys.platform == "win32"
         self.gpu_box.setVisible(windows)
         self.gpu_box.blockSignals(True)
-        self.gpu_box.setChecked(windows
-                                and gpu_preference.is_high_performance())
+        # The stored choice, not the registry: this is on unless it has
+        # been turned off here, so a fresh install shows it ticked even
+        # in the moment before the startup write lands.
+        self.gpu_box.setChecked(
+            windows and load_settings().get(GPU_CHOICE_SETTING) is not False)
         self.gpu_box.blockSignals(False)
         self._refresh_gpu_detail()
 
@@ -2672,21 +2675,17 @@ class TelemetryRatesDialog(QDialog):
         self.gpu_detail.setText("  ".join(lines))
 
     def _save_graphics(self):
-        """Apply the graphics choice, and record it as deliberate.
+        """Record the choice, and act on it now rather than next start.
 
-        Recorded either way. The startup code only sets the preference
-        for an executable it has never dealt with, so without this an
-        unticked box would be quietly re-ticked by the next launch.
+        The stored value is what startup reads, so unticking here is the
+        one way to stop the program asking for the discrete card again.
         """
         if sys.platform != "win32":
             return
         want = self.gpu_box.isChecked()
+        save_setting(GPU_CHOICE_SETTING, want)
         if want != gpu_preference.is_high_performance():
             gpu_preference.apply() if want else gpu_preference.clear()
-        exe = gpu_preference.target_executable()
-        done = load_settings().get(GPU_APPLIED_SETTING) or []
-        if exe and exe not in done:
-            save_setting(GPU_APPLIED_SETTING, (done + [exe])[-20:])
 
     def values(self):
         return (self.attitude_combo.currentData(),
@@ -4322,36 +4321,27 @@ class MainWindow(QMainWindow):
         self._update_checker.start()
 
     def _prefer_high_performance_gpu(self):
-        """Set the Windows graphics preference once, then leave it alone.
+        """Ask for the discrete card, unless it has been switched off.
 
-        The first start on a machine asks Windows to put MavGCS on the
-        discrete card, which is where the WebEngine compositor crashes
-        stop appearing. After that the choice belongs to the user:
-        someone who moves it back to the integrated card - for battery,
-        or because a discrete driver misbehaves - keeps that, rather than
-        having it quietly overwritten on every launch.
+        On by default. A fresh install asks Windows for the discrete GPU,
+        which is where the WebEngine compositor crashes stop appearing,
+        and it asks again on every start so the setting cannot drift away
+        unnoticed.
 
-        Remembered per executable, because Windows keys the preference on
-        the .exe and a new release unzips to a new folder. Seeing it
-        already set counts as remembering, so that removing it later is
-        respected too.
+        Turning off the checkbox in Telemetry Rates is the only thing
+        that stops it, and that is deliberate. An earlier version treated
+        any change made in Windows Settings as a decision to respect,
+        which meant a preference removed for an unrelated reason stayed
+        removed for good, with nothing on screen to say why the program
+        was still on the integrated chip.
         """
         try:
-            done = load_settings().get(self.SETTING_GPU_APPLIED) or []
-            exe = gpu_preference.target_executable()
-            if not exe:
-                return
+            if load_settings().get(GPU_CHOICE_SETTING) is False:
+                return                      # switched off in the dialog
             if gpu_preference.is_high_performance():
-                if exe not in done:
-                    save_setting(self.SETTING_GPU_APPLIED,
-                                 (done + [exe])[-20:])
-                return                      # already set; nothing to say
-            if exe in done:
-                return                      # we set it once, and it has
-                                            # since been changed. Respect it.
+                return                      # already right; write nothing
             if not gpu_preference.apply():
                 return                      # not Windows, or refused
-            save_setting(self.SETTING_GPU_APPLIED, (done + [exe])[-20:])
             if is_frozen():
                 self.on_command_feedback(
                     "Graphics: asked Windows to run MavGCS on the "
@@ -4440,7 +4430,6 @@ class MainWindow(QMainWindow):
     # only what a fresh install starts with.
     MAP_CACHE_MB_DEFAULT = 500
     TERRAIN_CACHE_MB_DEFAULT = 2048
-    SETTING_GPU_APPLIED = GPU_APPLIED_SETTING
     SETTING_MAP_CACHE = "map_cache_mb"
     SETTING_TERRAIN_CACHE = "terrain_cache_mb"
 
