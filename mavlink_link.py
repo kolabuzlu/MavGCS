@@ -291,6 +291,15 @@ class MavlinkLink(QThread):
     # A centred surface, and the reference the number is quoted against.
     SERVO_NEUTRAL_US = 1500.0
     SERVO_SCAN_CHANNELS = 16
+    # Twelve passes WITHOUT PROGRESS, three seconds apart, rather than
+    # twelve passes in total. The reads are sequential - the elevator's
+    # trim cannot be asked for until its channel is known - so a flat
+    # budget can be spent entirely on the first step and leave nothing
+    # for the rest, which is exactly what a lossy link makes happen. Any
+    # answer at all resets the count, so it keeps going while it is
+    # getting somewhere and gives up only on real silence.
+    PARAM_RETRY_EVERY_S = 3.0
+    PARAM_RETRY_MAX = 12
 
     DISABLED_MESSAGES = (
         "SIMSTATE", "ESC_TELEMETRY_1_TO_4", "AOA_SSA", "AHRS", "AHRS2",
@@ -346,6 +355,12 @@ class MavlinkLink(QThread):
         self._elev_dir_override = "auto"
         self._elevator_trim = None
         self._servo_scan_seen = set()
+        # Parameter reads are fire-and-forget. On a link losing most of
+        # its packets a single request often goes unanswered, so what has
+        # not come back is asked for again - see _retry_missing_params.
+        self._param_retry_next = 0.0
+        self._param_retries = 0
+        self._param_progress = None
         self._trim_throttle = None
         self._batt_params = {}
         self._home_alt = None       # metres AMSL, from HOME_POSITION
@@ -500,6 +515,8 @@ class MavlinkLink(QThread):
             self.apply_stream_rates()
             self._request_battery_limits()
             self._request_fence_params()
+            self._param_retries = 0
+            self._param_retry_next = time.time() + self.PARAM_RETRY_EVERY_S
             if self._want_elevator:
                 self._scan_servo_functions()
                 self._request_pid_mask()
@@ -529,6 +546,25 @@ class MavlinkLink(QThread):
                 except Exception:
                     pass
                 last_heartbeat_sent = now
+
+            # Chase up the parameter reads the balance check depends on.
+            # Only while it is switched on, only until they arrive, and
+            # only a bounded number of times - then say so, because a
+            # readout that never fills in should tell you it gave up
+            # rather than look like it is still trying.
+            if self._want_elevator and now >= self._param_retry_next:
+                if self._retry_missing_params():
+                    self._param_retries += 1
+                    if self._param_retries >= self.PARAM_RETRY_MAX:
+                        self._param_retry_next = float("inf")
+                        if self._elevator_ch is None:
+                            self.elevator_status.emit(
+                                "no answer from the aircraft - too much "
+                                "of the link is being lost")
+                    else:
+                        self._param_retry_next = now + self.PARAM_RETRY_EVERY_S
+                else:
+                    self._param_retry_next = float("inf")
 
             # A mission upload that has stopped making progress is dead:
             # release it so the next Start Mission isn't refused as "already
@@ -1245,12 +1281,72 @@ class MavlinkLink(QThread):
         was = self._want_elevator
         self._want_elevator = bool(enabled)
         if self._want_elevator and not was:
+            self._param_retries = 0
+            self._param_retry_next = time.time() + self.PARAM_RETRY_EVERY_S
             self._scan_servo_functions()
             self._request_pid_mask()
             self._request_trim_throttle()
         elif self._pid_mask_current is not None:
             self._apply_pid_mask()
         self.apply_stream_rates()
+
+    def _retry_missing_params(self):
+        """Ask again for anything the balance check still has not got.
+
+        True while something is outstanding, False once everything has
+        arrived - which is what stops the retrying.
+
+        This exists because every one of these reads is fire-and-forget.
+        Nothing acknowledges them and nothing notices a reply that never
+        comes, so on a lossy link the elevator channel simply never
+        arrives, the pitch PID bit is never set, and the CG readout waits
+        for level cruise for ever with nothing on screen to say why. It
+        worked on SITL for years because SITL loses nothing.
+        """
+        if self.master is None:
+            return True             # not connected yet; keep waiting
+        # What is known now. If this differs from last time then something
+        # arrived, and a link still answering deserves to keep being asked.
+        progress = (self._elevator_ch, len(self._servo_scan_seen),
+                    self._elevator_trim, self._elevator_min,
+                    self._elevator_max, self._pid_mask_current,
+                    self._trim_throttle)
+        if progress != self._param_progress:
+            self._param_progress = progress
+            self._param_retries = 0
+        outstanding = False
+        try:
+            if self._elevator_ch is None:
+                todo = [n for n in range(1, self.SERVO_SCAN_CHANNELS + 1)
+                        if n not in self._servo_scan_seen]
+                if todo:
+                    outstanding = True
+                    with self._send_lock:
+                        for n in todo:
+                            self.master.mav.param_request_read_send(
+                                self.master.target_system,
+                                self.master.target_component,
+                                f"SERVO{n}_FUNCTION".encode(), -1)
+            elif (self._elevator_trim is None or self._elevator_min is None
+                    or self._elevator_max is None):
+                # The channel is known but its travel and trim are not,
+                # and without those an offset in microseconds cannot be
+                # turned into a verdict.
+                outstanding = True
+                self._request_elevator_setup(self._elevator_ch)
+
+            if self._pid_mask_current is None:
+                # Without this the pitch bit is never set, so PID_TUNING
+                # never arrives and the integrator - the faster of the two
+                # signals - is silent.
+                outstanding = True
+                self._request_pid_mask()
+            if self._trim_throttle is None:
+                outstanding = True
+                self._request_trim_throttle()
+        except Exception:
+            return True
+        return outstanding
 
     def _scan_servo_functions(self):
         """Ask what each output does, to find the one driving the elevator.
