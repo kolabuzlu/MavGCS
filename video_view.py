@@ -57,9 +57,9 @@ import time
 
 from PySide6.QtCore import QPoint, QThread, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QSizePolicy, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QPushButton, QSizePolicy,
+                               QSpinBox, QVBoxLayout, QWidget)
 
 from app_paths import load_settings, save_setting
 
@@ -70,6 +70,8 @@ SOURCE_RTSP = "RTSP (network)"
 SETTING_URL = "video_rtsp_url"
 SETTING_TRANSPORT = "video_rtsp_transport"
 SETTING_BUFFER = "video_smoothing_frames"
+SETTING_MIRROR = "video_mirror"
+SETTING_NOACCEL = "video_no_hw_accel"
 
 # Offered sizes. Anything the device refuses simply comes back at its own
 # size, which is reported rather than hidden.
@@ -111,21 +113,32 @@ class _Reader(QThread):
     opened = Signal(int, int)
 
     def __init__(self, source, size=None, fps=None, transport=None,
-                 smoothing=0, parent=None):
+                 smoothing=0, mirror=False, no_accel=False, parent=None):
         super().__init__(parent)
         self._source = source           # int index, or an rtsp:// string
         self._size = size
         self._fps = fps
         self._transport = transport
         self._smoothing = max(0, int(smoothing))
+        self._mirror = bool(mirror)
+        self._no_accel = bool(no_accel)
         self._stop = False
 
     def stop(self):
         self._stop = True
 
+    def set_mirror(self, on):
+        """Flip or unflip without reopening: it is only a bool."""
+        self._mirror = bool(on)
+
     def _open(self, cv2):
+        # Hardware decoding is an open-time choice, not a property that
+        # can be set afterwards, which is why toggling it reopens the
+        # stream rather than waiting for the next start.
+        params = ([cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE]
+                  if self._no_accel else [])
         if isinstance(self._source, int):
-            return cv2.VideoCapture(self._source, cv2.CAP_DSHOW)
+            return cv2.VideoCapture(self._source, cv2.CAP_DSHOW, params)
         # FFmpeg reads its options from the environment at capture time.
         # stimeout is in microseconds and stops a silent camera hanging
         # the read for ever; the transport is the part worth choosing.
@@ -133,7 +146,7 @@ class _Reader(QThread):
         if self._transport:
             opts.append("rtsp_transport;%s" % self._transport)
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts)
-        return cv2.VideoCapture(self._source, cv2.CAP_FFMPEG)
+        return cv2.VideoCapture(self._source, cv2.CAP_FFMPEG, params)
 
     def run(self):
         import cv2
@@ -177,6 +190,12 @@ class _Reader(QThread):
                     self.msleep(15)
                     continue
                 misses = 0
+                if self._mirror:
+                    # Flipped here rather than on the way out: this thread
+                    # already has the frame, and cv2.flip returns the
+                    # contiguous buffer QImage needs, which a numpy
+                    # reversed view would not.
+                    frame = cv2.flip(frame, 1)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, _ = rgb.shape
                 # copy() because the buffer behind rgb is reused for the
@@ -432,6 +451,24 @@ class VideoWindow(QWidget):
         form.addRow("Smoothing buffer (frames)", self.buffer_spin)
         layout.addLayout(form)
 
+        self.mirror_box = QCheckBox("Mirror horizontally")
+        self.mirror_box.setToolTip(
+            "Flip the picture left to right. For a camera pointed back at "
+            "you, or one mounted mirrored.")
+        self.mirror_box.toggled.connect(self._mirror_changed)
+        layout.addWidget(self.mirror_box)
+
+        self.accel_box = QCheckBox("Disable hardware acceleration")
+        self.accel_box.toggled.connect(self._accel_changed)
+        layout.addWidget(self.accel_box)
+
+        accel_note = QLabel(
+            "Forces the picture to be decoded in software. Only needed if "
+            "it is broken or unstable with hardware acceleration.")
+        accel_note.setWordWrap(True)
+        accel_note.setStyleSheet("font-size: 11px; color: #8a8a8a;")
+        layout.addWidget(accel_note)
+
         self.res_combo.addItem(AUTO, None)
         for label, size in SIZES:
             self.res_combo.addItem(label, size)
@@ -479,6 +516,26 @@ class VideoWindow(QWidget):
         if idx >= 0:
             self.transport_combo.setCurrentIndex(idx)
         self.buffer_spin.setValue(int(s.get(SETTING_BUFFER, 0) or 0))
+        # Blocked so restoring a saved state does not count as the user
+        # toggling it, which would write it straight back and, for the
+        # acceleration box, restart a stream that has not begun.
+        for box, key in ((self.mirror_box, SETTING_MIRROR),
+                         (self.accel_box, SETTING_NOACCEL)):
+            box.blockSignals(True)
+            box.setChecked(bool(s.get(key, False)))
+            box.blockSignals(False)
+
+    def _mirror_changed(self, on):
+        """Takes effect on the picture already playing."""
+        save_setting(SETTING_MIRROR, bool(on))
+        if self._reader is not None:
+            self._reader.set_mirror(on)
+
+    def _accel_changed(self, on):
+        """Reopen, because this is decided when the stream is opened."""
+        save_setting(SETTING_NOACCEL, bool(on))
+        if self._reader is not None:
+            self.start()        # start() stops the current one first
 
     def _save_url(self):
         save_setting(SETTING_URL, self.url_edit.text().strip())
@@ -558,7 +615,9 @@ class VideoWindow(QWidget):
             if not url:
                 return
             reader = _Reader(url, transport=self.transport_combo.currentData(),
-                             smoothing=self.buffer_spin.value(), parent=self)
+                             smoothing=self.buffer_spin.value(),
+                             mirror=self.mirror_box.isChecked(),
+                             no_accel=self.accel_box.isChecked(), parent=self)
             what = url
         else:
             index = self.device_combo.currentData()
@@ -566,7 +625,9 @@ class VideoWindow(QWidget):
                 return
             reader = _Reader(index, size=self.res_combo.currentData(),
                              fps=self.fps_combo.currentData(),
-                             smoothing=self.buffer_spin.value(), parent=self)
+                             smoothing=self.buffer_spin.value(),
+                             mirror=self.mirror_box.isChecked(),
+                             no_accel=self.accel_box.isChecked(), parent=self)
             what = self.device_combo.currentText()
         reader.frame_ready.connect(self._show_frame)
         reader.failed.connect(self._failed)
