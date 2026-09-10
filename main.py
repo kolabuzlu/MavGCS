@@ -24,7 +24,7 @@ APP_VERSION = "V2.0.9"
 
 # Whether to ask Windows for the discrete graphics card. Absent means
 # never chosen, which counts as yes: this is on unless it is turned off.
-# Only the Telemetry Rates checkbox writes it.
+# Only the Settings checkbox writes it.
 GPU_CHOICE_SETTING = "gpu_preference_enabled"
 
 import sys
@@ -2454,7 +2454,11 @@ def short_adapter(name):
 
 class TelemetryRatesDialog(QDialog):
     """
-    How much telemetry to ask the vehicle for.
+    The Settings window, named in code for the bulk of what it holds.
+
+    Mostly this is how much telemetry to ask the vehicle for, which is
+    why the class is called what it is; the centre of gravity readout and
+    the graphics card arrived later and had nowhere else to live.
 
     A slow RC link carries far less than a flight controller streams by
     default, and the radio drops whatever overflows without regard for
@@ -2521,7 +2525,7 @@ class TelemetryRatesDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Telemetry Rates")
+        self.setWindowTitle("Settings")
         att, pos, full = self.current()
 
         layout = QVBoxLayout(self)
@@ -2935,12 +2939,12 @@ class ConnectionPanel(QGroupBox):
         # Nothing to do with connecting to a vehicle, but this is the one
         # group that is always on screen and never scrolls, and a window
         # with no menu bar has nowhere else to put it.
-        self.telemetry_btn = QPushButton("Telemetry Rates")
+        self.telemetry_btn = QPushButton("Settings")
         self.telemetry_btn.setFixedHeight(self.FIELD_HEIGHT)
         self.telemetry_btn.setStyleSheet(self.UPDATE_STYLE)
         self.telemetry_btn.setToolTip(
-            "How often to ask the vehicle for attitude and position. "
-            "Lower rates suit a slow radio link.")
+            "Telemetry rates, centre of gravity, and which graphics card "
+            "the map draws on.")
         self.telemetry_btn.clicked.connect(self.telemetry_settings_requested)
 
         self.update_btn = QPushButton("Check for Updates")
@@ -3072,7 +3076,7 @@ class ConnectionPanel(QGroupBox):
         """Right-click reaches the same settings as the button, for anyone
         who looks for a context menu first."""
         menu = QMenu(self)
-        menu.addAction("Telemetry Rates...",
+        menu.addAction("Settings...",
                        self.telemetry_settings_requested.emit)
         menu.exec(event.globalPos())
 
@@ -4328,7 +4332,7 @@ class MainWindow(QMainWindow):
         and it asks again on every start so the setting cannot drift away
         unnoticed.
 
-        Turning off the checkbox in Telemetry Rates is the only thing
+        Turning off the checkbox in Settings is the only thing
         that stops it, and that is deliberate. An earlier version treated
         any change made in Windows Settings as a decision to respect,
         which meant a preference removed for an unrelated reason stayed
