@@ -1228,6 +1228,27 @@ class MavlinkLink(QThread):
                 # flight - so ask directly on the transition.
                 if armed and not self._was_armed:
                     self._request_home()
+                    # Arming is the moment the balance check stops being
+                    # able to finish. If it has not, say that rather than
+                    # let the readout sit on "Waiting for level cruise",
+                    # which would be a lie: it is not waiting for cruise,
+                    # it is waiting for parameters it will not ask for
+                    # again until this aircraft is back on the ground.
+                    if self._want_elevator:
+                        missing = self._cg_setup_missing()
+                        if missing:
+                            self.elevator_status.emit(
+                                "not set up - %s never arrived. Connect on "
+                                "the ground and wait for this to fill in "
+                                "before arming." % missing)
+                elif self._was_armed and not armed:
+                    # Back on the ground: let it try again from scratch,
+                    # including after it had given up, and take the
+                    # message down so the readout speaks for itself.
+                    if self._want_elevator and self._cg_setup_missing():
+                        self._param_retries = 0
+                        self._param_retry_next = time.time()
+                        self.elevator_status.emit("")
                 self._was_armed = armed
 
     def set_stream_rates(self, attitude_hz: float, position_hz: float,
@@ -1303,6 +1324,22 @@ class MavlinkLink(QThread):
         elif self._pid_mask_current is not None:
             self._apply_pid_mask()
         self.apply_stream_rates()
+
+    def _cg_setup_missing(self):
+        """What the balance check still lacks, named, or "" if it is ready.
+
+        Pure: it asks nothing of the aircraft. The retry decides what to
+        request; this only reports what is still absent, so the arm
+        transition can say whether the readout is going to work.
+        """
+        if self._elevator_ch is None:
+            return "which output is the elevator"
+        if (self._elevator_trim is None or self._elevator_min is None
+                or self._elevator_max is None):
+            return "the elevator's travel and trim"
+        if self._pid_mask_current is None or self._pid_mask_wanted is not None:
+            return "the pitch telemetry setting"
+        return ""
 
     def _may_configure(self):
         """Whether this is a moment to be talking to the aircraft at all.
