@@ -535,8 +535,7 @@ class VideoWindow(QWidget):
             return
         if self._floating is None:
             self._floating = FloatingVideo(self._float_over)
-            self._floating.closed.connect(
-                lambda: self.float_btn.setText("Floating window"))
+            self._floating.closed.connect(self._floating_closed)
             # Bottom left of the map, clear of the instrument column on
             # the right and the panels along the top.
             parent = self._float_over
@@ -545,6 +544,15 @@ class VideoWindow(QWidget):
         self._floating.show()
         self._floating.raise_()
         self.float_btn.setText("Hide floating")
+
+    def _floating_closed(self):
+        """The panel's own X was pressed."""
+        self.float_btn.setText("Floating window")
+        if not self.isVisible():
+            # This window was closed earlier and the panel was the only
+            # thing showing the picture. With it gone, nothing is, so
+            # release the device rather than capture into nowhere.
+            self._stop()
 
     def _show_frame(self, image):
         self._frames += 1
@@ -595,12 +603,20 @@ class VideoWindow(QWidget):
     # ---- window ----------------------------------------------------------
 
     def closeEvent(self, event: QCloseEvent):
-        """Release the device rather than holding it open unseen."""
+        """Close the window, but not the picture if it is floating.
+
+        Someone who has put the view over the map wants the map, and this
+        window is then just the controls that got them there - closing it
+        should tidy it away, not stop the video. Capture carries on for
+        the floating panel and stops when nothing is showing it any more,
+        which is either this closing with no panel up, or the panel's own
+        X being pressed afterwards.
+        """
+        if self._floating is not None and self._floating.isVisible():
+            super().closeEvent(event)
+            return
         self._stop()
         if self._floating is not None:
-            # It is a child of the map, so it would otherwise stay there
-            # over a map with nothing feeding it.
-            self._floating.hide()
             self._floating.deleteLater()
             self._floating = None
         super().closeEvent(event)
