@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.1.0 - Live video added.
+Bug fixes and improvements.
+
 ## V2.0.9 - Land waypoint added.
 Bug fixes and improvements.
 
