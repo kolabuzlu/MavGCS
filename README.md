@@ -10,7 +10,7 @@
  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows-red?style=flat">
 </p>
 
-![MavGCS screenshot](mavgcs2r9v2.png)
+![MavGCS screenshot](mavgcs211.png)
 
 A ground control station software for **MAVLink** protocol. 🛩️
 
