@@ -1,10 +1,11 @@
 """
-A window for whatever camera is plugged into the ground station.
+A window for whatever camera is plugged into the ground station, or for a
+camera on the network.
 
 Flying with a video feed usually means watching it in one program and the
 map in another, and alt-tabbing between them at the worst moments. This
 puts the picture in the same program as the map without pretending to be
-anything more: pick a device, pick a size, watch it.
+anything more: pick a source, watch it.
 
 Why DirectShow and not Qt's own camera support
 ----------------------------------------------
@@ -24,11 +25,21 @@ OpenCV then does the capture, because pygrabber's own frame grabber
 insists on RGB24 and fails against anything offering NV12 or YUY2 - OBS
 included.
 
-Sizes are offered as a fixed list rather than read from the device:
-pygrabber's format table does not recognise every fourcc (I420 raises a
-KeyError), and a list that sometimes throws is worse than one that is
-always the same. What the device actually gave is reported underneath,
-so a request that was ignored is visible rather than assumed.
+Network cameras
+---------------
+RTSP goes straight to FFmpeg through OpenCV. No relay, no streaming
+engine to install: those exist to solve problems this does not have, and
+a ground station that downloads and installs a third-party binary is a
+much larger thing than it appears.
+
+Transport is worth choosing rather than leaving to chance. UDP loses
+packets and tears the picture; TCP is steadier and is what most cameras
+should be asked for over anything but a clean local network. Auto lets
+FFmpeg decide, which usually means UDP first.
+
+A wrong address takes thirty seconds to give up, so opening happens on
+the worker thread and Stop works throughout - a mistyped URL must not
+freeze the window that would let you fix it.
 
 Two more decisions worth knowing:
 
@@ -40,14 +51,25 @@ Two more decisions worth knowing:
     no visible reason.
 """
 
+import collections
+import os
 import time
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
-                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+                               QLineEdit, QPushButton, QSizePolicy, QSpinBox,
+                               QVBoxLayout, QWidget)
+
+from app_paths import load_settings, save_setting
 
 AUTO = "Auto"
+SOURCE_DEVICE = "Camera (device)"
+SOURCE_RTSP = "RTSP (network)"
+
+SETTING_URL = "video_rtsp_url"
+SETTING_TRANSPORT = "video_rtsp_transport"
+SETTING_BUFFER = "video_smoothing_frames"
 
 # Offered sizes. Anything the device refuses simply comes back at its own
 # size, which is reported rather than hidden.
@@ -55,6 +77,7 @@ SIZES = [("1920 x 1080", (1920, 1080)),
          ("1280 x 720", (1280, 720)),
          ("640 x 480", (640, 480))]
 RATES = [60, 30, 15]
+TRANSPORTS = [(AUTO, None), ("TCP", "tcp"), ("UDP", "udp")]
 
 
 def list_devices():
@@ -72,38 +95,66 @@ def list_devices():
 
 
 class _Reader(QThread):
-    """Opens one device and emits frames until asked to stop."""
+    """Opens one source and emits frames until asked to stop."""
 
     frame_ready = Signal(QImage)
     failed = Signal(str)
     opened = Signal(int, int)
 
-    def __init__(self, index, size, fps, parent=None):
+    def __init__(self, source, size=None, fps=None, transport=None,
+                 smoothing=0, parent=None):
         super().__init__(parent)
-        self._index = index
+        self._source = source           # int index, or an rtsp:// string
         self._size = size
         self._fps = fps
+        self._transport = transport
+        self._smoothing = max(0, int(smoothing))
         self._stop = False
 
     def stop(self):
         self._stop = True
 
+    def _open(self, cv2):
+        if isinstance(self._source, int):
+            return cv2.VideoCapture(self._source, cv2.CAP_DSHOW)
+        # FFmpeg reads its options from the environment at capture time.
+        # stimeout is in microseconds and stops a silent camera hanging
+        # the read for ever; the transport is the part worth choosing.
+        opts = ["stimeout;5000000"]
+        if self._transport:
+            opts.append("rtsp_transport;%s" % self._transport)
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts)
+        return cv2.VideoCapture(self._source, cv2.CAP_FFMPEG)
+
     def run(self):
         import cv2
-        cap = cv2.VideoCapture(self._index, cv2.CAP_DSHOW)
+        cap = self._open(cv2)
         if not cap.isOpened():
-            self.failed.emit("That device would not open. It is usually "
-                             "already in use by another program.")
+            cap.release()
+            if self._stop:
+                return          # cancelled while it was still trying
+            self.failed.emit(
+                "That address did not answer." if not isinstance(
+                    self._source, int) else
+                "That device would not open. It is usually already in use "
+                "by another program.")
             return
         try:
-            if self._size is not None:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._size[0])
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._size[1])
-            if self._fps is not None:
-                cap.set(cv2.CAP_PROP_FPS, self._fps)
+            if isinstance(self._source, int):
+                if self._size is not None:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._size[0])
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._size[1])
+                if self._fps is not None:
+                    cap.set(cv2.CAP_PROP_FPS, self._fps)
             self.opened.emit(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                              int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
+            # The smoothing buffer: hold this many frames back before
+            # showing anything, then show one for every one read. A
+            # network stream that arrives in bursts then plays evenly,
+            # at the cost of exactly this much added delay - which is
+            # why it defaults to none. On a device it is pointless.
+            queue = collections.deque()
             misses = 0
             while not self._stop:
                 ok, frame = cap.read()
@@ -111,7 +162,7 @@ class _Reader(QThread):
                     # A dropped frame is normal; a run of them is not.
                     misses += 1
                     if misses > 60:
-                        self.failed.emit("The device stopped sending "
+                        self.failed.emit("The stream stopped sending "
                                          "pictures.")
                         return
                     self.msleep(15)
@@ -122,15 +173,20 @@ class _Reader(QThread):
                 # copy() because the buffer behind rgb is reused for the
                 # next frame; without it the image tears or crashes once
                 # it crosses to the GUI thread.
-                self.frame_ready.emit(
-                    QImage(rgb.data, w, h, 3 * w,
-                           QImage.Format.Format_RGB888).copy())
+                image = QImage(rgb.data, w, h, 3 * w,
+                               QImage.Format.Format_RGB888).copy()
+                if self._smoothing:
+                    queue.append(image)
+                    if len(queue) <= self._smoothing:
+                        continue
+                    image = queue.popleft()
+                self.frame_ready.emit(image)
         finally:
             cap.release()
 
 
 class VideoWindow(QWidget):
-    """Pick a video input and watch it."""
+    """Pick a video source and watch it."""
 
     def __init__(self, parent=None):
         # No parent on purpose: as a top-level window it gets its own
@@ -139,7 +195,7 @@ class VideoWindow(QWidget):
         super().__init__(None)
         self.setWindowTitle("MavGCS Live Video")
         self.setWindowFlag(Qt.WindowType.Window, True)
-        self.resize(760, 600)
+        self.resize(760, 640)
 
         self._reader = None
         self._frames = 0
@@ -153,20 +209,57 @@ class VideoWindow(QWidget):
         self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.view.setSizePolicy(QSizePolicy.Policy.Expanding,
                                 QSizePolicy.Policy.Expanding)
-        self.view.setMinimumHeight(260)
+        self.view.setMinimumHeight(240)
         self.view.setStyleSheet("background: #000;")
         layout.addWidget(self.view, 1)
 
         form = QFormLayout()
         form.setSpacing(6)
+
+        self.source_combo = QComboBox()
+        self.source_combo.addItems([SOURCE_DEVICE, SOURCE_RTSP])
+        self.source_combo.currentTextChanged.connect(self._source_changed)
+        form.addRow("Source", self.source_combo)
+
         self.device_combo = QComboBox()
+        self.device_row = form.rowCount()
         form.addRow("Video device", self.device_combo)
+
+        # The URL, the transport it should use, and a button to remember
+        # it - a camera's address is typed once and wanted for ever.
+        url_row = QHBoxLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("rtsp://192.168.1.10:554/cam")
+        url_row.addWidget(self.url_edit, 1)
+        self.transport_combo = QComboBox()
+        for label, value in TRANSPORTS:
+            self.transport_combo.addItem(label, value)
+        self.transport_combo.setToolTip(
+            "How the video is carried. UDP is lower latency but tears the "
+            "picture when packets go missing; TCP is steadier and is the "
+            "better choice over anything but a clean local network.")
+        url_row.addWidget(self.transport_combo)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setToolTip("Remember this address and transport.")
+        self.save_btn.clicked.connect(self._save_url)
+        url_row.addWidget(self.save_btn)
+        self.url_widget = QWidget()
+        self.url_widget.setLayout(url_row)
+        url_row.setContentsMargins(0, 0, 0, 0)
+        form.addRow("RTSP URL", self.url_widget)
 
         self.res_combo = QComboBox()
         form.addRow("Resolution", self.res_combo)
-
         self.fps_combo = QComboBox()
         form.addRow("Frame rate", self.fps_combo)
+
+        self.buffer_spin = QSpinBox()
+        self.buffer_spin.setRange(0, 30)
+        self.buffer_spin.setToolTip(
+            "Hold this many frames back before showing anything, so a "
+            "stream that arrives in bursts plays evenly. Costs exactly "
+            "this much delay, which is why it starts at none.")
+        form.addRow("Smoothing buffer (frames)", self.buffer_spin)
         layout.addLayout(form)
 
         self.res_combo.addItem(AUTO, None)
@@ -195,7 +288,50 @@ class VideoWindow(QWidget):
         self.status.setStyleSheet("font-size: 11px; color: #aaa;")
         layout.addWidget(self.status)
 
+        self._restore()
         self.reload_devices()
+        self._source_changed(self.source_combo.currentText())
+
+    # ---- settings --------------------------------------------------------
+
+    def _restore(self):
+        s = load_settings()
+        self.url_edit.setText(s.get(SETTING_URL, "") or "")
+        want = s.get(SETTING_TRANSPORT)
+        idx = self.transport_combo.findData(want)
+        if idx >= 0:
+            self.transport_combo.setCurrentIndex(idx)
+        self.buffer_spin.setValue(int(s.get(SETTING_BUFFER, 0) or 0))
+
+    def _save_url(self):
+        save_setting(SETTING_URL, self.url_edit.text().strip())
+        save_setting(SETTING_TRANSPORT, self.transport_combo.currentData())
+        save_setting(SETTING_BUFFER, self.buffer_spin.value())
+        self._say("Address remembered.")
+
+    # ---- source ----------------------------------------------------------
+
+    def _is_rtsp(self):
+        return self.source_combo.currentText() == SOURCE_RTSP
+
+    def _source_changed(self, _text=None):
+        """Show only the controls that apply to the chosen source."""
+        rtsp = self._is_rtsp()
+        form = self.layout().itemAt(1).layout()
+        for widget, hidden in ((self.device_combo, rtsp),
+                               (self.url_widget, not rtsp),
+                               (self.res_combo, rtsp),
+                               (self.fps_combo, rtsp)):
+            widget.setVisible(not hidden)
+            label = form.labelForField(widget)
+            if label is not None:
+                label.setVisible(not hidden)
+        # Resolution and frame rate belong to the device; a network camera
+        # sends what it sends, and asking OpenCV to change it does nothing.
+        self.refresh_btn.setVisible(not rtsp)
+        self.start_btn.setEnabled(
+            bool(self.url_edit.text().strip()) if rtsp
+            else self.device_combo.isEnabled())
 
     # ---- devices ---------------------------------------------------------
 
@@ -206,25 +342,27 @@ class VideoWindow(QWidget):
         self.device_combo.clear()
 
         if not self._names:
-            self._stop()
+            if not self._is_rtsp():
+                self._stop()
             self.device_combo.addItem("No video devices found")
             self.device_combo.setEnabled(False)
-            self.start_btn.setEnabled(False)
-            self._say("Nothing to show. Plug in a camera or capture card, "
-                      "or start a virtual camera, then press Refresh list.")
+            if not self._is_rtsp():
+                self.start_btn.setEnabled(False)
+                self._say("Nothing to show. Plug in a camera or capture "
+                          "card, or start a virtual camera, then press "
+                          "Refresh list.")
             return
 
         for i, name in enumerate(self._names):
             self.device_combo.addItem(name, i)
         self.device_combo.setEnabled(True)
-        self.start_btn.setEnabled(True)
+        if not self._is_rtsp():
+            self.start_btn.setEnabled(True)
         if was in self._names:
             self.device_combo.setCurrentIndex(self._names.index(was))
-        elif self._reader is not None:
+        elif self._reader is not None and not self._is_rtsp():
             self._stop()
             self._say("The device that was playing has gone.")
-        else:
-            self._say("")
 
     # ---- playing ---------------------------------------------------------
 
@@ -236,13 +374,23 @@ class VideoWindow(QWidget):
             self.start()
 
     def start(self):
-        """Open the selected device and show it."""
+        """Open the selected source and show it."""
         self._stop()
-        index = self.device_combo.currentData()
-        if index is None:
-            return
-        reader = _Reader(index, self.res_combo.currentData(),
-                         self.fps_combo.currentData(), self)
+        if self._is_rtsp():
+            url = self.url_edit.text().strip()
+            if not url:
+                return
+            reader = _Reader(url, transport=self.transport_combo.currentData(),
+                             smoothing=self.buffer_spin.value(), parent=self)
+            what = url
+        else:
+            index = self.device_combo.currentData()
+            if index is None:
+                return
+            reader = _Reader(index, size=self.res_combo.currentData(),
+                             fps=self.fps_combo.currentData(),
+                             smoothing=self.buffer_spin.value(), parent=self)
+            what = self.device_combo.currentText()
         reader.frame_ready.connect(self._show_frame)
         reader.failed.connect(self._failed)
         reader.opened.connect(self._opened)
@@ -251,16 +399,20 @@ class VideoWindow(QWidget):
         self._since = time.monotonic()
         reader.start()
         self.start_btn.setText("Stop")
-        self._say("Opening %s ..." % self.device_combo.currentText())
+        self._say("Opening %s ..." % what)
 
     def _opened(self, w, h):
+        what = (self.url_edit.text().strip() if self._is_rtsp()
+                else self.device_combo.currentText())
         asked = self.res_combo.currentText()
         got = "%d x %d" % (w, h)
         # Say both only when they differ: a device that quietly ignored
         # the request should not look as though it honoured it.
-        where = got if asked in (AUTO, got) else "%s (asked for %s)" % (got,
-                                                                        asked)
-        self._say("%s at %s" % (self.device_combo.currentText(), where))
+        if self._is_rtsp() or asked in (AUTO, got):
+            where = got
+        else:
+            where = "%s (asked for %s)" % (got, asked)
+        self._say("%s at %s" % (what, where))
 
     def _show_frame(self, image):
         self._frames += 1
@@ -283,10 +435,13 @@ class VideoWindow(QWidget):
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.stop()
-            # The read in flight has to finish before the device is
-            # released, or the next open finds it still busy.
-            reader.wait(3000)
-            reader.deleteLater()
+            # An RTSP open that is still timing out can take a while to
+            # notice. Give it a moment, then let it finish on its own
+            # rather than blocking the interface waiting for it.
+            if not reader.wait(1500):
+                reader.finished.connect(reader.deleteLater)
+            else:
+                reader.deleteLater()
         self.start_btn.setText("Start")
 
     def _say(self, text):

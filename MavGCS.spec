@@ -70,13 +70,6 @@ a = Analysis(
     noarchive=False,
 )
 
-# OpenCV is here to read frames off a DirectShow device and nothing else.
-# Its bundled FFmpeg video-IO plugin is 30MB of decoders for reading video
-# files, which this app never does, so it is dropped rather than carried
-# into everyone's download.
-a.binaries = [b for b in a.binaries
-              if "opencv_videoio_ffmpeg" not in b[0].lower()]
-
 pyz = PYZ(a.pure)
 
 exe = EXE(
