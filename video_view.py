@@ -6,70 +6,160 @@ map in another, and alt-tabbing between them at the worst moments. This
 puts the picture in the same program as the map without pretending to be
 anything more: pick a device, pick a size, watch it.
 
-Windows exposes capture cards as ordinary cameras, so an HDMI grabber
-with an analogue FPV receiver behind it turns up in the same list as a
-webcam and needs no special handling here.
+Why DirectShow and not Qt's own camera support
+----------------------------------------------
+Qt on Windows enumerates cameras through Media Foundation, whichever
+media backend is selected - both `windows` and `ffmpeg` were tried and
+both report nothing for a virtual camera. OBS registers its virtual
+camera as a DirectShow filter only, so Media Foundation structurally
+cannot see it, and neither can Qt. DirectShow sees everything Media
+Foundation sees and the virtual cameras as well, so there is one path
+here rather than two.
 
-Two decisions worth knowing:
+That costs two libraries and they divide the work by what each is good
+at. pygrabber enumerates: it returns real device names in DirectShow's
+own order, which is the same order OpenCV opens them by, and that
+correspondence is the whole difficulty of using OpenCV for capture.
+OpenCV then does the capture, because pygrabber's own frame grabber
+insists on RGB24 and fails against anything offering NV12 or YUY2 - OBS
+included.
 
-  * Not modal, and its own window rather than a panel. A feed you cannot
-    move to the second monitor is not much use, and a modal dialog over a
-    ground station during a flight would be indefensible.
-  * Closing it stops the camera. A capture device held open by a window
-    nobody can see is the kind of thing that makes the next program to
-    want it fail for no visible reason.
+Sizes are offered as a fixed list rather than read from the device:
+pygrabber's format table does not recognise every fourcc (I420 raises a
+KeyError), and a list that sometimes throws is worse than one that is
+always the same. What the device actually gave is reported underneath,
+so a request that was ignored is visible rather than assumed.
 
-Resolution and frame rate are offered because capture cards frequently
-come up in a low default mode and stay there unless told otherwise. Both
-default to Auto, which leaves the device on whatever it chooses.
+Two more decisions worth knowing:
+
+  * Frames are read on a worker thread. cv2.VideoCapture.read() blocks
+    until a frame arrives, and stalling the ground station's interface
+    for a frame interval, thirty times a second, would be indefensible.
+  * Closing the window releases the device. A capture device held open by
+    a window nobody can see is how the next program to want it fails for
+    no visible reason.
 """
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices
-from PySide6.QtMultimediaWidgets import QVideoWidget
+import time
+
+from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
                                QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 AUTO = "Auto"
 
+# Offered sizes. Anything the device refuses simply comes back at its own
+# size, which is reported rather than hidden.
+SIZES = [("1920 x 1080", (1920, 1080)),
+         ("1280 x 720", (1280, 720)),
+         ("640 x 480", (640, 480))]
+RATES = [60, 30, 15]
 
-def _format_key(fmt):
-    """(width, height) of a camera format."""
-    size = fmt.resolution()
-    return (size.width(), size.height())
+
+def list_devices():
+    """Device names in the order OpenCV will open them by.
+
+    Empty if the libraries or the platform are not there, which the
+    caller shows as "no devices" rather than as an error - a machine
+    without a capture stack should still get a ground station.
+    """
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+        return list(FilterGraph().get_input_devices())
+    except Exception:
+        return []
+
+
+class _Reader(QThread):
+    """Opens one device and emits frames until asked to stop."""
+
+    frame_ready = Signal(QImage)
+    failed = Signal(str)
+    opened = Signal(int, int)
+
+    def __init__(self, index, size, fps, parent=None):
+        super().__init__(parent)
+        self._index = index
+        self._size = size
+        self._fps = fps
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        import cv2
+        cap = cv2.VideoCapture(self._index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            self.failed.emit("That device would not open. It is usually "
+                             "already in use by another program.")
+            return
+        try:
+            if self._size is not None:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._size[0])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._size[1])
+            if self._fps is not None:
+                cap.set(cv2.CAP_PROP_FPS, self._fps)
+            self.opened.emit(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+            misses = 0
+            while not self._stop:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    # A dropped frame is normal; a run of them is not.
+                    misses += 1
+                    if misses > 60:
+                        self.failed.emit("The device stopped sending "
+                                         "pictures.")
+                        return
+                    self.msleep(15)
+                    continue
+                misses = 0
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, _ = rgb.shape
+                # copy() because the buffer behind rgb is reused for the
+                # next frame; without it the image tears or crashes once
+                # it crosses to the GUI thread.
+                self.frame_ready.emit(
+                    QImage(rgb.data, w, h, 3 * w,
+                           QImage.Format.Format_RGB888).copy())
+        finally:
+            cap.release()
 
 
 class VideoWindow(QWidget):
     """Pick a video input and watch it."""
 
     def __init__(self, parent=None):
-        # No parent on purpose: as a top-level window it gets its own entry
-        # in the task bar and can be moved to another screen, which is the
-        # whole point of having it in a window rather than a panel.
+        # No parent on purpose: as a top-level window it gets its own
+        # entry in the task bar and can be moved to another screen, which
+        # is most of the point of having it in a window at all.
         super().__init__(None)
         self.setWindowTitle("Video")
         self.setWindowFlag(Qt.WindowType.Window, True)
-        self.resize(720, 560)
+        self.resize(760, 600)
 
-        self._camera = None
-        self._session = None
-        self._devices = []
+        self._reader = None
+        self._frames = 0
+        self._since = 0.0
+        self._names = []
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
-        self.video = QVideoWidget()
-        self.video.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                 QSizePolicy.Policy.Expanding)
-        self.video.setMinimumHeight(240)
-        self.video.setStyleSheet("background: #000;")
-        layout.addWidget(self.video, 1)
+        self.view = QLabel()
+        self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.view.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Expanding)
+        self.view.setMinimumHeight(260)
+        self.view.setStyleSheet("background: #000;")
+        layout.addWidget(self.view, 1)
 
         form = QFormLayout()
         form.setSpacing(6)
         self.device_combo = QComboBox()
-        self.device_combo.currentIndexChanged.connect(self._device_changed)
         form.addRow("Video device", self.device_combo)
 
         self.res_combo = QComboBox()
@@ -79,11 +169,18 @@ class VideoWindow(QWidget):
         form.addRow("Frame rate", self.fps_combo)
         layout.addLayout(form)
 
+        self.res_combo.addItem(AUTO, None)
+        for label, size in SIZES:
+            self.res_combo.addItem(label, size)
+        self.fps_combo.addItem(AUTO, None)
+        for r in RATES:
+            self.fps_combo.addItem("%d fps" % r, r)
+
         buttons = QHBoxLayout()
         self.refresh_btn = QPushButton("Refresh list")
         self.refresh_btn.setToolTip(
             "Look for devices again. Needed after plugging in a capture "
-            "card, which Windows does not always announce.")
+            "card, or after starting a virtual camera such as OBS.")
         self.refresh_btn.clicked.connect(self.reload_devices)
         buttons.addWidget(self.refresh_btn)
         buttons.addStretch(1)
@@ -98,111 +195,41 @@ class VideoWindow(QWidget):
         self.status.setStyleSheet("font-size: 11px; color: #aaa;")
         layout.addWidget(self.status)
 
-        # Windows announces a camera appearing or going away, so a capture
-        # card plugged in while this is open turns up without the user
-        # having to know about the Refresh button.
-        self._watcher = QMediaDevices(self)
-        self._watcher.videoInputsChanged.connect(self.reload_devices)
-
         self.reload_devices()
 
     # ---- devices ---------------------------------------------------------
 
     def reload_devices(self):
-        """Rebuild the device list, keeping the current pick if it survives."""
-        was = self._current_device_id()
-        self._devices = list(QMediaDevices.videoInputs())
-        self.device_combo.blockSignals(True)
+        """Rebuild the list, keeping the current pick if it is still there."""
+        was = self.device_combo.currentText()
+        self._names = list_devices()
         self.device_combo.clear()
-        for dev in self._devices:
-            self.device_combo.addItem(dev.description(), dev)
-        self.device_combo.blockSignals(False)
 
-        if not self._devices:
+        if not self._names:
             self._stop()
             self.device_combo.addItem("No video devices found")
             self.device_combo.setEnabled(False)
             self.start_btn.setEnabled(False)
-            self._say("Nothing to show. Plug in a camera or capture card "
-                      "and press Refresh list.")
-            self.res_combo.clear()
-            self.fps_combo.clear()
+            self._say("Nothing to show. Plug in a camera or capture card, "
+                      "or start a virtual camera, then press Refresh list.")
             return
 
+        for i, name in enumerate(self._names):
+            self.device_combo.addItem(name, i)
         self.device_combo.setEnabled(True)
         self.start_btn.setEnabled(True)
-        if was is not None:
-            for i, dev in enumerate(self._devices):
-                if dev.id() == was:
-                    self.device_combo.setCurrentIndex(i)
-                    break
-            else:
-                # The device being shown has gone. Stop rather than leave a
-                # frozen last frame looking like a live picture.
-                self._stop()
-                self._say("The device that was playing has been unplugged.")
-        self._device_changed()
-
-    def _current_device_id(self):
-        dev = self.device_combo.currentData()
-        return dev.id() if dev is not None else None
-
-    def _formats(self):
-        dev = self.device_combo.currentData()
-        return list(dev.videoFormats()) if dev is not None else []
-
-    def _device_changed(self):
-        """Offer only the sizes and rates this device actually reports."""
-        formats = self._formats()
-        sizes = sorted({_format_key(f) for f in formats}, reverse=True)
-        rates = sorted({int(round(f.maxFrameRate())) for f in formats
-                        if f.maxFrameRate() > 0}, reverse=True)
-
-        self.res_combo.clear()
-        self.res_combo.addItem(AUTO, None)
-        for w, h in sizes:
-            self.res_combo.addItem("%d x %d" % (w, h), (w, h))
-
-        self.fps_combo.clear()
-        self.fps_combo.addItem(AUTO, None)
-        for r in rates:
-            self.fps_combo.addItem("%d fps" % r, r)
-
-        if formats:
-            self._say("")
+        if was in self._names:
+            self.device_combo.setCurrentIndex(self._names.index(was))
+        elif self._reader is not None:
+            self._stop()
+            self._say("The device that was playing has gone.")
         else:
-            # Some virtual cameras report nothing until they are running.
-            # Auto still works for those, so this is a note, not an error.
-            self._say("This device does not list its formats. Auto will "
-                      "still work.")
+            self._say("")
 
     # ---- playing ---------------------------------------------------------
 
-    def _pick_format(self):
-        """The device's own format closest to what was asked for.
-
-        Returns None for Auto, or when nothing matches - setting no format
-        leaves the camera on its default, which is better than refusing to
-        start over a resolution the user only expressed a preference for.
-        """
-        want_size = self.res_combo.currentData()
-        want_fps = self.fps_combo.currentData()
-        if want_size is None and want_fps is None:
-            return None
-        best = None
-        for fmt in self._formats():
-            if want_size is not None and _format_key(fmt) != want_size:
-                continue
-            if want_fps is not None and int(round(fmt.maxFrameRate())) != want_fps:
-                continue
-            # Among equals prefer the higher rate: a card offering the same
-            # size at 30 and 60 should give the smoother one.
-            if best is None or fmt.maxFrameRate() > best.maxFrameRate():
-                best = fmt
-        return best
-
     def _toggle(self):
-        if self._camera is not None:
+        if self._reader is not None:
             self._stop()
             self._say("Stopped.")
         else:
@@ -211,49 +238,55 @@ class VideoWindow(QWidget):
     def start(self):
         """Open the selected device and show it."""
         self._stop()
-        dev = self.device_combo.currentData()
-        if dev is None:
+        index = self.device_combo.currentData()
+        if index is None:
             return
-        camera = QCamera(dev, self)
-        fmt = self._pick_format()
-        if fmt is not None:
-            camera.setCameraFormat(fmt)
-        camera.errorOccurred.connect(self._camera_error)
-
-        session = QMediaCaptureSession(self)
-        session.setCamera(camera)
-        session.setVideoOutput(self.video)
-
-        self._camera = camera
-        self._session = session
-        camera.start()
-
+        reader = _Reader(index, self.res_combo.currentData(),
+                         self.fps_combo.currentData(), self)
+        reader.frame_ready.connect(self._show_frame)
+        reader.failed.connect(self._failed)
+        reader.opened.connect(self._opened)
+        self._reader = reader
+        self._frames = 0
+        self._since = time.monotonic()
+        reader.start()
         self.start_btn.setText("Stop")
+        self._say("Opening %s ..." % self.device_combo.currentText())
+
+    def _opened(self, w, h):
         asked = self.res_combo.currentText()
-        rate = self.fps_combo.currentText()
-        self._say("Showing %s at %s, %s."
-                  % (dev.description(), asked.lower(), rate.lower()))
-        # A device that is already in use often fails a moment after
-        # start() rather than during it, so confirm it really is running.
-        QTimer.singleShot(1200, self._confirm_running)
+        got = "%d x %d" % (w, h)
+        # Say both only when they differ: a device that quietly ignored
+        # the request should not look as though it honoured it.
+        where = got if asked in (AUTO, got) else "%s (asked for %s)" % (got,
+                                                                        asked)
+        self._say("%s at %s" % (self.device_combo.currentText(), where))
 
-    def _confirm_running(self):
-        if self._camera is not None and not self._camera.isActive():
-            self._say("That device did not start. It is usually already in "
-                      "use by another program.")
+    def _show_frame(self, image):
+        self._frames += 1
+        self.view.setPixmap(QPixmap.fromImage(image).scaled(
+            self.view.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+        now = time.monotonic()
+        if now - self._since >= 2.0:
+            rate = self._frames / (now - self._since)
+            text = self.status.text().split("  -  ")[0]
+            self._say("%s  -  %.0f fps" % (text, rate))
+            self._frames = 0
+            self._since = now
 
-    def _camera_error(self, _error, message):
-        self._say(message or "The camera reported an error.")
+    def _failed(self, message):
         self._stop()
+        self._say(message)
 
     def _stop(self):
-        if self._camera is not None:
-            self._camera.stop()
-        if self._session is not None:
-            self._session.setVideoOutput(None)
-            self._session.setCamera(None)
-        self._camera = None
-        self._session = None
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            reader.stop()
+            # The read in flight has to finish before the device is
+            # released, or the next open finds it still busy.
+            reader.wait(3000)
+            reader.deleteLater()
         self.start_btn.setText("Start")
 
     def _say(self, text):

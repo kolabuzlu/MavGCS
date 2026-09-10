@@ -4298,8 +4298,8 @@ class MainWindow(QMainWindow):
         holding the same device - the second would simply fail, and the
         reason would not be obvious.
 
-        Imported here rather than at the top: QtMultimedia pulls in the
-        platform's capture stack, and a machine where that is broken or
+        Imported here rather than at the top: the video window pulls in
+        OpenCV and DirectShow, and a machine where that is broken or
         absent should still get a ground station.
         """
         try:

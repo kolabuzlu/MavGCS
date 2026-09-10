@@ -37,7 +37,7 @@ hiddenimports += collect_submodules("pymavlink.dialects")
 # multimedia backend plugins when it can see the module. Both modules sat
 # in excludes below until the map grew a Video button - a build without
 # them starts fine and then fails only when that button is pressed.
-hiddenimports += ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"]
+hiddenimports += ["cv2", "pygrabber", "pygrabber.dshow_graph"]
 
 a = Analysis(
     ["main.py"],
@@ -65,10 +65,17 @@ a = Analysis(
         "matplotlib", "tkinter", "scipy", "pandas", "PIL",
         "PySide6.QtQuick3D", "PySide6.Qt3DCore", "PySide6.Qt3DRender",
         "PySide6.QtCharts", "PySide6.QtDataVisualization",
-        "PySide6.QtSensors", "PySide6.QtTest",
+        "PySide6.QtMultimedia", "PySide6.QtSensors", "PySide6.QtTest",
     ],
     noarchive=False,
 )
+
+# OpenCV is here to read frames off a DirectShow device and nothing else.
+# Its bundled FFmpeg video-IO plugin is 30MB of decoders for reading video
+# files, which this app never does, so it is dropped rather than carried
+# into everyone's download.
+a.binaries = [b for b in a.binaries
+              if "opencv_videoio_ffmpeg" not in b[0].lower()]
 
 pyz = PYZ(a.pure)
 

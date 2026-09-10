@@ -4,3 +4,8 @@ pyserial
 numpy
 tifffile
 imagecodecs
+# Video window. DirectShow is the only way to see virtual
+# cameras on Windows; Qt's own camera support cannot.
+# pygrabber names the devices, OpenCV reads the frames.
+opencv-python-headless
+pygrabber
