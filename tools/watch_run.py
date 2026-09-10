@@ -3,7 +3,11 @@ Run MavGCS with everything recorded, so a crash can be explained afterwards.
 
     watch.bat        (in PowerShell:  .\\watch.bat)
 
-Takes nothing. MavGCS does not connect on its own anyway - start it,
+    watch.bat notrail    the same, with the trail held to a few points
+    watch.bat nogpu      the same, with the page drawn on the CPU
+                         instead of through ANGLE and Direct3D 11
+
+MavGCS does not connect on its own anyway - start it,
 then pick the port and press Connect in the Connection panel as usual.
 
 Writes one file per run into logs\\, holding:
@@ -132,13 +136,36 @@ def main():
     # at a few points. It is the one thing on the map that grows without
     # bound, and the current suspect for the compositor fault, so this
     # flies the comparison without changing anything else.
-    notrail = len(sys.argv) > 1 and sys.argv[1].lower() == "notrail"
+    mode = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+    notrail = mode == "notrail"
     if notrail:
         env["MAVGCS_TRAIL_MAX"] = "2"
     # Chromium's own log, turned up, on stderr where it can be captured.
     existing = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-        existing + " --enable-logging=stderr --log-level=0").strip()
+    extra = " --enable-logging=stderr --log-level=0"
+    # watch.bat nogpu - draw the whole page on the CPU. The crash is an
+    # overflow of ANGLE's Direct3D 11 input layout cache, so the fix this
+    # is testing is not a bigger cache but a route that has no cache at
+    # all. It matters for machines with only integrated graphics, which
+    # have no discrete card to escape to.
+    #
+    # The obvious alternatives were tried on 2026-09-10 and none of them
+    # draw a map on Qt 6.11, so do not spend another evening on them:
+    #
+    #   --use-angle=gl          context lost on every MakeCurrent, for
+    #                           ever. Qt's Windows compositor wants D3D11
+    #                           interop and has no SharedImageBackingFactory
+    #                           for the GL backend.
+    #   --use-angle=d3d9        the same failure, same volume of it.
+    #   --use-angle=d3d11-warp  starts clean and reports Microsoft Basic
+    #                           Render Driver, then draws nothing at all.
+    #   --disable-gpu-compositing
+    #                           draws, but rasterising still goes through
+    #                           D3D11, so the cache is still there.
+    softgpu = mode == "nogpu"
+    if softgpu:
+        extra += " --disable-gpu"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = (existing + extra).strip()
     env["QT_LOGGING_RULES"] = "qt.webenginecontext.info=true"
 
     started = datetime.now()
@@ -149,6 +176,13 @@ def main():
         log.write("flags     %s\n" % env["QTWEBENGINE_CHROMIUM_FLAGS"])
         log.write("trail     %s\n"
                   % ("HELD SHORT - notrail" if notrail else "normal (8000)"))
+        # With --disable-gpu there is no WebGL, so the GPUADAPTER line
+        # will be absent rather than wrong. That absence is itself the
+        # confirmation that the flag took: the map still draws, through
+        # Leaflet's DOM and 2D canvas, which never needed the GPU.
+        log.write("render    %s\n"
+                  % ("CPU - the GPU is off, so no adapter line follows"
+                     if softgpu else "GPU (ANGLE over Direct3D 11)"))
         log.write("=" * 70 + "\n")
         log.flush()
 

@@ -4,6 +4,12 @@ rem  Run MavGCS with everything recorded, so a crash can be explained.
 rem
 rem      watch.bat            (in PowerShell:  .\watch.bat)
 rem      watch.bat notrail    same, but the trail is held short
+rem      watch.bat nogpu      draw the page on the CPU instead of
+rem                           through ANGLE and Direct3D 11. The
+rem                           compositor crash is an overflow of a
+rem                           D3D11-only cache, so this route has no
+rem                           such cache. For machines with no
+rem                           discrete card to switch to.
 rem
 rem  No connection to give it - start it, then connect from the
 rem  Connection panel as usual.
