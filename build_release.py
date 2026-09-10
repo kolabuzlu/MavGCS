@@ -71,6 +71,16 @@ def main():
     if not exe.exists():
         sys.exit(f"Build finished but {exe} is missing.")
 
+    # GPL v3 asks that the licence travel with the binary, and a zip of
+    # just the .exe conveys none of it. Copied into dist/ rather than
+    # written straight into the archive, so it lands beside MavGCS.exe
+    # both in the folder that gets run from and in the zip - the rglob
+    # below picks it up with everything else.
+    licence = HERE / "LICENSE"
+    if not licence.exists():
+        sys.exit("LICENSE is missing, and the release has to carry it.")
+    shutil.copy2(licence, HERE / "dist" / "MavGCS" / "LICENSE")
+
     version = app_version()
     zip_path = HERE / "dist" / f"MavGCS-{version}-windows.zip"
     print(f"Zipping -> {zip_path.name} ...")
