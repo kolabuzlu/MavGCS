@@ -342,6 +342,11 @@ class MavlinkLink(QThread):
         # closes, and only the pitch bit is ever touched.
         self._pid_mask_original = None
         self._pid_mask_current = None
+        # What we have asked the aircraft to hold, until it echoes back
+        # that value. A PARAM_SET is not acknowledged, so without this a
+        # write lost in the air is indistinguishable from one that landed.
+        self._pid_mask_wanted = None
+        self._pid_mask_sent_at = 0.0
         self._elevator_ch = None            # 1-based servo output
         self._elevator_half_us = 400.0      # (MAX-MIN)/2, refined on arrival
         self._elevator_min = None
@@ -552,15 +557,24 @@ class MavlinkLink(QThread):
             # only a bounded number of times - then say so, because a
             # readout that never fills in should tell you it gave up
             # rather than look like it is still trying.
-            if self._want_elevator and now >= self._param_retry_next:
+            if (self._want_elevator and not self._was_armed
+                    and now >= self._param_retry_next):
                 if self._retry_missing_params():
                     self._param_retries += 1
                     if self._param_retries >= self.PARAM_RETRY_MAX:
                         self._param_retry_next = float("inf")
+                        missing = []
                         if self._elevator_ch is None:
+                            missing.append("which output is the elevator")
+                        if self._pid_mask_current is None:
+                            missing.append("GCS_PID_MASK")
+                        elif self._pid_mask_wanted is not None:
+                            missing.append("the GCS_PID_MASK write")
+                        if missing:
                             self.elevator_status.emit(
-                                "no answer from the aircraft - too much "
-                                "of the link is being lost")
+                                "no answer from the aircraft for %s - too "
+                                "much of the link is being lost"
+                                % " and ".join(missing))
                     else:
                         self._param_retry_next = now + self.PARAM_RETRY_EVERY_S
                 else:
@@ -1290,6 +1304,17 @@ class MavlinkLink(QThread):
             self._apply_pid_mask()
         self.apply_stream_rates()
 
+    def _may_configure(self):
+        """Whether this is a moment to be talking to the aircraft at all.
+
+        Nothing the balance check needs is urgent and none of it has to
+        happen in the air, so all of it waits for the ground. A ground
+        station repeating parameter reads and writing a parameter while
+        somebody is trying to fly is not a thing worth defending, whatever
+        the measured risk turns out to be.
+        """
+        return self.master is not None and not self._was_armed
+
     def _retry_missing_params(self):
         """Ask again for anything the balance check still has not got.
 
@@ -1303,8 +1328,8 @@ class MavlinkLink(QThread):
         for level cruise for ever with nothing on screen to say why. It
         worked on SITL for years because SITL loses nothing.
         """
-        if self.master is None:
-            return True             # not connected yet; keep waiting
+        if not self._may_configure():
+            return True             # not connected, or armed; keep waiting
         # What is known now. If this differs from last time then something
         # arrived, and a link still answering deserves to keep being asked.
         progress = (self._elevator_ch, len(self._servo_scan_seen),
@@ -1341,6 +1366,17 @@ class MavlinkLink(QThread):
                 # signals - is silent.
                 outstanding = True
                 self._request_pid_mask()
+            elif self._pid_mask_wanted is not None:
+                # Read answered, write not yet echoed back. A lost
+                # PARAM_SET is silent and the pitch telemetry it was meant
+                # to switch on never starts, so it is sent again - but not
+                # before the aircraft has had an interval to answer the
+                # one already in flight. Writing twice because the echo
+                # was merely slow is not a retry, it is a stutter.
+                outstanding = True
+                if (time.monotonic() - self._pid_mask_sent_at
+                        >= self.PARAM_RETRY_EVERY_S):
+                    self._set_pid_mask(self._pid_mask_wanted)
             if self._trim_throttle is None:
                 outstanding = True
                 self._request_trim_throttle()
@@ -1354,7 +1390,7 @@ class MavlinkLink(QThread):
         One read per output, once, rather than a full parameter list: the
         vehicle carries about 1500 parameters and we want four of them.
         """
-        if self.master is None:
+        if not self._may_configure():
             return
         self._servo_scan_seen.clear()
         self._elevator_ch = None
@@ -1599,7 +1635,7 @@ class MavlinkLink(QThread):
         Thrust line offset means throttle changes pitch, so the elevator
         only says something about the balance at this power setting.
         """
-        if self.master is None:
+        if not self._may_configure():
             return
         try:
             with self._send_lock:
@@ -1616,7 +1652,7 @@ class MavlinkLink(QThread):
         something different on a 1000-2000 setup than on 1100-1900 - and
         the reversal decides which way is up.
         """
-        if self.master is None:
+        if not self._may_configure():
             return
         try:
             with self._send_lock:
@@ -1717,7 +1753,7 @@ class MavlinkLink(QThread):
     PID_MASK_PITCH = 2
 
     def _request_pid_mask(self):
-        if self.master is None:
+        if not self._may_configure():
             return
         try:
             with self._send_lock:
@@ -1728,10 +1764,17 @@ class MavlinkLink(QThread):
             pass
 
     def _on_pid_mask(self, value: int):
-        """The vehicle told us its current mask."""
+        """The vehicle told us its current mask.
+
+        Latched on first sighting only: this also fires for the echo of
+        our own write, and taking that as the original would mean
+        restoring the aircraft to our value rather than to its own.
+        """
         if self._pid_mask_original is None:
             self._pid_mask_original = value
         self._pid_mask_current = value
+        if self._pid_mask_wanted is not None and value == self._pid_mask_wanted:
+            self._pid_mask_wanted = None        # confirmed by the aircraft
         self._apply_pid_mask()
 
     def _apply_pid_mask(self):
@@ -1748,6 +1791,8 @@ class MavlinkLink(QThread):
                       | was_set)
         if wanted != self._pid_mask_current:
             self._set_pid_mask(wanted)
+        else:
+            self._pid_mask_wanted = None        # nothing outstanding
 
     def _restore_pid_mask(self):
         """Put the mask back exactly as it was found."""
@@ -1757,15 +1802,23 @@ class MavlinkLink(QThread):
         self._set_pid_mask(self._pid_mask_original)
 
     def _set_pid_mask(self, value: int):
-        if self.master is None:
+        """Ask for a mask. Believed only when the aircraft echoes it back.
+
+        Deliberately does not record the value as current: a PARAM_SET
+        gets no acknowledgement, and on a link losing most of its packets
+        assuming success means the pitch telemetry silently never starts
+        and nothing anywhere reports a problem.
+        """
+        if not self._may_configure():
             return
+        self._pid_mask_wanted = value
+        self._pid_mask_sent_at = time.monotonic()
         try:
             with self._send_lock:
                 self.master.mav.param_set_send(
                     self.master.target_system, self.master.target_component,
                     b"GCS_PID_MASK", float(value),
                     mavutil.mavlink.MAV_PARAM_TYPE_INT16)
-            self._pid_mask_current = value
         except Exception:
             pass
 
