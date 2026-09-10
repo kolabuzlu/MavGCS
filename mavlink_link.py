@@ -1228,6 +1228,15 @@ class MavlinkLink(QThread):
                 # flight - so ask directly on the transition.
                 if armed and not self._was_armed:
                     self._request_home()
+                    if self._param_active:
+                        # Keep what arrived and stop chasing the rest. The
+                        # vehicle finishes sending whatever it has already
+                        # queued - there is no way to call that back - but
+                        # nothing further is asked for.
+                        self.command_feedback.emit(
+                            "Armed - stopped reading parameters at %d"
+                            % len(self._params))
+                        self.cancel_parameters()
                     # Arming is the moment the balance check stops being
                     # able to finish. If it has not, say that rather than
                     # let the readout sit on "Waiting for level cruise",
@@ -1986,6 +1995,15 @@ class MavlinkLink(QThread):
         if self.master is None:
             self.command_feedback.emit("Not connected - can't read parameters")
             return
+        if self._was_armed:
+            # Four full passes of a 1300-parameter list is the better part
+            # of two minutes with the downlink almost entirely full, and
+            # the telemetry it crowds out is the telemetry being flown on.
+            # There is nothing in the list worth that during a flight.
+            self.command_feedback.emit(
+                "Parameters are not read while armed - it would crowd out "
+                "the telemetry. Land first.")
+            return
         if self._param_writes:
             # Same collision from the other side.
             self.command_feedback.emit(
@@ -2154,6 +2172,12 @@ class MavlinkLink(QThread):
         """Nothing has arrived for a while. Chase the gaps or stop."""
         self._param_quiet_at = None
         if not self._param_active:
+            return
+        if self._was_armed:
+            # Belt and braces: the arm transition already stops this, but
+            # a chase round is the heaviest thing this program can put on
+            # a link and it should not depend on one code path to prevent.
+            self.cancel_parameters()
             return
         total = self._param_total or 0
         missing = [i for i in range(total) if i not in self._param_index]
