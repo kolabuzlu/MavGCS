@@ -90,7 +90,16 @@ def list_devices():
     try:
         from pygrabber.dshow_graph import FilterGraph
         return list(FilterGraph().get_input_devices())
-    except Exception:
+    except Exception as exc:
+        # Say why, into the log. A machine with no camera and a build that
+        # failed to carry its COM support both end up showing an empty
+        # list, and only one of those is the user's own problem - without
+        # this line there is nothing to tell them apart.
+        try:
+            print("VIDEO: could not enumerate devices: %r" % (exc,),
+                  flush=True)
+        except Exception:
+            pass            # frozen and windowed, there is no stdout
         return []
 
 
