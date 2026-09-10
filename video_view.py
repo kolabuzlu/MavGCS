@@ -137,7 +137,7 @@ class VideoWindow(QWidget):
         # entry in the task bar and can be moved to another screen, which
         # is most of the point of having it in a window at all.
         super().__init__(None)
-        self.setWindowTitle("Video")
+        self.setWindowTitle("MavGCS Live Video")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.resize(760, 600)
 

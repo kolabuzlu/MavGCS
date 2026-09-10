@@ -180,16 +180,19 @@ LEAFLET_HTML = """
     width: 202px; height: 34px;
     padding: 0;
     margin: 0;
-    background: rgba(0,0,0,0.72);
-    border: 1px solid rgba(255,255,255,0.08);
+    /* A muted red: enough to separate a control from the two panels
+       below it, dark enough not to compete with the compass's north
+       needle or with a red warning on the map itself. */
+    background: rgba(146,62,62,0.85);
+    border: 1px solid rgba(255,255,255,0.10);
     border-radius: 8px;
     color: #fff;
     font-family: sans-serif; font-size: 13px;
     cursor: pointer;
     z-index: 1000;
   }
-  #video-btn:hover { background: rgba(0,0,0,0.88); }
-  #video-btn:active { background: #000; }
+  #video-btn:hover { background: rgba(170,74,74,0.92); }
+  #video-btn:active { background: rgba(120,48,48,1); }
 
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
@@ -629,7 +632,7 @@ LEAFLET_HTML = """
     z-index: 1000; pointer-events: none;
 ">Created by Derin Hakan Karakurt</div>
 <button id="video-btn" type="button"
-        title="Show a camera or capture card in its own window">Video</button>
+        title="Show a camera or capture card in its own window">Live Video</button>
 <div id="compass" title="Heading (white), course over ground (orange), wind (blue)">
     <svg id="cp-svg" viewBox="0 0 200 200">
         <circle class="cp-face" cx="100" cy="100" r="94" />
