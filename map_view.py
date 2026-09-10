@@ -161,6 +161,36 @@ LEAFLET_HTML = """
   .leaflet-control-attribution a { color: #6fc3e8; }
   .leaflet-control-attribution a:hover,
   .leaflet-control-attribution a:focus { color: #9ad8f2; }
+  #video-btn {
+    /* Completes the right-hand column. The terrain radar sits at
+       bottom:26 and the compass at bottom:234, both 200 wide against
+       right:8 - this takes the next slot up, at 234 + 200 + 8, so the
+       three share an edge and read as one stack rather than three things
+       that happen to be near each other.
+
+       Black rather than the panels' rgba(30,30,30): those are surfaces to
+       read through, and this is a control to press. */
+    position: absolute; bottom: 442px; right: 8px;
+    /* 202 and border-box, not 200: the panels below are divs at
+       width:200 with a 1px border and no border-box, so their outer edge
+       is 202. Matching the outer box is what makes the column line up,
+       and pinning it here means the browser's default button padding
+       cannot widen it. */
+    box-sizing: border-box;
+    width: 202px; height: 34px;
+    padding: 0;
+    margin: 0;
+    background: rgba(0,0,0,0.72);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    color: #fff;
+    font-family: sans-serif; font-size: 13px;
+    cursor: pointer;
+    z-index: 1000;
+  }
+  #video-btn:hover { background: rgba(0,0,0,0.88); }
+  #video-btn:active { background: #000; }
+
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
        same size and position so the two read as one stack of instruments.
@@ -598,6 +628,8 @@ LEAFLET_HTML = """
     font-family: sans-serif; font-size: 11px;
     z-index: 1000; pointer-events: none;
 ">Created by Derin Hakan Karakurt</div>
+<button id="video-btn" type="button"
+        title="Show a camera or capture card in its own window">Video</button>
 <div id="compass" title="Heading (white), course over ground (orange), wind (blue)">
     <svg id="cp-svg" viewBox="0 0 200 200">
         <circle class="cp-face" cx="100" cy="100" r="94" />
@@ -666,6 +698,20 @@ function flyToHere(lat, lon) {
     if (bridge) {
         bridge.flyToHere(lat, lon);
     }
+}
+
+// The Video button. Leaflet's own helpers stop the click reaching the map
+// underneath: without them, pressing this while "Queue waypoints on map
+// click" is on would also drop a waypoint behind the button.
+function wireVideoButton() {
+    var btn = document.getElementById('video-btn');
+    if (!btn) { return; }
+    L.DomEvent.disableClickPropagation(btn);
+    L.DomEvent.disableScrollPropagation(btn);
+    btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        if (bridge) { bridge.videoRequested(); }
+    });
 }
 
 // Each waypoint gets a stable id so an altitude edit can name exactly
@@ -1077,6 +1123,9 @@ function updateZoomIndicator() {
 }
 map.on('zoomend', updateZoomIndicator);
 updateZoomIndicator();
+
+// After Leaflet exists, because the button borrows its click guards.
+wireVideoButton();
 
 var tilesFailed = false;
 var TILE_RETRY_MS = 15000;
@@ -2836,6 +2885,7 @@ class Bridge(QObject):
     tile_cache_clear_requested = Signal()
     terrain_cache_limit_changed = Signal(int)
     terrain_cache_clear_requested = Signal()
+    video_requested = Signal()
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
@@ -2892,6 +2942,10 @@ class Bridge(QObject):
         self.tile_cache_limit_changed.emit(megabytes)
 
     @Slot()
+    def videoRequested(self):
+        self.video_requested.emit()
+
+    @Slot()
     def tileCacheClearRequested(self):
         self.tile_cache_clear_requested.emit()
 
@@ -2915,6 +2969,7 @@ class MapView(QWebEngineView):
     tile_cache_clear_requested = Signal()
     terrain_cache_limit_changed = Signal(int)
     terrain_cache_clear_requested = Signal()
+    video_requested = Signal()
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
@@ -2961,6 +3016,8 @@ class MapView(QWebEngineView):
             self.tile_cache_limit_changed, Qt.ConnectionType.QueuedConnection)
         self._bridge.tile_cache_clear_requested.connect(
             self.tile_cache_clear_requested, Qt.ConnectionType.QueuedConnection)
+        self._bridge.video_requested.connect(
+            self.video_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_cache_limit_changed.connect(
             self.terrain_cache_limit_changed, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_cache_clear_requested.connect(

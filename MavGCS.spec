@@ -31,6 +31,14 @@ hiddenimports = collect_submodules("imagecodecs")
 # bundled, so the fast path works and the fallback is intact.
 hiddenimports += collect_submodules("pymavlink.dialects")
 
+# The video window. Named here for two reasons: video_view imports these
+# inside a function, so that a machine with a broken capture stack still
+# gets a ground station; and PySide6's hook only collects the platform's
+# multimedia backend plugins when it can see the module. Both modules sat
+# in excludes below until the map grew a Video button - a build without
+# them starts fine and then fails only when that button is pressed.
+hiddenimports += ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"]
+
 a = Analysis(
     ["main.py"],
     pathex=[],
@@ -57,7 +65,7 @@ a = Analysis(
         "matplotlib", "tkinter", "scipy", "pandas", "PIL",
         "PySide6.QtQuick3D", "PySide6.Qt3DCore", "PySide6.Qt3DRender",
         "PySide6.QtCharts", "PySide6.QtDataVisualization",
-        "PySide6.QtMultimedia", "PySide6.QtSensors", "PySide6.QtTest",
+        "PySide6.QtSensors", "PySide6.QtTest",
     ],
     noarchive=False,
 )

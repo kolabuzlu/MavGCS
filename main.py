@@ -3910,6 +3910,7 @@ class MainWindow(QMainWindow):
         self._adapter_timer.start(3000)
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
         self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
+        self.map_view.video_requested.connect(self.on_video_requested)
         self.map_view.terrain_cache_limit_changed.connect(self.on_terrain_cache_limit)
         self.map_view.terrain_cache_clear_requested.connect(self.on_terrain_cache_clear)
         # Keep the map's cache readout current: the size changes as tiles
@@ -4288,6 +4289,29 @@ class MainWindow(QMainWindow):
         )
 
     # ---- update checking ------------------------------------------------
+
+    def on_video_requested(self):
+        """Open the video window, or bring it back if it is already up.
+
+        Kept on self rather than made fresh each time so that a second
+        press raises the existing window instead of opening a rival one
+        holding the same device - the second would simply fail, and the
+        reason would not be obvious.
+
+        Imported here rather than at the top: QtMultimedia pulls in the
+        platform's capture stack, and a machine where that is broken or
+        absent should still get a ground station.
+        """
+        try:
+            if getattr(self, "_video_window", None) is None:
+                from video_view import VideoWindow
+                self._video_window = VideoWindow()
+            win = self._video_window
+            win.show()
+            win.raise_()
+            win.activateWindow()
+        except Exception as exc:
+            self.on_command_feedback("Video unavailable: %s" % exc)
 
     def on_telemetry_settings(self):
         """Edit the requested rates, and push them to a live link at once."""
