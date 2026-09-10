@@ -4305,7 +4305,10 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "_video_window", None) is None:
                 from video_view import VideoWindow
-                self._video_window = VideoWindow()
+                # float_over is the map: that is what the floating
+                # panel is laid on top of.
+                self._video_window = VideoWindow(
+                    float_over=self.map_view)
             win = self._video_window
             win.show()
             win.raise_()

@@ -55,11 +55,11 @@ import collections
 import os
 import time
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QPoint, QThread, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QSizePolicy, QSpinBox,
-                               QVBoxLayout, QWidget)
+                               QLineEdit, QPushButton, QSizeGrip, QSizePolicy,
+                               QSpinBox, QVBoxLayout, QWidget)
 
 from app_paths import load_settings, save_setting
 
@@ -185,14 +185,118 @@ class _Reader(QThread):
             cap.release()
 
 
+class FloatingVideo(QWidget):
+    """The picture on top of the map, where the map is what you steer by.
+
+    A separate window means a second monitor or a lot of alt-tabbing. This
+    is the other arrangement: a panel laid over the map itself, moved and
+    sized to sit where it is least in the way, so both are in one glance.
+
+    Frameless and a child of the map rather than a window of its own, so
+    it cannot wander behind the ground station or onto another screen and
+    be lost. Dragged by its body, sized by the grip in the corner.
+    """
+
+    closed = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("floatingVideo")
+        # Child, frameless, and painted rather than transparent: video
+        # under a translucent panel is unreadable and the map under video
+        # is worse.
+        self.setStyleSheet(
+            "#floatingVideo { background: #0b0b0b;"
+            " border: 1px solid rgba(255,255,255,0.14);"
+            " border-radius: 6px; }")
+        self.resize(400, 260)
+        self._drag = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(22, 22)
+        self.close_btn.setToolTip("Close the floating picture")
+        self.close_btn.setStyleSheet(
+            "QPushButton { color: #ddd; background: rgba(255,255,255,0.06);"
+            " border: none; border-radius: 11px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.16); }")
+        self.close_btn.clicked.connect(self._closed)
+        top.addWidget(self.close_btn)
+        top.addStretch(1)
+        layout.addLayout(top)
+
+        self.view = QLabel("Video off")
+        self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.view.setStyleSheet("color: #8a8a8a; font-size: 12px;")
+        self.view.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.view, 1)
+
+        grip = QHBoxLayout()
+        grip.setContentsMargins(0, 0, 0, 0)
+        grip.addStretch(1)
+        grip.addWidget(QSizeGrip(self), 0,
+                       Qt.AlignmentFlag.AlignBottom
+                       | Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(grip)
+
+    def show_frame(self, image):
+        self.view.setPixmap(QPixmap.fromImage(image).scaled(
+            self.view.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+    def clear(self):
+        """Back to saying nothing is playing, rather than a frozen frame."""
+        self.view.clear()          # drops the pixmap; setText alone may not
+        self.view.setText("Video off")
+
+    def _closed(self):
+        self.hide()
+        self.closed.emit()
+
+    # ---- dragging --------------------------------------------------------
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag = event.globalPosition().toPoint() - self.pos()
+
+    def mouseMoveEvent(self, event):
+        if self._drag is None:
+            return
+        want = event.globalPosition().toPoint() - self._drag
+        # Kept inside the map: a panel dragged off the edge cannot be
+        # dragged back, because the part you would grab is the part that
+        # left.
+        parent = self.parentWidget()
+        if parent is not None:
+            want = QPoint(
+                max(0, min(want.x(), parent.width() - self.width())),
+                max(0, min(want.y(), parent.height() - self.height())))
+        self.move(want)
+
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+
+
 class VideoWindow(QWidget):
     """Pick a video source and watch it."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, float_over=None):
         # No parent on purpose: as a top-level window it gets its own
         # entry in the task bar and can be moved to another screen, which
         # is most of the point of having it in a window at all.
+        #
+        # float_over is a different thing - the widget the floating panel
+        # is laid over, which is the map. Kept separate so this window
+        # stays independent of it.
         super().__init__(None)
+        self._float_over = float_over
+        self._floating = None
         self.setWindowTitle("MavGCS Live Video")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.resize(760, 640)
@@ -276,6 +380,13 @@ class VideoWindow(QWidget):
             "card, or after starting a virtual camera such as OBS.")
         self.refresh_btn.clicked.connect(self.reload_devices)
         buttons.addWidget(self.refresh_btn)
+        self.float_btn = QPushButton("Floating window")
+        self.float_btn.setToolTip(
+            "Lay the picture over the map, so the map and the view are in "
+            "one glance. Drag it by its body, size it by the corner.")
+        self.float_btn.clicked.connect(self._toggle_floating)
+        self.float_btn.setEnabled(float_over is not None)
+        buttons.addWidget(self.float_btn)
         buttons.addStretch(1)
         self.start_btn = QPushButton("Start")
         self.start_btn.setDefault(True)
@@ -414,8 +525,31 @@ class VideoWindow(QWidget):
             where = "%s (asked for %s)" % (got, asked)
         self._say("%s at %s" % (what, where))
 
+    def _toggle_floating(self):
+        """Put the picture over the map, or take it away again."""
+        if self._float_over is None:
+            return
+        if self._floating is not None and self._floating.isVisible():
+            self._floating.hide()
+            self.float_btn.setText("Floating window")
+            return
+        if self._floating is None:
+            self._floating = FloatingVideo(self._float_over)
+            self._floating.closed.connect(
+                lambda: self.float_btn.setText("Floating window"))
+            # Bottom left of the map, clear of the instrument column on
+            # the right and the panels along the top.
+            parent = self._float_over
+            self._floating.move(16, max(0, parent.height()
+                                        - self._floating.height() - 40))
+        self._floating.show()
+        self._floating.raise_()
+        self.float_btn.setText("Hide floating")
+
     def _show_frame(self, image):
         self._frames += 1
+        if self._floating is not None and self._floating.isVisible():
+            self._floating.show_frame(image)
         self.view.setPixmap(QPixmap.fromImage(image).scaled(
             self.view.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation))
@@ -434,6 +568,15 @@ class VideoWindow(QWidget):
     def _stop(self):
         reader, self._reader = self._reader, None
         if reader is not None:
+            # Disconnect before stopping. Frames already queued for the
+            # GUI thread are still delivered after stop() returns, and one
+            # arriving late would repaint a picture we have just cleared -
+            # leaving a frozen frame that looks live.
+            for signal in (reader.frame_ready, reader.failed, reader.opened):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
             reader.stop()
             # An RTSP open that is still timing out can take a while to
             # notice. Give it a moment, then let it finish on its own
@@ -442,6 +585,8 @@ class VideoWindow(QWidget):
                 reader.finished.connect(reader.deleteLater)
             else:
                 reader.deleteLater()
+        if self._floating is not None:
+            self._floating.clear()
         self.start_btn.setText("Start")
 
     def _say(self, text):
@@ -452,4 +597,10 @@ class VideoWindow(QWidget):
     def closeEvent(self, event: QCloseEvent):
         """Release the device rather than holding it open unseen."""
         self._stop()
+        if self._floating is not None:
+            # It is a child of the map, so it would otherwise stay there
+            # over a map with nothing feeding it.
+            self._floating.hide()
+            self._floating.deleteLater()
+            self._floating = None
         super().closeEvent(event)
