@@ -42,3 +42,4 @@ through dates. Restore any of them with:
 | V2.0.8 | `4620638120` | 2026-09-07 | Follow UAV centring (re-cut) |
 | V2.0.9 | `d533c71ca8` | 2026-09-09 | Discrete card by default, chosen in Telemetry Rates (re-cut) |
 | V2.1.0 | `cebd4155bd` | 2026-09-10 | Live video: a camera, a capture card or an RTSP stream (re-cut) |
+| V2.1.1 | `f5c384c9d9` | 2026-09-11 | The CG readout works on a lossy link, and only talks on the ground |
