@@ -56,10 +56,10 @@ import os
 import time
 
 from PySide6.QtCore import QPoint, QThread, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QSizeGrip, QSizePolicy,
-                               QSpinBox, QVBoxLayout, QWidget)
+                               QLineEdit, QPushButton, QSizePolicy, QSpinBox,
+                               QVBoxLayout, QWidget)
 
 from app_paths import load_settings, save_setting
 
@@ -185,6 +185,49 @@ class _Reader(QThread):
             cap.release()
 
 
+class _CornerGrip(QWidget):
+    """Resizes the panel it belongs to, rather than the window behind it.
+
+    Qt's own QSizeGrip cannot be used here: it resizes the top-level
+    window, and this panel is a child of the map rather than a window of
+    its own - so dragging Qt's grip stretched the entire ground station
+    instead of the picture. This one moves only what it is part of.
+    """
+
+    SIZE = 16
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self._panel = panel
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setToolTip("Drag to resize the picture")
+        self._from = None
+        self._start = None
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor(255, 255, 255, 120), 1))
+        for offset in (3, 7, 11):
+            painter.drawLine(self.SIZE - offset, self.SIZE - 2,
+                             self.SIZE - 2, self.SIZE - offset)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._from = event.globalPosition().toPoint()
+            self._start = self._panel.size()
+
+    def mouseMoveEvent(self, event):
+        if self._from is None:
+            return
+        delta = event.globalPosition().toPoint() - self._from
+        self._panel.resize_within(self._start.width() + delta.x(),
+                                  self._start.height() + delta.y())
+
+    def mouseReleaseEvent(self, _event):
+        self._from = None
+
+
 class FloatingVideo(QWidget):
     """The picture on top of the map, where the map is what you steer by.
 
@@ -237,13 +280,27 @@ class FloatingVideo(QWidget):
                                 QSizePolicy.Policy.Expanding)
         layout.addWidget(self.view, 1)
 
-        grip = QHBoxLayout()
-        grip.setContentsMargins(0, 0, 0, 0)
-        grip.addStretch(1)
-        grip.addWidget(QSizeGrip(self), 0,
-                       Qt.AlignmentFlag.AlignBottom
-                       | Qt.AlignmentFlag.AlignRight)
-        layout.addLayout(grip)
+        # Placed by hand in resizeEvent rather than in the layout, so it
+        # sits over the corner of the picture instead of stealing a row
+        # of height from it.
+        self._grip = _CornerGrip(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+    MIN_W, MIN_H = 200, 140
+
+    def resize_within(self, width, height):
+        """Grow or shrink, but not past the map's edge or below usable."""
+        parent = self.parentWidget()
+        max_w = parent.width() - self.x() if parent is not None else width
+        max_h = parent.height() - self.y() if parent is not None else height
+        self.resize(max(self.MIN_W, min(int(width), max_w)),
+                    max(self.MIN_H, min(int(height), max_h)))
+
+    def resizeEvent(self, event):
+        self._grip.move(self.width() - self._grip.width() - 4,
+                        self.height() - self._grip.height() - 4)
+        self._grip.raise_()
+        super().resizeEvent(event)
 
     def show_frame(self, image):
         self.view.setPixmap(QPixmap.fromImage(image).scaled(
