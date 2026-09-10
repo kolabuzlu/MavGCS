@@ -41,3 +41,4 @@ through dates. Restore any of them with:
 | V2.0.7 | `aa1a49d471` | 2026-09-07 | Release V2.0.7 |
 | V2.0.8 | `4620638120` | 2026-09-07 | Follow UAV centring (re-cut) |
 | V2.0.9 | `d533c71ca8` | 2026-09-09 | Discrete card by default, chosen in Telemetry Rates (re-cut) |
+| V2.1.0 | `5b3e7e6d37` | 2026-09-10 | Live video: a camera, a capture card or an RTSP stream |
