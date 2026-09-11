@@ -1544,20 +1544,28 @@ class MavlinkLink(QThread):
     # before it has said anything is not evidence that it has finished -
     # it is evidence that it has not begun.
     PARAM_FIRST_WAIT_S = 20.0
-    # How many rounds WITHOUT PROGRESS to chase before settling for what
-    # there is. Counted that way rather than as attempts: a slow link can
-    # spend the whole budget making steady headway and be cut off while
-    # it is still working, which is what a fixed count did.
-    PARAM_MAX_ROUNDS = 3
+    # How many rounds WITHOUT PROGRESS before settling for what there is.
+    # Counted that way rather than as attempts: a slow link can spend the
+    # whole budget making steady headway and be cut off while it is still
+    # working, which is what a fixed count did. Twenty of them at three
+    # seconds is a minute of complete silence before giving up, and a
+    # link that is answering at all never reaches it.
+    PARAM_MAX_ROUNDS = 20
     # Asking for the whole list again is a blunt instrument: it restarts
     # the vehicle from parameter zero and discards whatever position it
     # had reached. Allowed twice, no more, and only while almost nothing
     # has arrived - after that the gaps are asked for by index, which is
     # what leaves a slow stream alone to finish.
     PARAM_MAX_LIST_REQUESTS = 2
-    # Chased in batches so a nearly-empty read does not put 1300 requests
-    # on the link at once.
-    PARAM_CHASE_BATCH = 150
+    # Small batches, because the vehicle answers PARAM_REQUEST_READ one
+    # at a time and a burst of a hundred and fifty is mostly dropped on
+    # the floor. Twenty at a time, answered, beats a hundred and fifty
+    # ignored.
+    PARAM_CHASE_BATCH = 20
+    # Once chasing by index the cycle is short: a batch is sent, its
+    # answers come back, the next batch goes. Twelve seconds between
+    # batches of twenty would take half an hour to walk a full list.
+    PARAM_CHASE_QUIET_S = 3.0
 
     # A fence upload is a conversation of a dozen messages over a radio
     # that drops them. One lost item stalls the whole thing, and the pilot
@@ -2304,6 +2312,7 @@ class MavlinkLink(QThread):
 
         if not progressed:
             self._param_rounds += 1
+        chasing = False
         try:
             if heard_nothing:
                 # Not a word yet, so there are no gaps to ask for by
@@ -2333,6 +2342,7 @@ class MavlinkLink(QThread):
                         self.master.target_system,
                         self.master.target_component)
             else:
+                chasing = True
                 batch = missing[:self.PARAM_CHASE_BATCH]
                 self.command_feedback.emit(
                     "Asking again for %d of %d missing parameter%s..."
@@ -2345,7 +2355,10 @@ class MavlinkLink(QThread):
                             self.master.target_component, b"", idx)
         except Exception:
             pass
-        self._param_quiet_at = time.time() + self.PARAM_QUIET_S
+        # Chasing runs on a short cycle; waiting on the vehicle's own
+        # streaming runs on the long one.
+        self._param_quiet_at = time.time() + (
+            self.PARAM_CHASE_QUIET_S if chasing else self.PARAM_QUIET_S)
 
     def _request_home(self):
         """Ask the vehicle to send HOME_POSITION now."""
