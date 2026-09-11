@@ -226,7 +226,12 @@ class MavlinkLink(QThread):
     # a refused home marker back where it was.
     set_home_result = Signal(bool, str)
     # (received so far, how many the vehicle says there are)
-    param_progress = Signal(int, int)
+    # done, total, and whether those are a percentage rather than a
+    # count. A file transfer cannot know how many parameters are in the
+    # file until it has decoded it, so it reports how much of the file
+    # has arrived - which read as "100 of 100 parameters" until the
+    # difference was said out loud.
+    param_progress = Signal(int, int, bool)
     # {name: (value, mavlink type)} once the list is complete, or as
     # complete as it is going to get.
     params_ready = Signal(dict)
@@ -2216,7 +2221,8 @@ class MavlinkLink(QThread):
         if fraction is None:
             return
         self._ftp_progress_at = time.time()
-        self.param_progress.emit(int(max(0.0, min(1.0, fraction)) * 100), 100)
+        self.param_progress.emit(
+            int(max(0.0, min(1.0, fraction)) * 100), 100, True)
 
     def _on_param_ftp_done(self, fh):
         """The file arrived, or the vehicle refused it."""
@@ -2243,7 +2249,8 @@ class MavlinkLink(QThread):
             for name, (value, ptype) in values.items()}
         self._param_active = False
         self._param_quiet_at = None
-        self.param_progress.emit(len(self._params), len(self._params))
+        self.param_progress.emit(len(self._params), len(self._params),
+                                 False)
         self.command_feedback.emit("Read %d parameters" % len(self._params))
         self.params_ready.emit(dict(self._params))
 
@@ -2413,7 +2420,8 @@ class MavlinkLink(QThread):
             self._param_total = total
         # Still arriving, so push the quiet deadline out again.
         self._param_quiet_at = time.time() + self.PARAM_QUIET_S
-        self.param_progress.emit(len(self._params), self._param_total or 0)
+        self.param_progress.emit(len(self._params),
+                                 self._param_total or 0, False)
         # A complete list is complete now, not twelve seconds from now.
         # Finishing here is what lets the stall window be generous.
         if (self._param_total

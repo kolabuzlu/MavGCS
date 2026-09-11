@@ -1498,8 +1498,14 @@ class ParamLoadingDialog(QDialog):
         row.addWidget(self.cancel_btn)
         layout.addLayout(row)
 
-    def set_progress(self, got, total):
-        if total:
+    def set_progress(self, got, total, percent=False):
+        if percent:
+            # A file transfer knows how much of the file has arrived, not
+            # how many parameters are in it.
+            self.bar.setRange(0, 100)
+            self.bar.setValue(got)
+            self.count_label.setText("%d%% downloaded" % got)
+        elif total:
             self.bar.setRange(0, total)
             self.bar.setValue(got)
             self.count_label.setText("%d of %d" % (got, total))
@@ -1595,10 +1601,13 @@ class ParametersDialog(QDialog):
         # look like editing.
         self._loading = False
 
-    def set_progress(self, got, total):
-        self.status_label.setText(
-            "Reading... %d of %d" % (got, total) if total
-            else "Reading... %d so far" % got)
+    def set_progress(self, got, total, percent=False):
+        if percent:
+            self.status_label.setText("Reading... %d%% downloaded" % got)
+        else:
+            self.status_label.setText(
+                "Reading... %d of %d" % (got, total) if total
+                else "Reading... %d so far" % got)
 
     def set_params(self, params):
         """Replace the table with a fresh reading."""
@@ -5258,13 +5267,16 @@ class MainWindow(QMainWindow):
         if self.link is not None:
             self.link.cancel_parameters()
 
-    def on_param_progress(self, got, total):
-        self.params_btn.setText("PARAMS %d/%d" % (got, total) if total
-                                else "PARAMS %d" % got)
+    def on_param_progress(self, got, total, percent=False):
+        if percent:
+            self.params_btn.setText("PARAMS %d%%" % got)
+        else:
+            self.params_btn.setText("PARAMS %d/%d" % (got, total) if total
+                                    else "PARAMS %d" % got)
         if self._params_dialog is not None:
-            self._params_dialog.set_progress(got, total)
+            self._params_dialog.set_progress(got, total, percent)
         if self._params_loading is not None:
-            self._params_loading.set_progress(got, total)
+            self._params_loading.set_progress(got, total, percent)
 
     def on_write_parameters(self, changes):
         """Send the edited values, if there is a vehicle to send them to."""
