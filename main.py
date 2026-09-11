@@ -5600,14 +5600,28 @@ class MainWindow(QMainWindow):
         self._elevator_unavailable = why
         self._push_cog_status()
 
+    def _elevator_usable(self):
+        """Can the balance check still run on the elevator alone?"""
+        link = self.link
+        try:
+            return link is not None and link.elevator_ready()
+        except Exception:
+            return False
+
     def _push_cog_status(self):
         """Keep the map's balance readout current, or hide it."""
         if not TelemetryRatesDialog.cog_enabled():
             self.map_view.set_cog_status("off", "", 0.0)
             return
-        if self._elevator_unavailable:
+        if self._elevator_unavailable and not self._elevator_usable():
             # Say why nothing is coming, rather than sit on "Waiting for
             # level cruise" forever on an aircraft this cannot read.
+            #
+            # Only when the elevator itself is unusable, though. Losing
+            # the pitch telemetry costs the integrator - the faster of
+            # the two signals - and balance_verdict already falls back to
+            # the elevator when the integrator is quiet. Refusing in that
+            # case would throw away a reading the code is happy to give.
             self.map_view.set_cog_status(
                 "unavailable", self._elevator_unavailable, 0.0)
             return
