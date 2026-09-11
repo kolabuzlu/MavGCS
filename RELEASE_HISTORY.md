@@ -2,13 +2,22 @@
 
 Every version this project has tagged, and the commit it was cut from.
 
-Kept as a file because the older tags were removed from GitHub once
-their releases were gone - the commits are all still in main's history,
-but without this the only way back to a given version would be hunting
-through dates. Restore any of them with:
+Kept as a file because the Releases page only ever shows the current
+version, so it is no record of what came before. Every tag from V1.10.0
+on is on GitHub and every commit is in main's history; this is what says
+which commit belongs to which version, and which versions were cut more
+than once.
+
+The V1.x tags were missing from GitHub for a while, removed along with
+their releases, and were restored on 2026-09-11 from a local clone that
+still had them. Should any go missing again:
 
     git tag -a V1.15.0 -m 'MavGCS V1.15.0' <commit>
     git push origin refs/tags/V1.15.0
+
+A version marked `(re-cut)` was rebuilt and republished under the same
+number; its row names the commit the published build came from, not the
+one first tagged.
 
 | Version | Commit | Date | Cut from |
 | --- | --- | --- | --- |
