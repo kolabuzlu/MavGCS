@@ -1339,34 +1339,7 @@ class MavlinkLink(QThread):
             self._apply_pid_mask()
         self.apply_stream_rates()
 
-    def elevator_ready(self) -> bool:
-        """Whether the elevator alone can carry the balance check.
 
-        The pitch integrator is the better of the two signals but not the
-        only one: balance_verdict asks it first and falls back to the
-        elevator position when it has nothing to say. So losing
-        GCS_PID_MASK costs the faster read, not the readout, and the map
-        should show what it can rather than refuse outright.
-
-        Travel and trim are required as well as the channel - without
-        them an offset in microseconds cannot be turned into a verdict.
-        """
-        return (self._elevator_ch is not None
-                and self._elevator_trim is not None
-                and self._elevator_min is not None
-                and self._elevator_max is not None)
-
-    def pitch_telemetry_ready(self) -> bool:
-        """Whether the aircraft is streaming its pitch controller.
-
-        This is the integrator signal, and it needs nothing from the
-        elevator: PID_TUNING carries the pitch axis directly, so it can
-        answer on an aircraft whose servo outputs never arrived. The two
-        signals are independent in both directions, which is the whole
-        reason the verdict logic carries both.
-        """
-        return bool(self._pid_mask_current is not None
-                    and self._pid_mask_current & self.PID_MASK_PITCH)
 
     def _cg_setup_missing(self):
         """What the balance check still lacks, named, or "" if it is ready.

@@ -5600,22 +5600,6 @@ class MainWindow(QMainWindow):
         self._elevator_unavailable = why
         self._push_cog_status()
 
-    def _cg_signal_available(self):
-        """Can the balance check still run on either of its two signals?
-
-        They are independent. The elevator needs its channel, travel and
-        trim; the integrator needs only that the aircraft is streaming
-        its pitch controller. Losing one leaves the other, and the
-        verdict logic already prefers whichever can answer - so the
-        readout should refuse only when both are gone.
-        """
-        link = self.link
-        try:
-            return link is not None and (link.elevator_ready()
-                                         or link.pitch_telemetry_ready())
-        except Exception:
-            return False
-
     def _push_cog_status(self):
         """Keep the map's balance readout current, or hide it."""
         if not TelemetryRatesDialog.cog_enabled():
@@ -5624,42 +5608,19 @@ class MainWindow(QMainWindow):
             # to find out which.
             self.map_view.set_cog_status("off", "Not enabled", 0.0)
             return
-        if self._elevator_unavailable and not self._cg_signal_available():
+        if self._elevator_unavailable:
             # Say why nothing is coming, rather than sit on "Waiting for
             # level cruise" forever on an aircraft this cannot read.
             #
-            # Only when BOTH signals are gone, though. They are
-            # independent: the elevator needs its channel and travel, the
-            # integrator needs only the pitch telemetry, and a lossy link
-            # can take either one. balance_verdict already uses whichever
-            # can answer, so refusing while one survives throws away a
-            # reading the code is happy to give.
+            # Anything missing means no readout. A verdict is a number
+            # somebody moves a battery on the strength of, and one built
+            # from half the inputs the design calls for is worth less
+            # than none - the two signals exist to check each other.
             self.map_view.set_cog_status(
                 "unavailable", self._elevator_unavailable, 0.0)
             return
         state, text, shift = self._flight_stats.balance_status()
-        if self._elevator_unavailable and text:
-            # One of the two signals never arrived and the other is
-            # carrying the readout. Say which: without it the map reads
-            # "Waiting for level cruise" while Settings says nothing
-            # answered, and both being true at once is not something a
-            # pilot should have to work out.
-            text += self._cg_degraded_suffix()
         self.map_view.set_cog_status(state, text, shift)
-
-    def _cg_degraded_suffix(self):
-        """Name the signal still standing, when the other never arrived."""
-        link = self.link
-        try:
-            elevator = link is not None and link.elevator_ready()
-            pitch = link is not None and link.pitch_telemetry_ready()
-        except Exception:
-            return ""
-        if elevator and not pitch:
-            return " - elevator only"
-        if pitch and not elevator:
-            return " - integrator only"
-        return ""
 
     def on_tile_cache_clear(self):
         self.tile_server.clear()
