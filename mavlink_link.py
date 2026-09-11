@@ -416,6 +416,8 @@ class MavlinkLink(QThread):
         self._param_rounds = 0       # how many times we have chased
         self._param_active = False
         self._param_seen = 0
+        self._ftp = None                # a parameter transfer in progress
+        self._ftp_progress_at = 0.0
         self._param_list_requests = 0
         # Writes still waiting for the aircraft to echo them back:
         # name -> [wanted, type, tries so far, when to retry].
@@ -563,6 +565,9 @@ class MavlinkLink(QThread):
             # only a bounded number of times - then say so, because a
             # readout that never fills in should tell you it gave up
             # rather than look like it is still trying.
+            if self._ftp is not None:
+                self._drive_param_ftp(now)
+
             if (self._want_elevator and not self._was_armed
                     and now >= self._param_retry_next):
                 if self._retry_missing_params():
@@ -700,6 +705,11 @@ class MavlinkLink(QThread):
 
             self._count_sequence(msg)
             mtype = msg.get_type()
+
+            if mtype == "FILE_TRANSFER_PROTOCOL":
+                # Belongs to the parameter transfer and to nothing else.
+                self._feed_param_ftp(msg)
+                continue
 
             if mtype == "ATTITUDE":
                 self.attitude_update.emit(msg.roll, msg.pitch, msg.yaw)
@@ -1538,6 +1548,27 @@ class MavlinkLink(QThread):
     # past the first few, for ever. A completed list finishes the moment
     # its last index lands, so waiting longer here costs nothing when the
     # download works.
+    # ArduPilot serves its whole parameter set as one packed file over
+    # MAVLink FTP, and that is how every current ground station reads
+    # them: a chunked transfer with sequence numbers, gap detection and
+    # retries, instead of thirteen hundred unacknowledged messages sent
+    # once and hoped for. On a link that drops packets the difference is
+    # not speed, it is whether the read completes at all.
+    PARAM_FTP_FILE = "@PARAM/param.pck?withdefaults=1"
+    # Long, because this is minutes of work on a slow link. Measured from
+    # the last sign of progress rather than from the start, so a transfer
+    # that is still moving is never cut off.
+    PARAM_FTP_STALL_S = 40.0
+    # The pack carries ArduPilot's own type codes, which are not
+    # MAV_PARAM_TYPE. Mapped here so a value edited in the parameter
+    # window goes back as the type the vehicle actually holds.
+    PARAM_FTP_TYPES = {
+        1: mavutil.mavlink.MAV_PARAM_TYPE_INT8,
+        2: mavutil.mavlink.MAV_PARAM_TYPE_INT16,
+        3: mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+        4: mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+    }
+
     PARAM_QUIET_S = 12.0
     # The FIRST reply gets far longer. A vehicle behind an LTE modem can
     # take many seconds to start streaming, and three seconds of quiet
@@ -2104,6 +2135,12 @@ class MavlinkLink(QThread):
         self._param_seen = 0
         self._param_list_requests = 1       # the one about to be sent
         self._param_active = True
+
+        # Try the file transfer first. It falls back to the streaming
+        # request on anything older or anything that says no, so a
+        # vehicle without FTP behaves exactly as it did before.
+        if self._start_param_ftp():
+            return
         self._param_quiet_at = time.time() + self.PARAM_FIRST_WAIT_S
         try:
             with self._send_lock:
@@ -2115,6 +2152,126 @@ class MavlinkLink(QThread):
             self._param_quiet_at = None
             self.command_feedback.emit(f"Failed to ask for parameters: {e}")
 
+    def _start_param_ftp(self):
+        """Begin the packed-file read. False if it cannot even be tried.
+
+        Started rather than waited on: cmd_get sends the open and returns,
+        and the transfer is then driven from the receive loop like
+        everything else. pymavlink's own pump calls recv_match itself,
+        which would take messages out of that loop and stop telemetry for
+        the several minutes a slow transfer lasts.
+        """
+        try:
+            from pymavlink.mavftp import MAVFTP
+        except Exception:
+            return False                # no FTP support in this pymavlink
+        try:
+            ftp = MAVFTP(self.master, self.master.target_system,
+                         self.master.target_component)
+            # The incremental entry points are private to the class. They
+            # are what MAVProxy drives it by, and the alternative is
+            # letting it own the link.
+            if not (hasattr(ftp, "_MAVFTP__mavlink_packet")
+                    and hasattr(ftp, "_MAVFTP__idle_task")):
+                return False
+            ftp.cmd_get([self.PARAM_FTP_FILE],
+                        callback=self._on_param_ftp_done,
+                        progress_callback=self._on_param_ftp_progress)
+        except Exception:
+            return False
+        self._ftp = ftp
+        self._ftp_progress_at = time.time()
+        # The streaming chase must not run alongside a transfer: it would
+        # ask the vehicle to restart the very list this is fetching.
+        self._param_quiet_at = None
+        self.command_feedback.emit("Reading parameters from the vehicle...")
+        return True
+
+    def _feed_param_ftp(self, msg):
+        """Hand one FILE_TRANSFER_PROTOCOL frame to the transfer."""
+        ftp = self._ftp
+        if ftp is None:
+            return
+        try:
+            ftp._MAVFTP__mavlink_packet(msg)
+        except Exception:
+            self._param_ftp_failed("the transfer could not be read")
+
+    def _drive_param_ftp(self, now):
+        """Tick the transfer's own retries, and give up if it dies."""
+        ftp = self._ftp
+        if ftp is None:
+            return
+        try:
+            ftp._MAVFTP__idle_task()
+        except Exception:
+            self._param_ftp_failed("the transfer stopped")
+            return
+        if now - self._ftp_progress_at > self.PARAM_FTP_STALL_S:
+            # Measured from the last sign of life, so a transfer that is
+            # merely slow is never cut off - only one that has died.
+            self._param_ftp_failed("no answer to the file transfer")
+
+    def _on_param_ftp_progress(self, fraction):
+        if fraction is None:
+            return
+        self._ftp_progress_at = time.time()
+        self.param_progress.emit(int(max(0.0, min(1.0, fraction)) * 100), 100)
+
+    def _on_param_ftp_done(self, fh):
+        """The file arrived, or the vehicle refused it."""
+        self._ftp = None
+        if fh is None:
+            self._param_ftp_failed("the vehicle would not send the file")
+            return
+        try:
+            from pymavlink.mavftp import MAVFTP
+            fh.seek(0)
+            pdata = MAVFTP.ftp_param_decode(fh.read())
+            if pdata is None:
+                raise ValueError("the parameter file did not decode")
+            values = MAVFTP.extract_params(pdata.params, "none")
+        except Exception:
+            self._param_ftp_failed("the parameter file did not decode")
+            return
+        # Back into the same shape the streaming path produces, with the
+        # pack's own type codes translated to MAVLink's.
+        self._params = {
+            name: (float(value),
+                   int(self.PARAM_FTP_TYPES.get(
+                       int(ptype), mavutil.mavlink.MAV_PARAM_TYPE_REAL32)))
+            for name, (value, ptype) in values.items()}
+        self._param_active = False
+        self._param_quiet_at = None
+        self.param_progress.emit(len(self._params), len(self._params))
+        self.command_feedback.emit("Read %d parameters" % len(self._params))
+        self.params_ready.emit(dict(self._params))
+
+    def _param_ftp_failed(self, why):
+        """Fall back to asking the vehicle to stream them instead."""
+        self._stop_param_ftp()
+        if not self._param_active:
+            return                      # cancelled, or already finished
+        self.command_feedback.emit(
+            "%s - asking for the parameters the older way" % why.capitalize())
+        self._param_quiet_at = time.time() + self.PARAM_FIRST_WAIT_S
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_list_send(
+                    self.master.target_system, self.master.target_component)
+        except Exception:
+            self._param_active = False
+            self.command_feedback.emit("Could not ask for parameters")
+            self.params_ready.emit(dict(self._params))
+
+    def _stop_param_ftp(self):
+        ftp, self._ftp = self._ftp, None
+        if ftp is not None:
+            try:
+                ftp.cmd_cancel()
+            except Exception:
+                pass
+
     def cancel_parameters(self):
         """Stop waiting for the rest of the list.
 
@@ -2124,6 +2281,7 @@ class MavlinkLink(QThread):
         """
         if not self._param_active:
             return
+        self._stop_param_ftp()
         self._param_active = False
         self._param_quiet_at = None
         self.command_feedback.emit(
