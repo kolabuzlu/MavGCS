@@ -363,6 +363,10 @@ class MavlinkLink(QThread):
         # Parameter reads are fire-and-forget. On a link losing most of
         # its packets a single request often goes unanswered, so what has
         # not come back is asked for again - see _retry_missing_params.
+        # Our own sequence accounting; see _count_sequence for why
+        # pymavlink's cannot be used over UDP.
+        self._seq_last = {}
+        self._seq_lost = 0
         self._param_retry_next = 0.0
         self._param_retries = 0
         self._param_progress = None
@@ -692,6 +696,7 @@ class MavlinkLink(QThread):
             if msg is None:
                 continue
 
+            self._count_sequence(msg)
             mtype = msg.get_type()
 
             if mtype == "ATTITUDE":
@@ -1509,6 +1514,12 @@ class MavlinkLink(QThread):
     # How many times to send one parameter before giving up on it.
     PARAM_WRITE_TRIES = 3
 
+    # A backwards step larger than this is read as a frame arriving out
+    # of order, not as that many losses. Losing more than half the
+    # sequence space between two received frames is far less likely than
+    # two frames having swapped places, which UDP does routinely.
+    SEQ_REORDER_LIMIT = 128
+
     PARAM_QUIET_S = 3.0
     # How many times to chase the ones that never arrived before settling
     # for what there is. Each round asks for the gaps individually.
@@ -1933,6 +1944,42 @@ class MavlinkLink(QThread):
         except Exception as e:
             self.command_feedback.emit(f"Failed to set home: {e}")
 
+    def _count_sequence(self, msg):
+        """Count genuinely missing frames, per sender.
+
+        pymavlink's own counter cannot be used for this. It computes
+        diff = (seq2 - seq) % 256, so a frame arriving one place late
+        wraps to 255 and a single reordered packet is reported as 256
+        lost. Over UDP, where reordering and duplication are routine,
+        that turns a link losing a few percent into one that appears to
+        lose ninety - measured on this project's own aircraft, reading
+        87% and 6% alternately while sitting still on a bench.
+
+        Sequence numbers belong to the sender, so they are counted per
+        (system, component): two sources interleaving are not losses.
+        """
+        try:
+            key = (msg.get_srcSystem(), msg.get_srcComponent())
+            seq = msg.get_seq()
+        except Exception:
+            return
+        last = self._seq_last.get(key)
+        if last is None:
+            self._seq_last[key] = seq
+            return                      # first frame from this sender
+        gap = (seq - last - 1) % 256
+        if gap > self.SEQ_REORDER_LIMIT:
+            # Arrived out of order, or a duplicate. Its successor came
+            # first and this frame was counted missing then, so take that
+            # back - and leave the mark at the highest sequence seen,
+            # otherwise the frames after it are counted missing too and
+            # one swap costs two.
+            if self._seq_lost > 0:
+                self._seq_lost -= 1
+            return
+        self._seq_last[key] = seq
+        self._seq_lost += gap
+
     def _emit_link_stats(self, now):
         """What the radio is actually carrying, once a second.
 
@@ -1953,7 +2000,7 @@ class MavlinkLink(QThread):
             mav = self.master.mav
             totals = (int(mav.total_bytes_received), int(mav.total_bytes_sent),
                       int(mav.total_packets_received), int(mav.total_packets_sent),
-                      int(getattr(self.master, "mav_loss", 0)),
+                      int(self._seq_lost),
                       int(mav.total_receive_errors))
         except Exception:
             return
