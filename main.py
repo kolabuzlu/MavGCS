@@ -5638,7 +5638,28 @@ class MainWindow(QMainWindow):
                 "unavailable", self._elevator_unavailable, 0.0)
             return
         state, text, shift = self._flight_stats.balance_status()
+        if self._elevator_unavailable and text:
+            # One of the two signals never arrived and the other is
+            # carrying the readout. Say which: without it the map reads
+            # "Waiting for level cruise" while Settings says nothing
+            # answered, and both being true at once is not something a
+            # pilot should have to work out.
+            text += self._cg_degraded_suffix()
         self.map_view.set_cog_status(state, text, shift)
+
+    def _cg_degraded_suffix(self):
+        """Name the signal still standing, when the other never arrived."""
+        link = self.link
+        try:
+            elevator = link is not None and link.elevator_ready()
+            pitch = link is not None and link.pitch_telemetry_ready()
+        except Exception:
+            return ""
+        if elevator and not pitch:
+            return " - elevator only"
+        if pitch and not elevator:
+            return " - integrator only"
+        return ""
 
     def on_tile_cache_clear(self):
         self.tile_server.clear()
