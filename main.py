@@ -5248,7 +5248,13 @@ class MainWindow(QMainWindow):
         if not link:
             return
         self._show_param_loading()
-        link.request_parameters()
+        # Let the window paint before the reading starts. Everything that
+        # follows runs on this thread, so starting it here means the
+        # dialog is shown but never drawn until the work is done - a bare
+        # white rectangle for however long that takes. A single turn of
+        # the event loop costs nothing and guarantees it is on screen
+        # first, whatever the reading turns out to cost.
+        QTimer.singleShot(0, link.request_parameters)
 
     def _show_param_loading(self):
         """Put the waiting window up, and keep everything else out."""
@@ -5258,6 +5264,12 @@ class MainWindow(QMainWindow):
         self._params_loading.set_progress(0, 0)
         self._params_loading.show()
         self._params_loading.raise_()
+        # Draw it now, synchronously. Everything that follows runs on this
+        # thread, and a paint event queued behind that work leaves the
+        # window on screen as a bare white rectangle until it finishes -
+        # a zero timer does not help, because Qt delivers those ahead of
+        # paints.
+        self._params_loading.repaint()
 
     def _hide_param_loading(self):
         if self._params_loading is not None:

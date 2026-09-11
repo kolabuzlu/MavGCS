@@ -458,6 +458,17 @@ class MavlinkLink(QThread):
                     pass
 
     def _run_link(self):
+        # Load the FTP support now, on this thread, rather than when the
+        # user first presses GET PARAMS. It costs about two hundred
+        # milliseconds the first time, and there it lands on the interface
+        # thread between showing the progress window and painting it -
+        # leaving a bare white rectangle on screen for exactly that long.
+        # Here it is free: this thread is about to sit waiting on a socket.
+        try:
+            import pymavlink.mavftp        # noqa: F401
+        except Exception:
+            pass                # absent or broken; the caller handles it
+
         try:
             self.master = _open_mavlink_connection(self.connection_string)
 
