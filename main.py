@@ -5619,7 +5619,10 @@ class MainWindow(QMainWindow):
     def _push_cog_status(self):
         """Keep the map's balance readout current, or hide it."""
         if not TelemetryRatesDialog.cog_enabled():
-            self.map_view.set_cog_status("off", "", 0.0)
+            # Left on screen deliberately. Hiding it made a switched-off
+            # readout indistinguishable from a broken one, with nowhere
+            # to find out which.
+            self.map_view.set_cog_status("off", "Not enabled", 0.0)
             return
         if self._elevator_unavailable and not self._cg_signal_available():
             # Say why nothing is coming, rather than sit on "Waiting for

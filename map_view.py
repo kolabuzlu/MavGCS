@@ -1786,16 +1786,19 @@ function setReturnHome(state, text, detail, batteryPct) {
 function setCogStatus(state, text, deflection) {
     var el = document.getElementById('cog-readout');
     if (!el) { return; }
-    if (state === 'off') {
-        el.style.display = 'none';
-        return;
-    }
+    // 'off' used to hide the panel entirely. It now stays and says so:
+    // an instrument that vanishes reads as broken, and leaves nowhere to
+    // learn that the estimate is simply switched off. It falls through
+    // to the ordinary path, where an unrecognised state dims the
+    // aeroplane and centres the marker - which is exactly right for a
+    // readout that is not running.
     el.style.display = '';
 
     var label = document.getElementById('cog-label');
     if (label) {
         label.textContent = text;
-        label.style.color = COG_COLOURS[state] || '#cfd8e0';
+        label.style.color = (state === 'off') ? '#8a8a8a'
+                            : (COG_COLOURS[state] || '#cfd8e0');
     }
 
     var settled = COG_COLOURS.hasOwnProperty(state);
