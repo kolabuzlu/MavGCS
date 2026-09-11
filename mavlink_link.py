@@ -2179,16 +2179,26 @@ class MavlinkLink(QThread):
             if not (hasattr(ftp, "_MAVFTP__mavlink_packet")
                     and hasattr(ftp, "_MAVFTP__idle_task")):
                 return False
-            ftp.cmd_get([self.PARAM_FTP_FILE],
-                        callback=self._on_param_ftp_done,
-                        progress_callback=self._on_param_ftp_progress)
         except Exception:
             return False
+
+        # Adopted BEFORE the open goes out, because the reply is handled
+        # on the receive thread while this runs on the caller's. Over a
+        # radio the round trip hides the gap; over TCP to a simulator on
+        # the same machine the answer can arrive first, find nowhere to
+        # go, and be dropped - after which the transfer never starts.
         self._ftp = ftp
         self._ftp_progress_at = time.time()
         # The streaming chase must not run alongside a transfer: it would
         # ask the vehicle to restart the very list this is fetching.
         self._param_quiet_at = None
+        try:
+            ftp.cmd_get([self.PARAM_FTP_FILE],
+                        callback=self._on_param_ftp_done,
+                        progress_callback=self._on_param_ftp_progress)
+        except Exception:
+            self._ftp = None
+            return False
         self.command_feedback.emit("Reading parameters from the vehicle...")
         return True
 
