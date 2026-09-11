@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V2.1.2 - Bug fixes and improvements.
+
 ## V2.1.1 - Bug fixes and improvements.
 
 ## V2.1.0 - Live video added.
