@@ -416,6 +416,7 @@ class MavlinkLink(QThread):
         self._param_rounds = 0       # how many times we have chased
         self._param_active = False
         self._param_seen = 0
+        self._param_list_requests = 0
         # Writes still waiting for the aircraft to echo them back:
         # name -> [wanted, type, tries so far, when to retry].
         self._param_writes = {}
@@ -1530,7 +1531,14 @@ class MavlinkLink(QThread):
     # sequence of a radio's own status messages anyway.
     SEQ_RADIO_TUPLE = (ord("3"), ord("D"))
 
-    PARAM_QUIET_S = 3.0
+    # A stall really does mean stalled. PARAM_REQUEST_LIST restarts the
+    # vehicle's streaming from the beginning, so a chase round started too
+    # eagerly costs every parameter that was in flight - three seconds was
+    # short enough on an LTE modem to restart the list before it had got
+    # past the first few, for ever. A completed list finishes the moment
+    # its last index lands, so waiting longer here costs nothing when the
+    # download works.
+    PARAM_QUIET_S = 12.0
     # The FIRST reply gets far longer. A vehicle behind an LTE modem can
     # take many seconds to start streaming, and three seconds of quiet
     # before it has said anything is not evidence that it has finished -
@@ -1541,10 +1549,15 @@ class MavlinkLink(QThread):
     # spend the whole budget making steady headway and be cut off while
     # it is still working, which is what a fixed count did.
     PARAM_MAX_ROUNDS = 3
-    # Above this many gaps, asking for each one individually costs more
-    # messages than the whole list does, so the list is asked for again
-    # instead. What already arrived is kept either way.
-    PARAM_MAX_CHASE = 60
+    # Asking for the whole list again is a blunt instrument: it restarts
+    # the vehicle from parameter zero and discards whatever position it
+    # had reached. Allowed twice, no more, and only while almost nothing
+    # has arrived - after that the gaps are asked for by index, which is
+    # what leaves a slow stream alone to finish.
+    PARAM_MAX_LIST_REQUESTS = 2
+    # Chased in batches so a nearly-empty read does not put 1300 requests
+    # on the link at once.
+    PARAM_CHASE_BATCH = 150
 
     # A fence upload is a conversation of a dozen messages over a radio
     # that drops them. One lost item stalls the whole thing, and the pilot
@@ -2081,6 +2094,7 @@ class MavlinkLink(QThread):
         self._param_total = None
         self._param_rounds = 0
         self._param_seen = 0
+        self._param_list_requests = 1       # the one about to be sent
         self._param_active = True
         self._param_quiet_at = time.time() + self.PARAM_FIRST_WAIT_S
         try:
@@ -2234,6 +2248,15 @@ class MavlinkLink(QThread):
         # Still arriving, so push the quiet deadline out again.
         self._param_quiet_at = time.time() + self.PARAM_QUIET_S
         self.param_progress.emit(len(self._params), self._param_total or 0)
+        # A complete list is complete now, not twelve seconds from now.
+        # Finishing here is what lets the stall window be generous.
+        if (self._param_total
+                and len(self._param_index) >= self._param_total):
+            self._param_active = False
+            self._param_quiet_at = None
+            self.command_feedback.emit(
+                "Read %d parameters" % len(self._params))
+            self.params_ready.emit(dict(self._params))
 
     def _param_stream_quiet(self):
         """Nothing has arrived for a while. Chase the gaps or stop."""
@@ -2294,24 +2317,29 @@ class MavlinkLink(QThread):
                         self.master.target_component)
                 self._param_quiet_at = time.time() + self.PARAM_FIRST_WAIT_S
                 return
-            if len(missing) > self.PARAM_MAX_CHASE:
-                # Most of it never came. Asking for them one at a time
-                # would cost more messages than the whole list does, so
-                # ask for the whole list again - what already arrived is
-                # kept, so a second pass only has to fill the holes.
+            hardly_any = len(self._param_index) * 10 < total
+            if (hardly_any
+                    and self._param_list_requests < self.PARAM_MAX_LIST_REQUESTS):
+                # Barely anything came, so the stream itself did not take.
+                # Worth one more from the top - but only a couple of
+                # times ever, because each one restarts the vehicle at
+                # parameter zero and throws away wherever it had got to.
+                self._param_list_requests += 1
                 self.command_feedback.emit(
-                    "%d of %d parameters missing - asking for the list again"
-                    % (len(missing), total))
+                    "%d of %d parameters - asking for the list again"
+                    % (len(self._params), total))
                 with self._send_lock:
                     self.master.mav.param_request_list_send(
                         self.master.target_system,
                         self.master.target_component)
             else:
+                batch = missing[:self.PARAM_CHASE_BATCH]
                 self.command_feedback.emit(
-                    "Asking again for %d missing parameter%s..."
-                    % (len(missing), "" if len(missing) == 1 else "s"))
+                    "Asking again for %d of %d missing parameter%s..."
+                    % (len(batch), len(missing),
+                       "" if len(missing) == 1 else "s"))
                 with self._send_lock:
-                    for idx in missing:
+                    for idx in batch:
                         self.master.mav.param_request_read_send(
                             self.master.target_system,
                             self.master.target_component, b"", idx)
