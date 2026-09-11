@@ -1521,6 +1521,13 @@ class MavlinkLink(QThread):
     # sequence space between two received frames is far less likely than
     # two frames having swapped places, which UDP does routinely.
     SEQ_REORDER_LIMIT = 128
+    # A telemetry radio injects RADIO_STATUS under a fixed identity -
+    # ord('3'), ord('D') - and both ends of the link can emit under it
+    # with sequence counters of their own. Counting those interleaved
+    # streams as one sender reports losses that never happened, which is
+    # why pymavlink excludes the same tuple. Nothing is learned from the
+    # sequence of a radio's own status messages anyway.
+    SEQ_RADIO_TUPLE = (ord("3"), ord("D"))
 
     PARAM_QUIET_S = 3.0
     # How many times to chase the ones that never arrived before settling
@@ -1965,6 +1972,8 @@ class MavlinkLink(QThread):
             seq = msg.get_seq()
         except Exception:
             return
+        if key == self.SEQ_RADIO_TUPLE:
+            return                      # the radio's own chatter
         last = self._seq_last.get(key)
         if last is None:
             self._seq_last[key] = seq
