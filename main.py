@@ -3846,6 +3846,12 @@ class MainWindow(QMainWindow):
         left.setMinimumWidth(340)
 
         right = QWidget()
+        # Kept, because the floating video is laid over it. Over the whole
+        # right-hand side rather than only the map: the panels above the
+        # map are as good a place to park a picture as the map itself,
+        # and being unable to move it off the map made the top of the
+        # window unusable for it.
+        self.right_pane = right
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -4314,10 +4320,12 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "_video_window", None) is None:
                 from video_view import VideoWindow
-                # float_over is the map: that is what the floating
-                # panel is laid on top of.
+                # The whole right-hand side, so the picture can be
+                # parked over the map or over the panels above it. The
+                # left side is deliberately not included: that is where
+                # the flight instruments live.
                 self._video_window = VideoWindow(
-                    float_over=self.map_view)
+                    float_over=self.right_pane)
             win = self._video_window
             win.show()
             win.raise_()
