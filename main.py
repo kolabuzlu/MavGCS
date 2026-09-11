@@ -5600,11 +5600,19 @@ class MainWindow(QMainWindow):
         self._elevator_unavailable = why
         self._push_cog_status()
 
-    def _elevator_usable(self):
-        """Can the balance check still run on the elevator alone?"""
+    def _cg_signal_available(self):
+        """Can the balance check still run on either of its two signals?
+
+        They are independent. The elevator needs its channel, travel and
+        trim; the integrator needs only that the aircraft is streaming
+        its pitch controller. Losing one leaves the other, and the
+        verdict logic already prefers whichever can answer - so the
+        readout should refuse only when both are gone.
+        """
         link = self.link
         try:
-            return link is not None and link.elevator_ready()
+            return link is not None and (link.elevator_ready()
+                                         or link.pitch_telemetry_ready())
         except Exception:
             return False
 
@@ -5613,15 +5621,16 @@ class MainWindow(QMainWindow):
         if not TelemetryRatesDialog.cog_enabled():
             self.map_view.set_cog_status("off", "", 0.0)
             return
-        if self._elevator_unavailable and not self._elevator_usable():
+        if self._elevator_unavailable and not self._cg_signal_available():
             # Say why nothing is coming, rather than sit on "Waiting for
             # level cruise" forever on an aircraft this cannot read.
             #
-            # Only when the elevator itself is unusable, though. Losing
-            # the pitch telemetry costs the integrator - the faster of
-            # the two signals - and balance_verdict already falls back to
-            # the elevator when the integrator is quiet. Refusing in that
-            # case would throw away a reading the code is happy to give.
+            # Only when BOTH signals are gone, though. They are
+            # independent: the elevator needs its channel and travel, the
+            # integrator needs only the pitch telemetry, and a lossy link
+            # can take either one. balance_verdict already uses whichever
+            # can answer, so refusing while one survives throws away a
+            # reading the code is happy to give.
             self.map_view.set_cog_status(
                 "unavailable", self._elevator_unavailable, 0.0)
             return
