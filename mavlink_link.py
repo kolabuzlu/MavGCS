@@ -415,6 +415,7 @@ class MavlinkLink(QThread):
         self._param_quiet_at = None  # when to chase what is missing
         self._param_rounds = 0       # how many times we have chased
         self._param_active = False
+        self._param_seen = 0
         # Writes still waiting for the aircraft to echo them back:
         # name -> [wanted, type, tries so far, when to retry].
         self._param_writes = {}
@@ -1530,8 +1531,15 @@ class MavlinkLink(QThread):
     SEQ_RADIO_TUPLE = (ord("3"), ord("D"))
 
     PARAM_QUIET_S = 3.0
-    # How many times to chase the ones that never arrived before settling
-    # for what there is. Each round asks for the gaps individually.
+    # The FIRST reply gets far longer. A vehicle behind an LTE modem can
+    # take many seconds to start streaming, and three seconds of quiet
+    # before it has said anything is not evidence that it has finished -
+    # it is evidence that it has not begun.
+    PARAM_FIRST_WAIT_S = 20.0
+    # How many rounds WITHOUT PROGRESS to chase before settling for what
+    # there is. Counted that way rather than as attempts: a slow link can
+    # spend the whole budget making steady headway and be cut off while
+    # it is still working, which is what a fixed count did.
     PARAM_MAX_ROUNDS = 3
     # Above this many gaps, asking for each one individually costs more
     # messages than the whole list does, so the list is asked for again
@@ -2072,8 +2080,9 @@ class MavlinkLink(QThread):
         self._param_index = {}
         self._param_total = None
         self._param_rounds = 0
+        self._param_seen = 0
         self._param_active = True
-        self._param_quiet_at = time.time() + self.PARAM_QUIET_S
+        self._param_quiet_at = time.time() + self.PARAM_FIRST_WAIT_S
         try:
             with self._send_lock:
                 self.master.mav.param_request_list_send(
@@ -2238,11 +2247,29 @@ class MavlinkLink(QThread):
             self.cancel_parameters()
             return
         total = self._param_total or 0
+        # Nothing at all has arrived - not even how many there are. An
+        # empty list of gaps here means no information, NOT nothing
+        # missing, and the two were treated the same: a link slow enough
+        # to miss the first window reported "Read 0 parameters" and shut
+        # the window, which is what an LTE modem produced.
+        heard_nothing = total == 0
         missing = [i for i in range(total) if i not in self._param_index]
 
-        if not missing or self._param_rounds >= self.PARAM_MAX_ROUNDS:
+        # Any new parameter since the last check is progress, and a link
+        # still delivering deserves to keep being asked. Only rounds that
+        # bring nothing count against the budget.
+        progressed = len(self._params) > self._param_seen
+        if progressed:
+            self._param_seen = len(self._params)
+            self._param_rounds = 0
+
+        finished = not heard_nothing and not missing
+        if finished or self._param_rounds >= self.PARAM_MAX_ROUNDS:
             self._param_active = False
-            if missing:
+            if heard_nothing:
+                self.command_feedback.emit(
+                    "The vehicle did not answer - no parameters were read")
+            elif missing:
                 self.command_feedback.emit(
                     "Read %d of %d parameters - %d never arrived"
                     % (len(self._params), total, len(missing)))
@@ -2252,8 +2279,21 @@ class MavlinkLink(QThread):
             self.params_ready.emit(dict(self._params))
             return
 
-        self._param_rounds += 1
+        if not progressed:
+            self._param_rounds += 1
         try:
+            if heard_nothing:
+                # Not a word yet, so there are no gaps to ask for by
+                # index - the only thing to do is ask for the list again
+                # and give it the long window, as at the start.
+                self.command_feedback.emit(
+                    "No answer yet - asking for the parameters again")
+                with self._send_lock:
+                    self.master.mav.param_request_list_send(
+                        self.master.target_system,
+                        self.master.target_component)
+                self._param_quiet_at = time.time() + self.PARAM_FIRST_WAIT_S
+                return
             if len(missing) > self.PARAM_MAX_CHASE:
                 # Most of it never came. Asking for them one at a time
                 # would cost more messages than the whole list does, so
