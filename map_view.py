@@ -990,6 +990,11 @@ var map = L.map('map', {
 // Where the map opens before any telemetry arrives. Once the vehicle
 // reports its first fix, updatePosition() recentres on it (see
 // haveCentered), so this is purely the starting view.
+//
+// This setView puts it at the geometric centre; placeHomeView() further
+// down then shifts it onto the same clear spot Follow UAV uses, once
+// FOLLOW_INSET is in scope. Leaflet needs a view set before a tile layer
+// is added, which is why this one stays.
 var HOME_LAT = 39.925386148184316, HOME_LON = 32.83652351127223;
 var HOME_ZOOM = 16;
 map.setView([HOME_LAT, HOME_LON], HOME_ZOOM);
@@ -1262,6 +1267,46 @@ function followCentreFor(latlng) {
     var here = map.latLngToContainerPoint(latlng);
     return map.containerPointToLatLng(mid.add(here.subtract(want)));
 }
+
+// The opening view gets the same treatment. HOME_LAT/HOME_LON went to the
+// widget's geometric centre, which puts the starting coordinate under the
+// instrument column - the same complaint the aircraft had, in the one view
+// you see before any telemetry arrives.
+//
+// Done down here rather than beside HOME_LAT because FOLLOW_INSET does not
+// exist yet up there. The plain setView up there still has to happen:
+// Leaflet needs a view before a tile layer can be added. Both run before
+// the first paint, so there is nothing to see in between.
+var placingHome = false;    // so our own setView does not look like a user
+var homeViewOwned = true;   // ours to place, until something else claims it
+
+function placeHomeView() {
+    if (!homeViewOwned) { return; }
+    // A point at absolute pixel P shows at mid + (P - centre), so for HOME
+    // to land on the target point the centre must be HOME + (mid - want).
+    var shift = map.getSize().divideBy(2).subtract(followTargetPoint());
+    var centre = map.project([HOME_LAT, HOME_LON], HOME_ZOOM).add(shift);
+    placingHome = true;
+    map.setView(map.unproject(centre, HOME_ZOOM), HOME_ZOOM,
+                {animate: false});
+    placingHome = false;
+}
+
+// Redone on resize because the clear area moves with the window, and the
+// window is very often not its final size when this script first runs -
+// the app opens maximized, and that can land after the map exists. Leaflet
+// fires 'move' and 'resize' for a resize but not 'movestart', so this does
+// not trip the release below.
+map.on('resize', placeHomeView);
+
+// Anything that moves the map other than us is someone choosing where to
+// look - a drag, a zoom, Fly to Here, the first fix with Follow UAV on -
+// and from then on the opening view is not ours to reinstate.
+map.on('movestart zoomstart', function () {
+    if (!placingHome) { homeViewOwned = false; }
+});
+
+placeHomeView();
 var targetMarker = null;
 
 // Waypoint queue mode - clicking the map adds numbered points to a
