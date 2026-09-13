@@ -3938,6 +3938,14 @@ class MainWindow(QMainWindow):
 
         self._update_checker = None
         self._update_silent = False
+        # Set the moment closeEvent begins, and checked by anything that
+        # would otherwise start work or open a window afterwards. The
+        # startup check below is the case that bit: it fires on a timer,
+        # and a close that took a second or two to get through - stopping
+        # a video reader, say - let that timer land in a program that was
+        # already on its way out, starting a thread that teardown then
+        # destroyed while it ran. Qt aborts the process for that.
+        self._closing = False
         if load_settings().get(UpdateDialog.SETTING_AUTO, False):
             # After the window is up, so a slow or hanging request cannot
             # delay the app appearing.
@@ -4358,6 +4366,8 @@ class MainWindow(QMainWindow):
         when there is something to report, so a launch with no network - or
         no new version - passes without a dialog in the way.
         """
+        if getattr(self, "_closing", False):
+            return          # the program is ending; nothing to report to
         if getattr(self, "_update_checker", None) is not None:
             return          # one at a time
         self._update_silent = silent
@@ -4445,6 +4455,13 @@ class MainWindow(QMainWindow):
         self._update_checker = None
 
     def _on_update_result(self, result):
+        # An answer that arrives after closeEvent has run is delivered
+        # from the event queue, so a disconnect made during the close
+        # cannot recall it. Opening a dialog here would be a top-level
+        # window appearing over an empty desktop with the program that
+        # owns it gone - and it would keep the process alive.
+        if getattr(self, "_closing", False):
+            return
         found = bool(result.get("ok") and result.get("newer"))
         if found:
             self.connection_panel.set_update_state(
@@ -5785,6 +5802,9 @@ class MainWindow(QMainWindow):
         self.terrain_worker.clear_telemetry()
 
     def closeEvent(self, event):
+        # First, before anything below has a chance to take long enough
+        # for a timer to fire into the middle of it. See _closing.
+        self._closing = True
         if self.link is not None:
             self.link.stop()
         self.terrain_worker.stop()
