@@ -54,3 +54,4 @@ one first tagged.
 | V2.1.1 | `39baaa0593` | 2026-09-11 | Nothing is read from or written to a flying aircraft (re-cut) |
 | V2.1.2 | `b71602aac4` | 2026-09-11 | Parameters read over MAVLink FTP, and an honest loss figure (re-cut) |
 | V2.1.3 | `d088791c4e` | 2026-09-13 | Release V2.1.3 (re-cut) |
+| V2.1.4 | `a19fa99c46` | 2026-09-13 | Release V2.1.4 |
