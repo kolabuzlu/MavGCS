@@ -34,6 +34,22 @@ import os
 # pymavlink is imported anywhere in the process.
 os.environ.setdefault("MAVLINK20", "1")
 
+# A machine with only integrated graphics has no discrete card for the
+# GPU preference to switch to, and still hits the WebEngine compositor
+# fault after twenty minutes to an hour. Rasterising on the CPU keeps
+# ANGLE's input layout cache from overflowing - two 70-minute runs on the
+# Intel Iris, zero overflows, no change in frame rate - while compositing
+# stays on the GPU, so it is not --disable-gpu and does not bring that
+# flag's jitter. Chromium reads this variable when WebEngine starts, so it
+# has to be decided here, before anything from Qt is imported. Dual-GPU
+# machines are left exactly as they were. See gpu_preference.
+import gpu_preference
+CPU_RASTERISATION = gpu_preference.integrated_only()
+if CPU_RASTERISATION:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        + " --disable-gpu-rasterization").strip()
+
 import math
 import html
 import time
@@ -4438,7 +4454,12 @@ class MainWindow(QMainWindow):
             print("GPUADAPTER %s" % name, flush=True)
         except Exception:
             pass
-        self.on_command_feedback("Graphics: rendering on %s." % name)
+        # Say when rasterisation has been moved off the GPU, so a report
+        # from an integrated-only machine shows the fix took - and so a
+        # dual-GPU machine's line still reads exactly as it always has.
+        self.on_command_feedback(
+            "Graphics: rendering on %s%s." % (
+                name, ", rasterising on the CPU" if CPU_RASTERISATION else ""))
 
     def _log_draw_state(self):
         """One line of map state into the watcher's log."""

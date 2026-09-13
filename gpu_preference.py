@@ -100,3 +100,104 @@ def clear(exe: str = None) -> bool:
         return True
     except OSError:
         return False
+
+
+# ---- machines with nothing to switch to -----------------------------------
+#
+# The preference above only helps a machine that has a discrete card. One
+# with only integrated graphics still hits the compositor fault: ANGLE's
+# Direct3D 11 input layout cache overflows after twenty minutes to an hour
+# of flying, and the access violation follows within a second. Reproduced
+# on demand on 2026-09-13 - the real app on the Intel Iris, fed a full
+# ArduPlane stream in a loiter, dies at 20 minutes - and the one thing that
+# stopped it without costing anything was moving rasterisation off the GPU:
+# --disable-gpu-rasterization survived two 70-minute runs with zero
+# overflows, at an identical 60 fps, with compositing (and so pixel
+# snapping, and so the tile seams) left exactly where they were. That is a
+# different flag from --disable-gpu, which moves compositing too and was
+# rightly rejected for the jitter it caused.
+#
+# The flag has to be in the environment before Qt WebEngine starts, which
+# is why the decision is made here, from DXGI, before any Qt import. It is
+# deliberately conservative: an adapter counts as discrete only if it is
+# NVIDIA or AMD with real dedicated memory, and any failure to enumerate
+# answers "assume discrete", so a broken check can never move a healthy
+# machine onto CPU rasterisation.
+
+_VENDOR_NVIDIA, _VENDOR_AMD, _VENDOR_INTEL, _VENDOR_MICROSOFT = (
+    0x10DE, 0x1002, 0x8086, 0x1414)
+_MIN_DISCRETE_VRAM = 512 * 1024 * 1024
+_DXGI_ADAPTER_FLAG_SOFTWARE = 2
+
+
+def adapters():
+    """Every DXGI adapter as (description, vendor_id, dedicated_vram_bytes,
+    is_software), or [] if enumeration fails for any reason."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        from ctypes import (POINTER, byref, c_void_p, c_uint, c_size_t,
+                            c_long, c_ulong, Structure, WINFUNCTYPE, HRESULT)
+
+        class GUID(Structure):
+            _fields_ = [("d1", c_ulong), ("d2", ctypes.c_ushort),
+                        ("d3", ctypes.c_ushort), ("d4", ctypes.c_ubyte * 8)]
+
+        class LUID(Structure):
+            _fields_ = [("LowPart", c_ulong), ("HighPart", c_long)]
+
+        class DESC1(Structure):
+            _fields_ = [("Description", ctypes.c_wchar * 128),
+                        ("VendorId", c_uint), ("DeviceId", c_uint),
+                        ("SubSysId", c_uint), ("Revision", c_uint),
+                        ("DedicatedVideoMemory", c_size_t),
+                        ("DedicatedSystemMemory", c_size_t),
+                        ("SharedSystemMemory", c_size_t),
+                        ("AdapterLuid", LUID), ("Flags", c_uint)]
+
+        # IID_IDXGIFactory1
+        iid = GUID(0x770aae78, 0xf26f, 0x4dba,
+                   (ctypes.c_ubyte * 8)(0xa8, 0x29, 0x25, 0x3c,
+                                        0x83, 0xd1, 0xb3, 0x87))
+        factory = c_void_p()
+        if ctypes.windll.dxgi.CreateDXGIFactory1(byref(iid),
+                                                 byref(factory)) != 0:
+            return []
+
+        def method(obj, index, proto):
+            vtable = ctypes.cast(obj.value, POINTER(c_void_p))[0]
+            return proto(ctypes.cast(vtable, POINTER(c_void_p))[index])
+
+        enum_adapters1 = WINFUNCTYPE(HRESULT, c_void_p, c_uint,
+                                     POINTER(c_void_p))
+        get_desc1 = WINFUNCTYPE(HRESULT, c_void_p, POINTER(DESC1))
+        found = []
+        for index in range(16):
+            adapter = c_void_p()
+            try:
+                method(factory, 12, enum_adapters1)(factory, index,
+                                                    byref(adapter))
+            except OSError:
+                break                       # DXGI_ERROR_NOT_FOUND: the end
+            desc = DESC1()
+            method(adapter, 10, get_desc1)(adapter, byref(desc))
+            found.append((desc.Description, desc.VendorId,
+                          int(desc.DedicatedVideoMemory),
+                          bool(desc.Flags & _DXGI_ADAPTER_FLAG_SOFTWARE)))
+        return found
+    except Exception:
+        return []
+
+
+def integrated_only() -> bool:
+    """True only when enumeration succeeded and no adapter is discrete."""
+    found = adapters()
+    if not found:
+        return False
+    for _description, vendor, vram, software in found:
+        if software or vendor in (_VENDOR_INTEL, _VENDOR_MICROSOFT):
+            continue
+        if vendor in (_VENDOR_NVIDIA, _VENDOR_AMD) and vram >= _MIN_DISCRETE_VRAM:
+            return False
+    return True
