@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.1.4 - Mode changes now held until the aircraft confirms them.
+Bug fixes and improvements.
+
 ## V2.1.3 - Bug fixes and improvements.
 
 ## V2.1.2 - Bug fixes and improvements.
