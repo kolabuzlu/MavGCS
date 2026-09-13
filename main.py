@@ -5255,6 +5255,16 @@ class MainWindow(QMainWindow):
         link = self._require_link()
         if not link:
             return
+        # Ask whether a read can start before putting anything on screen.
+        # Armed, not connected yet, or a write still going: each of those
+        # refuses without ever emitting params_ready, so the window went
+        # up and stayed up - busy bar running, "0 so far" - while the one
+        # line explaining why sat on the status line behind it. It read
+        # as an aircraft that had stopped answering.
+        blocked = link.param_read_blocked()
+        if blocked:
+            self.on_command_feedback(blocked)
+            return
         self._show_param_loading()
         # Let the window paint before the reading starts. Everything that
         # follows runs on this thread, so starting it here means the
@@ -5795,6 +5805,19 @@ class MainWindow(QMainWindow):
             if not checker.wait(2000):
                 checker.terminate()
                 checker.wait(1000)
+        # The Live Video window is a top-level of its own, not a child of
+        # this one, so closing the ground station left it on screen and
+        # the program running with no ground station in it - the window
+        # gone, the process still in the task list, the camera still
+        # open. aboutToQuit cannot help: nothing was quitting.
+        #
+        # shutdown() rather than close(): this window has not hidden yet,
+        # so a floating panel still counts as visible and closeEvent
+        # would take its early return and leave capture running.
+        video = getattr(self, "_video_window", None)
+        if video is not None:
+            video.shutdown()
+            video.close()
         event.accept()
 
 

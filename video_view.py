@@ -57,9 +57,9 @@ import time
 
 from PySide6.QtCore import QPoint, QThread, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QPushButton, QSizePolicy,
-                               QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFormLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from app_paths import load_settings, save_setting
 
@@ -390,6 +390,14 @@ class VideoWindow(QWidget):
         self._frames = 0
         self._since = 0.0
         self._names = []
+
+        # Quitting is the one ordering closeEvent cannot cover: the
+        # program can end with this window still open, and then nothing
+        # has stopped the capture thread. aboutToQuit fires while the
+        # event loop is still running, so shutdown() can still wait.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.shutdown)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -726,6 +734,41 @@ class VideoWindow(QWidget):
 
     def _say(self, text):
         self.status.setText(text)
+
+    # ---- shutdown --------------------------------------------------------
+
+    def shutdown(self):
+        """Stop capture for good, without relying on the event loop.
+
+        _stop() is the ordinary path and is allowed to give up on a
+        reader that is slow to notice, handing it to the event loop to
+        clean up later. That is right while the program is running and
+        wrong while it is ending: the queue will not be serviced again,
+        and Qt destroying a QThread that is still running aborts the
+        process on the way out - which it did, every time, if the picture
+        had been sent to the floating panel and this window then closed.
+
+        So this one hands nothing to the event loop. It waits, and if
+        waiting does not work it terminates: the same shape main.py
+        already uses for the update checker, and for the same reason. A
+        healthy reader sits between frames and is gone in well under the
+        budget; one stuck inside FFmpeg was never going to answer, and
+        waiting longer only lengthens the pause before the program ends.
+        """
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            for signal in (reader.frame_ready, reader.failed, reader.opened):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            reader.stop()
+            if not reader.wait(1000):
+                reader.terminate()
+                reader.wait(500)
+        floating, self._floating = self._floating, None
+        if floating is not None:
+            floating.close()
 
     # ---- window ----------------------------------------------------------
 

@@ -42,7 +42,15 @@ _NETWORK_PREFIXES = (
 
 def _open_mavlink_connection(connection_string):
     if connection_string.startswith(_NETWORK_PREFIXES):
-        return mavutil.mavlink_connection(connection_string)
+        # retries=1, not pymavlink's default of 3. For TCP each attempt is
+        # a blocking socket connect with no timeout on it, and a host that
+        # is routed but silent - a typo'd address, an aircraft powered
+        # off, an LTE modem that has dropped - costs Windows its full SYN
+        # timeout of about 21 seconds. Three of those plus the two
+        # one-second sleeps between them is the 65 seconds this used to
+        # take to admit it had failed. One attempt says the same thing in
+        # a third of the time; a link worth having answers immediately.
+        return mavutil.mavlink_connection(connection_string, retries=1)
     if ":" in connection_string:
         device, baud_str = connection_string.rsplit(":", 1)
         try:
@@ -327,6 +335,9 @@ class MavlinkLink(QThread):
         super().__init__(parent)
         self.connection_string = connection_string
         self._running = True
+        # True only while the opening socket connect is in progress - the
+        # one stretch of this thread's life that cannot notice _running.
+        self._connecting = False
         self.master = None
         # mav.xxx_send() ends up doing a single socket write, but it's
         # called both from this thread's heartbeat loop and from the GUI
@@ -470,7 +481,13 @@ class MavlinkLink(QThread):
             pass                # absent or broken; the caller handles it
 
         try:
-            self.master = _open_mavlink_connection(self.connection_string)
+            # Marked so stop() knows not to sit waiting for a thread that
+            # is inside a socket connect and cannot see _running.
+            self._connecting = True
+            try:
+                self.master = _open_mavlink_connection(self.connection_string)
+            finally:
+                self._connecting = False
 
             # Announce ourselves BEFORE the first read. On an outgoing UDP
             # connection ("udpout:") pymavlink never binds the socket, and
@@ -2117,6 +2134,30 @@ class MavlinkLink(QThread):
             "errors": errors,
         })
 
+    def param_read_blocked(self):
+        """Why a parameter read cannot start right now, or None if it can.
+
+        Separate from request_parameters so a caller can ask BEFORE it
+        commits to anything. Each of these refuses without ever emitting
+        params_ready, so a progress window opened first would sit there
+        with nothing coming to take it down, and would cover the very
+        message explaining why - which is exactly what it used to do.
+        """
+        if self.master is None:
+            return "Not connected - can't read parameters"
+        if self._was_armed:
+            # Four full passes of a 1300-parameter list is the better part
+            # of two minutes with the downlink almost entirely full, and
+            # the telemetry it crowds out is the telemetry being flown on.
+            # There is nothing in the list worth that during a flight.
+            return ("Parameters are not read while armed - it would crowd "
+                    "out the telemetry. Land first.")
+        if self._param_writes:
+            # Same collision from the other side.
+            return ("Still writing parameters - wait for that to finish, "
+                    "then read")
+        return None
+
     def request_parameters(self):
         """Ask the vehicle for its whole parameter list.
 
@@ -2126,23 +2167,9 @@ class MavlinkLink(QThread):
         radio that is also carrying telemetry, so the caller is given
         progress rather than a wait.
         """
-        if self.master is None:
-            self.command_feedback.emit("Not connected - can't read parameters")
-            return
-        if self._was_armed:
-            # Four full passes of a 1300-parameter list is the better part
-            # of two minutes with the downlink almost entirely full, and
-            # the telemetry it crowds out is the telemetry being flown on.
-            # There is nothing in the list worth that during a flight.
-            self.command_feedback.emit(
-                "Parameters are not read while armed - it would crowd out "
-                "the telemetry. Land first.")
-            return
-        if self._param_writes:
-            # Same collision from the other side.
-            self.command_feedback.emit(
-                "Still writing parameters - wait for that to finish, "
-                "then read")
+        blocked = self.param_read_blocked()
+        if blocked:
+            self.command_feedback.emit(blocked)
             return
         self._params = {}
         self._param_index = {}
@@ -2973,8 +3000,19 @@ class MavlinkLink(QThread):
         the GUI's slots. terminate() is a last resort for a thread wedged
         somewhere uninterruptible, which is better than letting Qt destroy
         it while it runs (that aborts the process).
+
+        The opening connect is the exception, and the docstring above was
+        never true of it: it is a blocking socket connect that cannot see
+        _running, so waiting for it means waiting out the operating
+        system's SYN timeout. This is called straight from GUI slots -
+        Connect, Disconnect, closing the window - so that wait froze the
+        entire ground station for the full five seconds, every press.
+        There is nothing to unwind at that point: no vehicle has been
+        spoken to yet, so terminating is not merely safe, it is the only
+        thing that can end it.
         """
         self._running = False
-        if not self.wait(5000):
+        grace = 250 if self._connecting else 5000
+        if not self.wait(grace):
             self.terminate()
             self.wait(1000)
