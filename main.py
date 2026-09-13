@@ -1868,6 +1868,13 @@ class ModePanel(QGroupBox):
     # pressed under, and it should not look like the rest of the row.
     ABORT_STYLE = "background-color: #e07a00; color: white; font-weight: bold; font-size: 10px; padding: 3px 4px;"
     ABORT_TEXT = "ABORT LANDING"
+    # Asked for, not yet confirmed by the aircraft. Yellow because it sits
+    # between the resting colours and the active green and reads as "on
+    # its way" - and dark text, because nothing is legible in white on it.
+    # Deliberately not the abort button's orange: that means something is
+    # happening now, this means something is still being asked for.
+    PENDING_STYLE = ("background-color: #d8b400; color: #2a2200; "
+                     "font-weight: bold; font-size: 10px; padding: 3px 4px;")
     # Same weight of colour as RTL's red and the active-mode green, so it
     # reads as one of the panel's coloured controls rather than a sore thumb.
     FLY_TO_STYLE = "background-color: #36a; color: white; font-size: 10px; padding: 3px 4px;"
@@ -1903,6 +1910,11 @@ class ModePanel(QGroupBox):
         # that one button stops being a mode request and becomes the way
         # out of the approach.
         self._landing = False
+        # The mode the aircraft reports, and the one asked for but not yet
+        # confirmed. Kept so either can be repainted without the other
+        # being passed in again.
+        self._active = None
+        self._pending = None
         for i, name in enumerate(self.MODE_ORDER):
             btn = QPushButton(name)
             btn.setStyleSheet(self.RTL_STYLE if name == "RTL" else self.NORMAL_STYLE)
@@ -1989,15 +2001,38 @@ class ModePanel(QGroupBox):
         else:
             self.mode_requested.emit("AUTOLAND")
 
+    def set_pending_mode(self, mode_name):
+        """A mode has been asked for and not yet confirmed - or "" for none.
+
+        Repainted through set_active_mode so there is one place that
+        decides what every button looks like, rather than two that can
+        disagree.
+        """
+        self._pending = mode_name or None
+        self.set_active_mode(self._active)
+
     def set_active_mode(self, mode_name):
+        self._active = mode_name
+        # Confirmed: the aircraft is in the mode that was asked for, so
+        # there is nothing pending even if the link's own signal has not
+        # arrived yet.
+        if self._pending is not None and mode_name == self._pending:
+            self._pending = None
         self._landing = mode_name == "AUTOLAND"
         # The menu button doubles as the indicator for everything under
         # it: seven modes share one square of panel, so it has to say
         # which one is running rather than only that one of them is.
         in_vtol = mode_name in self.VTOL_MODES
-        self.vtol_btn.setText(mode_name if in_vtol else "VTOL")
+        # The menu button stands in for whichever of its seven modes is
+        # running, so it has to carry a pending one too - otherwise asking
+        # for QLOITER looks like nothing happened at all.
+        pending_vtol = (not in_vtol and self._pending in self.VTOL_MODES)
+        self.vtol_btn.setText(
+            mode_name if in_vtol else (self._pending if pending_vtol
+                                       else "VTOL"))
         self.vtol_btn.setStyleSheet(
-            self._vtol_active if in_vtol else self._vtol_rest)
+            self._vtol_active if in_vtol
+            else (self.PENDING_STYLE if pending_vtol else self._vtol_rest))
         land = self.buttons["AUTOLAND"]
         land.setText(self.ABORT_TEXT if self._landing else "AUTOLAND")
         land.setToolTip(
@@ -2012,6 +2047,10 @@ class ModePanel(QGroupBox):
                 btn.setStyleSheet(self.ABORT_STYLE)
             elif name == mode_name:
                 btn.setStyleSheet(self.ACTIVE_STYLE)
+            elif name == self._pending:
+                # Taken, and still being sent. Ahead of RTL's red and the
+                # resting style, so the press is visible wherever it landed.
+                btn.setStyleSheet(self.PENDING_STYLE)
             elif name == "RTL":
                 btn.setStyleSheet(self.RTL_STYLE)
             else:
@@ -5704,6 +5743,7 @@ class MainWindow(QMainWindow):
         self.link.mission_uploaded.connect(self.on_mission_uploaded)
         self.link.connection_status.connect(self.on_connection_status)
         self.link.command_feedback.connect(self.on_command_feedback)
+        self.link.mode_pending.connect(self.mode_panel.set_pending_mode)
         self.link.status_text_update.connect(self.messages_panel.add_message)
         self.link.sensor_health_update.connect(self.sensor_panel.set_health)
         self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
@@ -5927,6 +5967,9 @@ class MainWindow(QMainWindow):
         self.arm_panel.set_prearm_reason("")
         self.arm_panel.set_armed_state(None)
         self.mode_panel.set_active_mode(None)
+        # With the link gone nothing is being sent any more, so a button
+        # left lit would be claiming MavGCS is still trying.
+        self.mode_panel.set_pending_mode("")
         self.horizon.set_ekf_status("white")
         self.horizon.set_vibe_status("white")
         # Stop the terrain radar refreshing off the last known position.

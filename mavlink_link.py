@@ -134,6 +134,10 @@ class MavlinkLink(QThread):
     connection_status = Signal(bool, str)
     # human-readable feedback after sending a command (success or failure)
     command_feedback = Signal(str)
+    # The mode asked for but not yet seen in a heartbeat, or "" when there
+    # is nothing outstanding. Lets the panel show that a press was taken
+    # and is being worked on, rather than looking as though it did nothing.
+    mode_pending = Signal(str)
     # Raised when the vehicle has ACCEPTED a mission, so the map can stop
     # showing edited altitudes as pending. Deliberately driven by the
     # vehicle's acknowledgement rather than by us pressing send.
@@ -311,6 +315,19 @@ class MavlinkLink(QThread):
     # for the rest, which is exactly what a lossy link makes happen. Any
     # answer at all resets the count, so it keeps going while it is
     # getting somewhere and gives up only on real silence.
+    # A mode change is one COMMAND_LONG, and on a link that is dropping
+    # packets one is easy to lose - the button goes nowhere and the only
+    # way to tell is that nothing happens, so the pilot presses again.
+    # MavGCS repeats it instead, until a heartbeat comes back in that mode.
+    #
+    # Ten seconds, and no longer, for two reasons. A dropout that outlasts
+    # it is a bigger problem than a missed mode change. And the pilot has
+    # a mode switch on the transmitter: repeating for minutes could put
+    # the aircraft back into a mode they had just taken it out of by hand,
+    # which is the one thing this must never do.
+    MODE_RETRY_EVERY_S = 1.0
+    MODE_RETRY_FOR_S = 10.0
+
     PARAM_RETRY_EVERY_S = 3.0
     PARAM_RETRY_MAX = 12
 
@@ -338,6 +355,11 @@ class MavlinkLink(QThread):
         # True only while the opening socket connect is in progress - the
         # one stretch of this thread's life that cannot notice _running.
         self._connecting = False
+        # The mode asked for and not yet confirmed by a heartbeat, with
+        # when to send it again and when to stop trying. See set_mode.
+        self._mode_wanted = None
+        self._mode_retry_next = 0.0
+        self._mode_retry_until = 0.0
         self.master = None
         # mav.xxx_send() ends up doing a single socket write, but it's
         # called both from this thread's heartbeat loop and from the GUI
@@ -598,6 +620,9 @@ class MavlinkLink(QThread):
             # only a bounded number of times - then say so, because a
             # readout that never fills in should tell you it gave up
             # rather than look like it is still trying.
+            # A mode press that the link swallowed, sent again.
+            self._drive_mode_request(now)
+
             if self._ftp is not None:
                 self._drive_param_ftp(now)
 
@@ -941,6 +966,17 @@ class MavlinkLink(QThread):
                 except (KeyError, AttributeError):
                     result_name = f"result {msg.result}"
                 self.command_feedback.emit(f"ACK: {cmd_name} -> {result_name}")
+                if (msg.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE
+                        and self._mode_wanted is not None
+                        and msg.result != mavutil.mavlink.MAV_RESULT_ACCEPTED):
+                    # It arrived and the aircraft refused it - too low for
+                    # AUTOLAND, no VTOL motors for a Q mode. Repeating a
+                    # refusal only wastes the link, and leaving the button
+                    # lit would promise something that is not coming.
+                    wanted = self._mode_wanted
+                    self._clear_mode_request()
+                    self.command_feedback.emit(
+                        f"The aircraft refused {wanted} ({result_name}).")
                 if msg.command == mavutil.mavlink.MAV_CMD_DO_SET_HOME:
                     accepted = (msg.result
                                 == mavutil.mavlink.MAV_RESULT_ACCEPTED)
@@ -1271,6 +1307,14 @@ class MavlinkLink(QThread):
                     msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
                 self.status_update.emit({"mode": mode, "armed": "YES" if armed else "no"})
+
+                # The aircraft saying which mode it is in is the only
+                # confirmation worth having - an ACK says the command was
+                # received, not that the mode took. However it got there,
+                # including the pilot's own switch, there is nothing left
+                # to chase.
+                if self._mode_wanted is not None and mode == self._mode_wanted:
+                    self._clear_mode_request()
 
                 # ArduPilot sets home at arming and announces it once. Once
                 # is not much of a guarantee over a radio link that drops
@@ -2926,6 +2970,20 @@ class MavlinkLink(QThread):
             self.command_feedback.emit(f"Unknown mode: {mode_name}")
             return
 
+        if not self._send_mode(mode_name, custom_mode):
+            return
+        # Hold it open until a heartbeat says the aircraft is in it. A
+        # second press replaces this one rather than adding to it, so
+        # there is only ever one mode outstanding.
+        now = time.time()
+        self._mode_wanted = mode_name
+        self._mode_retry_next = now + self.MODE_RETRY_EVERY_S
+        self._mode_retry_until = now + self.MODE_RETRY_FOR_S
+        self.mode_pending.emit(mode_name)
+        self.command_feedback.emit(f"Requested mode change: {mode_name}")
+
+    def _send_mode(self, mode_name, custom_mode) -> bool:
+        """Put one mode request on the wire. True if it went."""
         try:
             with self._send_lock:
                 self.master.mav.command_long_send(
@@ -2937,9 +2995,39 @@ class MavlinkLink(QThread):
                     custom_mode,
                     0, 0, 0, 0, 0,
                 )
-            self.command_feedback.emit(f"Requested mode change: {mode_name}")
+            return True
         except Exception as e:
             self.command_feedback.emit(f"Failed to change mode: {e}")
+            return False
+
+    def _clear_mode_request(self):
+        """Nothing outstanding any more, whatever the reason."""
+        if self._mode_wanted is None:
+            return
+        self._mode_wanted = None
+        self._mode_retry_next = 0.0
+        self._mode_retry_until = 0.0
+        self.mode_pending.emit("")
+
+    def _drive_mode_request(self, now):
+        """Send the outstanding mode again, or give up on it."""
+        if self._mode_wanted is None or self.master is None:
+            return
+        if now >= self._mode_retry_until:
+            wanted = self._mode_wanted
+            self._clear_mode_request()
+            self.command_feedback.emit(
+                f"Mode change to {wanted} was not acknowledged - too much "
+                f"of the link is being lost. Press it again.")
+            return
+        if now < self._mode_retry_next:
+            return
+        self._mode_retry_next = now + self.MODE_RETRY_EVERY_S
+        custom_mode = PLANE_MODES.get(self._mode_wanted)
+        if custom_mode is None:
+            self._clear_mode_request()
+            return
+        self._send_mode(self._mode_wanted, custom_mode)
 
     # Where an aborted landing goes. RTL climbs to RTL_ALTITUDE and heads
     # for home or the nearest rally point, which is the behaviour of a
