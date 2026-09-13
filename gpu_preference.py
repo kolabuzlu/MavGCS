@@ -190,14 +190,46 @@ def adapters():
         return []
 
 
+def discrete_adapters():
+    """Just the adapters that count as discrete.
+
+    An integrated chip is not discrete however fast it is, and an AMD APU
+    reports its vendor as AMD while having no dedicated memory at all -
+    which is why the memory size, not the vendor alone, decides.
+    """
+    return [(description, vendor, vram, software)
+            for description, vendor, vram, software in adapters()
+            if not software
+            and vendor in (_VENDOR_NVIDIA, _VENDOR_AMD)
+            and vram >= _MIN_DISCRETE_VRAM]
+
+
 def integrated_only() -> bool:
     """True only when enumeration succeeded and no adapter is discrete."""
-    found = adapters()
-    if not found:
-        return False
-    for _description, vendor, vram, software in found:
-        if software or vendor in (_VENDOR_INTEL, _VENDOR_MICROSOFT):
-            continue
-        if vendor in (_VENDOR_NVIDIA, _VENDOR_AMD) and vram >= _MIN_DISCRETE_VRAM:
-            return False
-    return True
+    if not adapters():
+        return False                        # unknown: assume discrete
+    return not discrete_adapters()
+
+
+def rendering_on_discrete(adapter_name) -> bool:
+    """Is that adapter - as the map reports it - one of the discrete cards?
+
+    The map answers with a WebGL string like
+
+        ANGLE (Intel, Intel(R) Iris(R) Xe Graphics (0x0000A7A0) ...)
+
+    which carries the adapter's description verbatim, so the reported name
+    can be matched against what DXGI enumerated rather than guessed at
+    from the vendor. That matters on a machine whose integrated and
+    discrete chips share a vendor, where the vendor alone says nothing.
+
+    An empty or unrecognised name answers True: not knowing is never a
+    reason to act.
+    """
+    name = adapter_name or ""
+    if not name:
+        return True
+    for description, _vendor, _vram, _software in discrete_adapters():
+        if description and description in name:
+            return True
+    return False

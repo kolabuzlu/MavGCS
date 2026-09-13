@@ -26,6 +26,18 @@ APP_VERSION = "V2.1.3"
 # never chosen, which counts as yes: this is on unless it is turned off.
 # Only the Settings checkbox writes it.
 GPU_CHOICE_SETTING = "gpu_preference_enabled"
+# One restart, ever, to get off the integrated chip on the first launch
+# after the preference is written. Set before restarting and cleared only
+# once the program is actually running on the discrete card, so a machine
+# that will not move is asked exactly once and then left alone.
+GPU_RESTART_SETTING = "gpu_restart_attempted"
+# Self-clearing: set when restarting, read and cleared by the launch that
+# follows, purely so the window vanishing and coming back has an
+# explanation rather than being alarming.
+GPU_RESTART_NOTICE_SETTING = "gpu_restart_notice"
+# Set when a restart did not help. Read at the top of this file, before
+# Qt, to turn on CPU rasterisation on a machine Windows will not move.
+GPU_ON_INTEGRATED_SETTING = "gpu_runs_on_integrated"
 
 import sys
 import os
@@ -44,7 +56,17 @@ os.environ.setdefault("MAVLINK20", "1")
 # has to be decided here, before anything from Qt is imported. Dual-GPU
 # machines are left exactly as they were. See gpu_preference.
 import gpu_preference
-CPU_RASTERISATION = gpu_preference.integrated_only()
+from app_paths import load_settings as _settings_before_qt
+
+# ...or when this machine owns a discrete card but was seen rendering on
+# the integrated one anyway, and a restart did not move it. Windows does
+# not always honour the preference - an OEM switching utility or a policy
+# can override it - and such a machine would otherwise get no protection
+# at all, because the check above only asks what hardware exists. See
+# _maybe_restart_for_discrete_gpu, which is what writes this.
+CPU_RASTERISATION = (
+    gpu_preference.integrated_only()
+    or _settings_before_qt().get("gpu_runs_on_integrated") is True)
 if CPU_RASTERISATION:
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
         os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
@@ -56,7 +78,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Signal, QTimer, Qt
+from PySide6.QtCore import Signal, QProcess, QTimer, Qt
 from PySide6.QtGui import (QIcon, QImage, QPainter, QPixmap, QPen, QColor,
                            QDesktopServices)
 from PySide6.QtCore import (QBuffer, QByteArray, QIODevice, QPoint, QPointF,
@@ -4460,6 +4482,94 @@ class MainWindow(QMainWindow):
         self.on_command_feedback(
             "Graphics: rendering on %s%s." % (
                 name, ", rasterising on the CPU" if CPU_RASTERISATION else ""))
+        self._settle_graphics_card(name)
+
+    def _settle_graphics_card(self, name):
+        """Get onto the discrete card, or arrange protection without it.
+
+        Windows chooses a program's graphics card when it starts it, and
+        reads the preference this app writes only at that moment - so the
+        very first launch after a fresh install runs on the integrated
+        chip no matter what, and that is exactly the launch the
+        compositor fault can reach, because CPU rasterisation is off
+        wherever a discrete card exists.
+
+        So: if a discrete card is here, the preference is written, and we
+        are demonstrably not on it, restart once and let Windows read the
+        note. If that does not work - some machines have an OEM switching
+        utility or a policy that overrides it - give up on restarting and
+        remember it, so the next launch rasterises on the CPU instead.
+        Either way the fault is covered; the restart is only the better
+        of the two outcomes.
+        """
+        if sys.platform != "win32":
+            return
+        settings = load_settings()
+        if settings.get(GPU_RESTART_NOTICE_SETTING) is True:
+            # The launch after a restart. Explain it once, whatever came
+            # of it, then clear it so it is never said twice.
+            save_setting(GPU_RESTART_NOTICE_SETTING, False)
+            self.on_command_feedback(
+                "Graphics: MavGCS restarted once to change graphics card.")
+        if gpu_preference.rendering_on_discrete(name):
+            # Where we want to be. Disarm both flags, so that a machine
+            # whose driver or hardware changes later gets its one restart
+            # again, and so a stale "runs on integrated" cannot keep CPU
+            # rasterisation on a card that does not need it.
+            for key in (GPU_RESTART_SETTING, GPU_ON_INTEGRATED_SETTING):
+                if settings.get(key) is True:
+                    save_setting(key, False)
+            return
+        if gpu_preference.integrated_only():
+            return          # nothing to move to; CPU rasterisation has it
+        if settings.get(GPU_CHOICE_SETTING) is False:
+            return          # the user asked to stay on this card
+        if not gpu_preference.is_high_performance():
+            return          # no note written yet, so a restart cannot help
+        if self.link is not None:
+            return          # connected: never pull the link out from under
+        if settings.get(GPU_RESTART_SETTING) is True:
+            # Restarted once already and still here, so Windows is not
+            # going to move this machine. Protect it where it is.
+            if settings.get(GPU_ON_INTEGRATED_SETTING) is not True:
+                save_setting(GPU_ON_INTEGRATED_SETTING, True)
+                self.on_command_feedback(
+                    "Graphics: Windows keeps MavGCS on the integrated "
+                    "chip. Rasterising on the CPU from the next start, "
+                    "which is what stops the map crashing there.")
+            return
+        save_setting(GPU_RESTART_SETTING, True)
+        save_setting(GPU_RESTART_NOTICE_SETTING, True)
+        self.on_command_feedback(
+            "Graphics: restarting to move onto the discrete card...")
+        QTimer.singleShot(1200, self._restart_for_graphics_card)
+
+    def _restart_for_graphics_card(self):
+        """Start a fresh copy and close this one.
+
+        Detached, so the new process is not a child that dies with this
+        one. Frozen, the program is its own executable and sys.argv[0] is
+        that same path, so only the arguments after it are passed on;
+        from source the interpreter needs the script named as well.
+        """
+        try:
+            if is_frozen():
+                program, arguments = sys.executable, sys.argv[1:]
+            else:
+                program, arguments = sys.executable, list(sys.argv)
+            started = QProcess.startDetached(program, arguments, os.getcwd())
+        except Exception:
+            started = False
+        if not started:
+            # Could not relaunch, so this is as good as Windows refusing:
+            # take the other route rather than leaving it unprotected.
+            save_setting(GPU_RESTART_NOTICE_SETTING, False)
+            save_setting(GPU_ON_INTEGRATED_SETTING, True)
+            self.on_command_feedback(
+                "Graphics: could not restart. Rasterising on the CPU from "
+                "the next start instead.")
+            return
+        self.close()
 
     def _log_draw_state(self):
         """One line of map state into the watcher's log."""
