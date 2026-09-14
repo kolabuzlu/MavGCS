@@ -27,5 +27,4 @@ Created by **Derin Hakan Karakurt**
 ### Installing & Running MavGCS (Windows) 💻
 
 Download `MavGCS-<version>-windows.zip` from the
-[Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
-and run **MavGCS.exe**. No setup needed.
+[Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it, and run **MavGCS.exe**. No setup needed.
