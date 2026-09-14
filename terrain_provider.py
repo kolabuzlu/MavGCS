@@ -158,12 +158,32 @@ class _TileData:
         self.px_lon = px_lon
 
     def sample(self, lat, lon):
-        """Bilinear sample at lat/lon, or None if outside this tile."""
+        """Bilinear sample at lat/lon, or None if outside this tile.
+
+        The bound is the tile's extent, not its last sample, and those are
+        not the same thing. These tiles are PixelIsPoint: the tiepoint is
+        the centre of pixel (0, 0), so a 3600-wide one-degree tile has its
+        last sample at origin + 3599/3600 - a third of an arcsecond short
+        of the next tile's first sample, with nothing in between.
+
+        Bounding on `width - 1` therefore refused the last arcsecond of
+        every tile, and the neighbour refused it too for being below its
+        own origin: a 24 m strip along every edge answered "no elevation"
+        with perfectly good ground on both sides of it. Tiles are chosen
+        by the floor of the coordinate, so each owns a whole degree, and
+        that is what decides whether a point is inside.
+
+        Inside that last arcsecond both indices clamp to the edge sample,
+        which is nearest-neighbour over at most one arcsecond rather than
+        an interpolation towards a tile that is not loaded. Well inside
+        the error the DEM already carries, and the alternative is a hole.
+        """
         col = (lon - self.origin_lon) / self.px_lon
         row = (self.origin_lat - lat) / self.px_lat
-        if col < 0 or row < 0 or col > self.width - 1 or row > self.height - 1:
+        if col < 0 or row < 0 or col >= self.width or row >= self.height:
             return None
-        c0, r0 = int(col), int(row)
+        c0 = min(int(col), self.width - 1)
+        r0 = min(int(row), self.height - 1)
         c1, r1 = min(c0 + 1, self.width - 1), min(r0 + 1, self.height - 1)
         fc, fr = col - c0, row - r0
         top = self.grid[r0, c0] * (1 - fc) + self.grid[r0, c1] * fc
