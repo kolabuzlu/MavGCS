@@ -24,8 +24,8 @@ You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to acti
 
 Created by **Derin Hakan Karakurt**
 
-### Installing & Running MavGCS (Windows) 💻
+### Installing & Running MavGCS (Windows)
 
-Download `MavGCS-<version>.apk` from the
-[Releases page](https://github.com/kolabuzlu/MavGCS-Android/releases), run it to install the app,
-You can start using it.
+Download `MavGCS-<version>-windows.zip` from the
+[Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it,
+and run **MavGCS.exe**. No setup needed.
