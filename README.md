@@ -16,7 +16,7 @@ A ground control station software for **MAVLink** protocol. 🛩️
 
 It works with **Ardupilot**, **PX4** (Bi-directional) or **INAV** (Uni-directional).
 
-Supports RFD and similar telemetry radios or MAVLink over ELRS.
+Supports RFD and similar telemetry radios, MAVLink over ELRS and LTE telemetry.
 
 You can monitor HUD and vital information about flight, use weather radar, experience 3D FPV view, enjoy live video feed, see the vehicle and ADS-B traffic data on the moving map, view terrain radar, execute instant waypoint missions, evaluate flight statistics and more.
 
