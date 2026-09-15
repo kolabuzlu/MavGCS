@@ -18,7 +18,7 @@ It works with **Ardupilot**, **PX4** (Bi-directional) or **INAV** (Uni-direction
 
 Supports RFD and similar telemetry radios, MAVLink over ELRS and LTE telemetry.
 
-You can monitor HUD and vital information about flight, use weather radar, experience 3D FPV view, enjoy live video feed, see the vehicle and ADS-B traffic data on the moving map, view terrain radar, execute instant waypoint missions, evaluate flight statistics and more.
+You can monitor HUD and vital information about flight, use weather radar, experience 3D FPV view, watch live video feed, see the vehicle and ADS-B traffic data on the moving map, view terrain radar, execute instant waypoint missions, evaluate flight statistics and more.
 
 You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to activate 3D FPV view.
 
