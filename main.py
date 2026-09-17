@@ -2020,6 +2020,44 @@ INFO_ROW_GAP = 4
 # this column's arithmetic applies to them.
 PANEL_PAD = 4
 
+# Why every button in that column is given a background of its own.
+#
+# macOS draws a plain QPushButton as native artwork of a fixed height and
+# centres it in whatever space the widget has. Ask for a 33px button and
+# you get a 24px one with four and a half pixels of dead space above and
+# below it - measured, at 2x: the drawn pixels of a plain button ran from
+# row 9 to row 56 of 66, where a coloured one ran 1 to 65. The artwork
+# cannot be stretched; macOS offers buttons in a few fixed sizes and that
+# is all.
+#
+# A button whose style sheet sets a background is not drawn as artwork at
+# all, it is drawn as a box, and a box fills its widget. That is the whole
+# of the bug the Flight Mode panel showed: every button in it was exactly
+# CONTROL_BUTTON_H tall, but the coloured ones filled that height and the
+# plain ones did not, so the active mode looked taller than its
+# neighbours.
+#
+# Giving them all a background makes them all fill. The colours are taken
+# from the palette rather than written in, because this application sets
+# no theme of its own - it follows the system's, in light mode and dark,
+# and hard-coded greys would follow neither.
+#
+# Windows is deliberately left with its own drawing: the Windows style
+# already paints a button across the full height of its widget, so there
+# is nothing there to fix and no reason to change how it looks.
+BUTTON_FILL = ("""
+            QPushButton {
+                background-color: palette(button);
+                color: palette(button-text);
+                border: 1px solid palette(mid);
+                border-radius: 4px;
+            }
+            QPushButton:hover    { background-color: palette(midlight); }
+            QPushButton:pressed  { background-color: palette(mid); }
+            QPushButton:disabled { color: palette(mid); }
+""" if sys.platform == "darwin" else "")
+
+
 def _set_button_height(panel, height=CONTROL_BUTTON_H):
     """Give every button in a panel a minimum height.
 
@@ -4185,6 +4223,7 @@ class MainWindow(QMainWindow):
         left_content = QWidget()
         left_content.setStyleSheet("""
             QPushButton { font-size: 10px; padding: 3px 4px; }
+            """ + BUTTON_FILL + """
             QGroupBox {
                 font-size: 10px; font-weight: bold;
                 margin-top: 6px; padding-top: 4px;
