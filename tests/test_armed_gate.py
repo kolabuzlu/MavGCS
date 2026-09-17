@@ -15,8 +15,24 @@ import random
 
 import threading
 
+import time
 
 from mavlink_link import MavlinkLink
+
+# "Sent long ago, and never answered."
+#
+# Expressed against the clock rather than written as 0.0, because the
+# retry at mavlink_link.py:1540 asks whether
+# time.monotonic() - _pid_mask_sent_at >= PARAM_RETRY_EVERY_S, and 0.0
+# only means "long ago" where time.monotonic() already returns a large
+# number. It does on a build machine, which measures it from boot, and
+# does not under the Xcode-bundled Python 3.9 on macOS, which starts near
+# zero at process start: there the gap was about 0.4s against a 3.0s
+# threshold, so the retry never fired and the two checks below asserted
+# nothing while reporting failure. This is negative when the process is
+# young, which is the point - it means "before this process existed", and
+# the gap only widens as the run goes on.
+LONG_AGO = time.monotonic() - MavlinkLink.PARAM_RETRY_EVERY_S - 1
 
 RETRY = MavlinkLink._retry_missing_params
 ON_SERVO = MavlinkLink._on_servo_param
@@ -53,6 +69,20 @@ class Link:
     ELEVATOR_CH = 3
 
     def __init__(self, delivery=1.0, armed=False, mask=0):
+        # Seeded per Link, not once for the module, so that a scenario is
+        # reproducible without depending on how many draws the scenarios
+        # above it happened to consume - which is where
+        # test_param_retry.py puts it, for the same reason, with the same
+        # seed.
+        #
+        # Nothing here draws today: every Link below is delivery=1.0, and
+        # random.random() returns in [0.0, 1.0), so the two
+        # "random.random() <= self.delivery" tests on the wire are
+        # unconditionally true. That makes this suite deterministic by
+        # accident of its inputs rather than by construction, and the
+        # first scenario to pass a real delivery would make it flaky with
+        # no way to recover the draw that failed.
+        random.seed(7)
         self._send_lock = threading.Lock()
         self._want_elevator = True
         self._was_armed = armed
@@ -64,7 +94,14 @@ class Link:
         self._pid_mask_original = None
         self._pid_mask_current = None
         self._pid_mask_wanted = None
-        self._pid_mask_sent_at = 0.0
+        # The real __init__ puts 0.0 here to mean "never sent", and is
+        # safe in doing so because the check at mavlink_link.py:1540 is
+        # gated on _pid_mask_wanted being non-None, which only happens at
+        # 2136 - one line before the timestamp is stamped for real. A
+        # scenario here can set _pid_mask_wanted by hand and reach the
+        # check without that having happened, so the stub carries the
+        # same intent in a form that does not depend on the clock.
+        self._pid_mask_sent_at = LONG_AGO
         self._trim_throttle = None
         self._param_progress = None
         self._param_retries = 0
@@ -181,7 +218,7 @@ passes(lossy, 6)                       # everything learned, mask written
 lossy._pid_mask_current = 0            # pretend the write never landed
 lossy.vehicle_mask = 0
 lossy._pid_mask_wanted = 2
-lossy._pid_mask_sent_at = 0.0      # sent long ago, unanswered
+lossy._pid_mask_sent_at = LONG_AGO     # sent long ago, unanswered
 before = len([m for m in lossy.sent if m[0] == "write"])
 RETRY(lossy)
 after = len([m for m in lossy.sent if m[0] == "write"])
