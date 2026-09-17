@@ -9,12 +9,30 @@ on:
 
 jobs:
   tests:
-    # Windows, because MavGCS is a Windows program and the things worth
-    # testing are Windows things: the graphics-card preference is in the
-    # registry, the adapter check is DXGI, the camera list is DirectShow.
-    # On Linux those paths return early and the suites would pass without
-    # having tested anything, which is worse than not running them.
-    runs-on: windows-latest
+    strategy:
+      # Windows must report even when macOS is broken, and the other way
+      # round. Cancelling the pair on the first failure would hide which
+      # of the two platforms actually regressed.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    # The two jobs are here for different reasons, and neither replaces
+    # the other.
+    #
+    # Windows is where MavGCS runs, and where the things worth testing are
+    # real: the graphics-card preference is in the registry, the adapter
+    # check is DXGI, the camera list is DirectShow. This job is the one
+    # that says the program works.
+    #
+    # macOS runs the same suites to say something narrower but just as
+    # useful: that nothing Windows-only has leaked into module scope, and
+    # that every platform-guarded path still returns sensibly when the
+    # platform is not Windows. Those paths return early here and prove
+    # nothing about the registry or DXGI - they are not meant to. What a
+    # red macOS job means is that the program has stopped being portable,
+    # which is a thing we would otherwise only discover on a Mac.
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4

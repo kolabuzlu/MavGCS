@@ -7,8 +7,16 @@ imagecodecs
 # Video window. DirectShow is the only way to see virtual
 # cameras on Windows; Qt's own camera support cannot.
 # pygrabber names the devices, OpenCV reads the frames.
+#
+# pygrabber is marked Windows-only because its comtypes dependency does
+# "from ctypes import HRESULT, OleDLL, WinDLL" at module scope. Both ship
+# as pure-Python py3-none-any wheels, so pip installs them anywhere
+# happily and the failure only appears at import - where list_devices()
+# catches it and reports an empty device list. That is the right
+# behaviour for a machine with no capture stack, and the wrong way to
+# find out a dependency does not belong on the platform.
 opencv-python-headless
-pygrabber
+pygrabber; sys_platform == "win32"
 # The QR code for the aircraft's last position. Pure Python and no
 # dependencies of its own, which matters: the code has to be drawable in
 # a field with no internet, which is exactly where it is wanted.

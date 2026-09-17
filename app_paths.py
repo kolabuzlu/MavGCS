@@ -38,10 +38,20 @@ def data_dir() -> Path:
     Writable directory for caches. Frozen builds use the per-user app data
     folder; from source it stays in the project directory so an existing
     terrain_cache/ keeps working during development.
+
+    Where that folder lives is the platform's decision, not ours. macOS
+    keeps per-user application data in ~/Library/Application Support, and
+    the bare ~/MavGCS this would otherwise fall back to is both the wrong
+    place and one the user never sees. Windows is untouched: LOCALAPPDATA
+    is still the only thing consulted there.
     """
     if is_frozen():
-        root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        path = Path(root) / "MavGCS"
+        if sys.platform == "darwin":
+            root = Path.home() / "Library" / "Application Support"
+        else:
+            root = Path(os.environ.get("LOCALAPPDATA")
+                        or os.path.expanduser("~"))
+        path = root / "MavGCS"
     else:
         path = Path(__file__).resolve().parent
     path.mkdir(parents=True, exist_ok=True)
