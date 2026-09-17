@@ -36,6 +36,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history, not the default shallow clone. The Windows
+          # layout is frozen against a release tag, and the suite that
+          # enforces that checks the tag out and renders it - which it
+          # cannot do if the tag was never fetched.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
