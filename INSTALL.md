@@ -39,9 +39,8 @@ and not others, which is why the command above is given first.
 #### The camera
 
 The first time you press Start in the Video window, macOS asks whether
-MavGCS may use the camera. Allow it, then press Start again - the request
-and the first attempt to open the device happen together, so that first
-attempt does not succeed.
+MavGCS may use the camera. Allow it and the picture starts by itself -
+there is nothing to press a second time.
 
 If you refuse and change your mind, the switch is in System Settings ->
 Privacy & Security -> Camera.

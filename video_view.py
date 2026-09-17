@@ -96,6 +96,31 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFormLayout,
 
 from app_paths import load_settings, save_setting
 
+if sys.platform == "darwin":
+    # Stop OpenCV asking macOS for camera permission itself.
+    #
+    # Its AVFoundation backend does ask, and can only do it from the main
+    # thread, because it spins the main run loop to wait for the answer.
+    # Captures here are opened on a worker thread, deliberately, since
+    # read() blocks. So the request could not be made and the open failed:
+    #
+    #   OpenCV: not authorized to capture video (status 0), requesting...
+    #   OpenCV: can not spin main run loop from other thread, set
+    #           OPENCV_AVFOUNDATION_SKIP_AUTH=1 to disable authorization
+    #           request and perform it in your application.
+    #   OpenCV: camera failed to properly initialize!
+    #
+    # The part that mattered is what is missing from that: no prompt was
+    # ever shown, so there was nothing for anyone to allow, and the window
+    # sat there advising the user to allow a dialog that did not exist.
+    #
+    # VideoWindow._may_use_camera does the asking instead, on the thread
+    # that can. This is set at import rather than next to the capture
+    # because OpenCV caches configuration parameters the first time it
+    # reads them, and by the time a worker thread is opening a device that
+    # may already have happened.
+    os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "1"
+
 AUTO = "Auto"
 SOURCE_DEVICE = "Camera (device)"
 SOURCE_RTSP = "RTSP (network)"
@@ -188,6 +213,42 @@ def _camera_backend(cv2):
     return cv2.CAP_DSHOW
 
 
+def camera_permission():
+    """macOS's answer to "may this program use a camera": granted, denied
+    or not yet asked. None anywhere else, where the question is not put.
+
+    Qt's own permission API rather than a new dependency, and it lives in
+    QtCore rather than QtMultimedia, so nothing extra is bundled.
+    """
+    if sys.platform != "darwin":
+        return None
+    from PySide6.QtCore import QCameraPermission, QCoreApplication, Qt
+    app = QCoreApplication.instance()
+    if app is None:
+        return None
+    return app.checkPermission(QCameraPermission())
+
+
+def request_camera_permission(context, bound_slot):
+    """Put the question to the user; the answer arrives at bound_slot.
+
+    Must run on the main thread, which is the whole reason this exists -
+    see the note in VideoWindow.start.
+
+    context is the object the answer belongs to. Qt drops it if that
+    object is destroyed first, which is what should happen: the dialog is
+    not modal, so the video window can be closed while it is still up,
+    and answering it then must not reach into a window that has gone.
+
+    bound_slot has to be a bound method and not a lambda. PySide6 reads
+    __func__ off whatever it is given here, so a plain function raises
+    AttributeError before the request is ever made.
+    """
+    from PySide6.QtCore import QCameraPermission, QCoreApplication
+    QCoreApplication.instance().requestPermission(
+        QCameraPermission(), context, bound_slot)
+
+
 def _has_ffmpeg(cv2):
     """Whether this OpenCV can open a network stream at all.
 
@@ -234,6 +295,9 @@ class _Reader(QThread):
         params = ([cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE]
                   if self._no_accel else [])
         if isinstance(self._source, int):
+            # See OPENCV_AVFOUNDATION_SKIP_AUTH at the top of this module
+            # for why opening a camera here needs permission to have been
+            # settled already.
             return cv2.VideoCapture(self._source, _camera_backend(cv2),
                                     params)
         # FFmpeg reads its options from the environment at capture time.
@@ -268,15 +332,13 @@ class _Reader(QThread):
                         "that ships one.")
             return "That address did not answer."
         if sys.platform == "darwin":
-            # The first open of a device is also the one that asks macOS
-            # for camera permission, and OpenCV does not wait for the
-            # answer - it fails that attempt and would succeed on the
-            # next. Blaming another program for that is a wrong answer at
-            # exactly the moment the user is looking at the prompt.
-            return ("That device would not open. If macOS has just asked "
-                    "for permission to use the camera, allow it and press "
-                    "Start again. Otherwise it is usually already in use "
-                    "by another program.")
+            # Permission is settled before the device is opened now, by
+            # VideoWindow._may_use_camera, so reaching here with it
+            # allowed means something else has the camera - which on a
+            # Mac is usually a video call left running in a browser tab.
+            return ("That device would not open. It is usually already in "
+                    "use by another program - a video call in a browser "
+                    "tab is the common one.")
         return ("That device would not open. It is usually already in use "
                 "by another program.")
 
@@ -759,6 +821,8 @@ class VideoWindow(QWidget):
             index = self.device_combo.currentData()
             if index is None:
                 return
+            if not self._may_use_camera():
+                return
             reader = _Reader(index, size=self.res_combo.currentData(),
                              fps=self.fps_combo.currentData(),
                              smoothing=self.buffer_spin.value(),
@@ -774,6 +838,42 @@ class VideoWindow(QWidget):
         reader.start()
         self.start_btn.setText("Stop")
         self._say("Opening %s ..." % what)
+
+    def _may_use_camera(self):
+        """Whether a camera may be opened, asking macOS if it has not been
+        asked before.
+
+        False means do not open one now: either the user has refused, or
+        the question has just been put and the answer will arrive later -
+        in which case this starts again by itself once it has, so there is
+        nothing for the user to press twice.
+
+        This has to happen here rather than where the device is opened,
+        because the request only works from the main thread and the device
+        is opened on a worker. See _Reader._open.
+        """
+        from PySide6.QtCore import Qt
+        status = camera_permission()
+        if status is None or status == Qt.PermissionStatus.Granted:
+            return True                 # not macOS, or already allowed
+        if status == Qt.PermissionStatus.Denied:
+            self._say("macOS is not allowing MavGCS to use the camera. "
+                      "System Settings -> Privacy & Security -> Camera.")
+            return False
+
+        # Never asked. Put the question, and start when it is answered.
+        self._say("Waiting for you to allow MavGCS to use the camera ...")
+        request_camera_permission(self, self._camera_permission_answered)
+        return False
+
+    def _camera_permission_answered(self, permission):
+        """macOS has an answer. Start if it was yes."""
+        from PySide6.QtCore import Qt
+        if permission.status() == Qt.PermissionStatus.Granted:
+            self.start()
+        else:
+            self._say("Camera access was refused. System Settings -> "
+                      "Privacy & Security -> Camera.")
 
     def _opened(self, w, h):
         what = (self.url_edit.text().strip() if self._is_rtsp()
