@@ -26,11 +26,34 @@ The Windows numbers are measured rather than chosen: 816 is what a
 which is the machine the regression was found on, and 768 is the common
 laptop panel underneath that.
 
-The macOS numbers are provisional. They are the smallest logical
-resolutions Apple has shipped recently, less the menu bar, but nobody
-has flown this on such a machine - they want confirming by someone with
-a Mac in front of them, and lowering them to match a real one is a
-better answer than deleting the check.
+The macOS numbers are now measured rather than provisional, and they are
+maximised window heights with the Dock left where people leave it. On a
+16-inch MacBook Pro at stock settings the screen is 1792x1120 logical,
+the menu bar takes 30px and the Dock 90px, so a maximised window gets
+1000px. The Dock is the larger bite of the two and the easiest to forget:
+the numbers these replaced assumed it was hidden.
+
+Applying the same 90px Dock and a 25px menu bar - 37px on the notched
+machines - to the Airs that run macOS 12, which is what the bundle asks
+for:
+
+    MacBook Air 11in  (2015)       1366x768    653px
+    MacBook Air 13in  (2015-2020)  1440x900    785px
+      the same at "Larger Text"    1280x800    685px
+    MacBook Air 13.6in M2/M3       1470x956    829px
+    MacBook Air 15in  M2/M3        1710x1112   985px
+
+The three below are the 13.6-inch and 13-inch Airs with the Dock up, and
+the 13-inch at "Larger Text" with it hidden. The last is the tightest
+thing that fits and is kept for that reason.
+
+Two configurations do not fit and are not asserted, because a red suite
+would say the code is broken when the truth is that the screen is short:
+an 11-inch Air, which is 653px however the Dock is set, and a 13-inch at
+"Larger Text" with the Dock showing at 685px. Both scroll the left
+column, which is what the scroll area is for. If either has to be flown
+from, the column needs to come down by another 100px and that means the
+command buttons going back to the thin strips they were.
 """
 
 import os
@@ -51,7 +74,7 @@ DEAD_ADDRESS = "udp:127.0.0.1:14999"
 
 SIZES = {
     "win32": [(1536, 816), (1366, 768)],
-    "darwin": [(1440, 875), (1280, 775)],
+    "darwin": [(1470, 829), (1440, 785), (1280, 775)],
 }.get(sys.platform)
 
 if SIZES is None:

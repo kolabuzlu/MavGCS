@@ -192,18 +192,44 @@ with FakePlatform("darwin"):
     mac_address = vv._Reader("rtsp://camera/stream")._why_not_open(FakeCv2())
     no_ffmpeg = vv._Reader("rtsp://camera/stream")._why_not_open(
         FakeCv2(ffmpeg=False))
-# The first open of a device is the one that triggers the permission
-# prompt and fails, so on a Mac "already in use" is the wrong answer at
-# exactly the wrong moment.
-note("macOS device text mentions permission", "permission" in mac_device,
-     repr(mac_device))
+# Permission is settled before the device is opened - see section 7 - so
+# by the time this message is reached, something else has the camera. It
+# used to talk about the permission prompt, which was wrong twice over:
+# the prompt never appeared, and by now it cannot be the reason.
+note("macOS device text does not blame the permission prompt",
+     "permission" not in mac_device.lower(), repr(mac_device))
+note("macOS device text differs from the Windows one", mac_device != WAS_DEVICE)
 note("macOS keeps the plain address text when FFmpeg is there",
      mac_address == WAS_ADDRESS)
 note("an OpenCV with no FFmpeg says so, instead of blaming the address",
      "FFmpeg" in no_ffmpeg and no_ffmpeg != WAS_ADDRESS, repr(no_ffmpeg))
 
 print("")
-print("6. an OpenCV too old to be asked about its backends")
+print("6. the camera permission gate")
+# OpenCV's AVFoundation backend asks macOS for camera access itself and
+# can only do it from the main thread, so on the worker thread the open
+# failed and no prompt was ever shown. The window now asks first, on the
+# thread that can, and _Reader tells OpenCV not to. None of it applies
+# off macOS, and that is what is checked here - the gate must never stand
+# between Windows and a camera it was always allowed to open.
+with FakePlatform("win32"):
+    note("no permission question on Windows", vv.camera_permission() is None)
+with FakePlatform("linux"):
+    note("none anywhere else either", vv.camera_permission() is None)
+
+class FakeWindow:
+    """Only the two things _may_use_camera touches."""
+    said = None
+    def _say(self, text):
+        self.said = text
+    _may_use_camera = vv.VideoWindow._may_use_camera
+
+with FakePlatform("win32"):
+    note("Windows may always open a camera",
+         FakeWindow()._may_use_camera() is True)
+
+print("")
+print("7. an OpenCV too old to be asked about its backends")
 note("an unanswerable probe assumes FFmpeg, rather than inventing a cause",
      vv._has_ffmpeg(FakeCv2(ffmpeg=None)) is True)
 
