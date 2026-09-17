@@ -795,28 +795,27 @@ LEAFLET_HTML = """
 </div>
 <div id="agl-profile" title="Height above ground along the track: behind on the left, ahead on the right">
     <svg id="ap-svg" viewBox="0 0 300 140">
-        <text id="ap-cap" class="ap-cap" x="96" y="18" text-anchor="end">AGL</text>
-        <text id="ap-agl" class="ap-agl" x="100" y="19">--</text>
-        <text id="ap-ahead" class="ap-ahead" x="292" y="18" text-anchor="end">--</text>
-        <defs>
-            <!-- The plot box. The flight path is scaled to the ground
-                 rather than to itself, so a steep climb or descent leaves
-                 the panel; this is what stops it drawing over the
-                 readouts and the axis labels on its way out. -->
-            <clipPath id="ap-clip">
-                <rect x="34" y="30" width="258" height="86" />
-            </clipPath>
-        </defs>
-        <g id="ap-ticks"></g>
+        <!-- Painted in order, so what comes last sits on top. The flight
+             path is scaled to the ground rather than to itself, which
+             means a climb or descent runs out of the plot box - and it is
+             allowed to carry on to the edge of the panel, passing behind
+             the readouts and the axis labels rather than stopping dead at
+             an invisible line. Nothing clips it: the panel's own
+             overflow does that at the edge, which is where it belongs.
+             Hence the order here - grid, ground, path, marker, then every
+             piece of text. -->
+        <g id="ap-grid"></g>
         <path id="ap-ground" class="ap-ground" d="" />
         <path id="ap-ground-high" class="ap-ground-high" d="" />
-        <g clip-path="url(#ap-clip)">
-            <path id="ap-level-back" class="ap-level" fill="none" d="" />
-            <line id="ap-level-fwd" class="ap-level-ahead" x1="0" y1="0" x2="0" y2="0" />
-        </g>
+        <path id="ap-level-back" class="ap-level" fill="none" d="" />
+        <line id="ap-level-fwd" class="ap-level-ahead" x1="0" y1="0" x2="0" y2="0" />
         <line id="ap-now" class="ap-now" x1="0" y1="0" x2="0" y2="0" />
         <circle id="ap-uav-ring" class="ap-uav-ring" cx="0" cy="0" r="6" />
         <circle id="ap-uav-dot" class="ap-uav-dot" cx="0" cy="0" r="2" />
+        <g id="ap-labels"></g>
+        <text id="ap-cap" class="ap-cap" x="96" y="18" text-anchor="end">AGL</text>
+        <text id="ap-agl" class="ap-agl" x="100" y="19">--</text>
+        <text id="ap-ahead" class="ap-ahead" x="292" y="18" text-anchor="end">--</text>
     </svg>
 </div>
 <div id="terrain-radar">
@@ -3142,23 +3141,26 @@ function drawAglProfile() {
     document.getElementById('ap-uav-dot').setAttribute('cx', x0);
     document.getElementById('ap-uav-dot').setAttribute('cy', y0);
 
-    // Gridlines and distance ticks.
-    var g = '';
+    // Gridlines under everything, their labels over it, so a flight path
+    // crossing the bottom of the panel passes behind the distances rather
+    // than through them.
+    var grid = '', labels = '';
     var vstep = apNiceStep(hi - lo);
     for (var v = Math.ceil(lo / vstep) * vstep; v <= hi; v += vstep) {
         var y = yOf(v);
-        g += '<line class="ap-axis" x1="' + AP_L + '" y1="' + y.toFixed(1)
-           + '" x2="' + AP_R + '" y2="' + y.toFixed(1) + '"/>';
-        g += '<text class="ap-tick" x="' + (AP_L - 4) + '" y="' + (y + 3).toFixed(1)
-           + '" text-anchor="end">' + Math.round(v) + '</text>';
+        grid += '<line class="ap-axis" x1="' + AP_L + '" y1="' + y.toFixed(1)
+              + '" x2="' + AP_R + '" y2="' + y.toFixed(1) + '"/>';
+        labels += '<text class="ap-tick" x="' + (AP_L - 4) + '" y="' + (y + 3).toFixed(1)
+                + '" text-anchor="end">' + Math.round(v) + '</text>';
     }
     var hstep = apNiceStep(span);
     for (var dm = -Math.floor(apBehind / hstep) * hstep; dm <= apAhead; dm += hstep) {
         var x = xOf(dm);
-        g += '<text class="ap-tick" x="' + x.toFixed(1) + '" y="' + (AP_B + 12)
-           + '" text-anchor="middle">' + Math.abs(Math.round(dm)) + '</text>';
+        labels += '<text class="ap-tick" x="' + x.toFixed(1) + '" y="' + (AP_B + 12)
+                + '" text-anchor="middle">' + Math.abs(Math.round(dm)) + '</text>';
     }
-    document.getElementById('ap-ticks').innerHTML = g;
+    document.getElementById('ap-grid').innerHTML = grid;
+    document.getElementById('ap-labels').innerHTML = labels;
 
     // The two numbers. AGL is the gap right here; the one on the right is
     // the smallest gap anywhere ahead - measured against the path the

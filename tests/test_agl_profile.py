@@ -117,11 +117,12 @@ js += ("\nvar apElevs = null, apBehind = 0, apAhead = 0, apAmsl = null;"
 PAGE = """<!doctype html><html><body>
 <div id="agl-profile" style="display:none">
  <svg id="ap-svg" viewBox="0 0 300 140">
-  <text id="ap-agl"></text><text id="ap-ahead" class="ap-ahead"></text>
-  <g id="ap-ticks"></g>
+  <g id="ap-grid"></g>
   <path id="ap-ground" d=""/><path id="ap-ground-high" d=""/>
-  <line id="ap-level-back"/><line id="ap-level-fwd"/><line id="ap-now"/>
+  <path id="ap-level-back" d=""/><line id="ap-level-fwd"/><line id="ap-now"/>
   <circle id="ap-uav-ring"/><circle id="ap-uav-dot"/>
+  <g id="ap-labels"></g>
+  <text id="ap-agl"></text><text id="ap-ahead" class="ap-ahead"></text>
  </svg></div>
 <script>%s</script></body></html>""" % js
 
@@ -281,6 +282,29 @@ note("and so does a steep descent",
 note("the ground keeps a usable slice of the box",
      flat_band[1] - flat_band[0] >= 0 and flat_band[0] > 90,
      "y %.0f..%.0f of the 30..116 box" % flat_band)
+
+print("")
+print("a climb runs on past the plot box, behind the readouts")
+run("setAglProfile(%s,500,3500); setAglAltitude(1000,0.3,[]);"
+    % json.dumps([600.0] * 21))
+fwd = json.loads(run("JSON.stringify({y1:+document.getElementById('ap-level-fwd')"
+                     ".getAttribute('y1'),y2:+document.getElementById('ap-level-fwd')"
+                     ".getAttribute('y2')})") or "{}")
+# AP_T is 30: the top of the plot box. Above it is the header row.
+note("the far end climbs above the plot box", fwd["y2"] < 30,
+     "y %.0f, box top is 30" % fwd["y2"])
+note("and keeps going towards the top of the panel", fwd["y2"] < 10,
+     "y %.0f, panel top is 0" % fwd["y2"])
+
+order = run("(function(){var ids=[].slice.call("
+            "document.querySelectorAll('#ap-svg > *')).map(function(e){return e.id});"
+            "return ids.indexOf('ap-level-fwd') + ':' + ids.indexOf('ap-agl')"
+            " + ':' + ids.indexOf('ap-labels');})()")
+fwd_i, agl_i, lbl_i = (int(v) for v in order.split(":"))
+note("the readouts are painted after the path, so they sit on top",
+     agl_i > fwd_i, "path at %d, AGL text at %d" % (fwd_i, agl_i))
+note("and so are the axis labels", lbl_i > fwd_i,
+     "path at %d, labels at %d" % (fwd_i, lbl_i))
 
 print("")
 print("and the gap ahead is measured against that path")
