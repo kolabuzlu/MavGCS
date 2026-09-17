@@ -25,6 +25,36 @@ OpenCV then does the capture, because pygrabber's own frame grabber
 insists on RGB24 and fails against anything offering NV12 or YUY2 - OBS
 included.
 
+Cameras on macOS
+----------------
+AVFoundation is the only capture framework macOS has, so the question
+DirectShow answers on Windows does not arise here: OpenCV's AVFoundation
+backend opens devices by index out of the list AVFoundation itself
+publishes, and there is no second list for it to disagree with.
+
+Naming those indices is the awkward part, because AVFoundation is an
+Objective-C framework with no binding in this app's dependencies. The
+names come from `system_profiler SPCameraDataType`, which reports the
+same devices AVFoundation does and gives them the same unique IDs - the
+built-in camera's ID came back identical to the one Qt's AVFoundation
+enumeration reports for it. It costs a subprocess and about half a
+second, which is why it runs when the list is built rather than once per
+frame.
+
+That the two lists agree on ORDER, and not merely on contents, is an
+assumption rather than something checked here, and it is the weak point
+of this arrangement: a camera AVFoundation publishes but system_profiler
+does not list - a virtual one, most likely - would shift every name onto
+the wrong index and the window would play a different camera from the one
+named. Worth going to first if that is ever the symptom.
+
+Probing indices was the alternative and it cannot work. Opening a device
+is what triggers the camera permission prompt, and OpenCV does not wait
+for the answer: until permission has been granted once, every index
+fails with "not authorized to capture video". An enumeration that needs
+permission in order to count devices would report an empty list on every
+first run, and light the camera up to do it.
+
 Network cameras
 ---------------
 RTSP goes straight to FFmpeg through OpenCV. No relay, no streaming
@@ -52,7 +82,10 @@ Two more decisions worth knowing:
 """
 
 import collections
+import json
 import os
+import subprocess
+import sys
 import time
 
 from PySide6.QtCore import QPoint, QThread, Qt, Signal
@@ -82,6 +115,35 @@ RATES = [60, 30, 15]
 TRANSPORTS = [(AUTO, None), ("TCP", "tcp"), ("UDP", "udp")]
 
 
+def _windows_devices():
+    """DirectShow's own device order, which is OpenCV's index order."""
+    from pygrabber.dshow_graph import FilterGraph
+    return list(FilterGraph().get_input_devices())
+
+
+def _macos_devices():
+    """AVFoundation's device order, by way of system_profiler.
+
+    -json arrived in macOS 12, which is also the oldest macOS the Qt
+    wheels this app is built on support, so there is no machine that can
+    run MavGCS and not answer this.
+
+    A malformed entry is skipped rather than allowed to throw, because
+    the alternative is losing every camera on the machine over one odd
+    one.
+    """
+    out = subprocess.run(
+        ["system_profiler", "-json", "SPCameraDataType"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        timeout=15, check=True).stdout
+    names = []
+    for item in json.loads(out).get("SPCameraDataType") or []:
+        name = item.get("_name") if isinstance(item, dict) else None
+        if name:
+            names.append(str(name))
+    return names
+
+
 def list_devices():
     """Device names in the order OpenCV will open them by.
 
@@ -90,8 +152,14 @@ def list_devices():
     without a capture stack should still get a ground station.
     """
     try:
-        from pygrabber.dshow_graph import FilterGraph
-        return list(FilterGraph().get_input_devices())
+        if sys.platform == "win32":
+            return _windows_devices()
+        if sys.platform == "darwin":
+            return _macos_devices()
+        # Raised rather than returned, so the one log line below is the
+        # only place that has to explain an empty list.
+        raise RuntimeError("no camera enumeration for platform %r"
+                           % (sys.platform,))
     except Exception as exc:
         # Say why, into the log. A machine with no camera and a build that
         # failed to carry its COM support both end up showing an empty
@@ -103,6 +171,34 @@ def list_devices():
         except Exception:
             pass            # frozen and windowed, there is no stdout
         return []
+
+
+def _camera_backend(cv2):
+    """The capture backend for a local device on this platform.
+
+    Named explicitly on both rather than left to OpenCV's default:
+    CAP_ANY on Windows resolves to Media Foundation, which is the one
+    thing this window exists to avoid. Getting it wrong is quiet - the
+    constants are defined on every platform, so cv2.CAP_DSHOW is still
+    700 on a Mac and simply opens nothing - so it fails at Start rather
+    than at import, which is the hardest kind of failure to place.
+    """
+    if sys.platform == "darwin":
+        return cv2.CAP_AVFOUNDATION
+    return cv2.CAP_DSHOW
+
+
+def _has_ffmpeg(cv2):
+    """Whether this OpenCV can open a network stream at all.
+
+    True when it cannot be determined: an unhelpful message beats an
+    invented explanation, and this only decides which of two things to
+    say about a failure that has already happened.
+    """
+    try:
+        return bool(cv2.videoio_registry.hasBackend(cv2.CAP_FFMPEG))
+    except Exception:
+        return True
 
 
 class _Reader(QThread):
@@ -138,7 +234,8 @@ class _Reader(QThread):
         params = ([cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_NONE]
                   if self._no_accel else [])
         if isinstance(self._source, int):
-            return cv2.VideoCapture(self._source, cv2.CAP_DSHOW, params)
+            return cv2.VideoCapture(self._source, _camera_backend(cv2),
+                                    params)
         # FFmpeg reads its options from the environment at capture time.
         # stimeout is in microseconds and stops a silent camera hanging
         # the read for ever; the transport is the part worth choosing.
@@ -148,6 +245,34 @@ class _Reader(QThread):
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts)
         return cv2.VideoCapture(self._source, cv2.CAP_FFMPEG, params)
 
+    def _why_not_open(self, cv2):
+        """What to tell the user when the source refused to open."""
+        if not isinstance(self._source, int):
+            # An OpenCV with no FFmpeg fails exactly the way a mistyped
+            # address does - instantly, with nothing to show - and
+            # blaming the address sends the user to check the one thing
+            # that is not wrong. The macOS opencv-python wheels stopped
+            # carrying FFmpeg after 4.12; the Windows ones still do, so
+            # this is not a message Windows can produce.
+            if not _has_ffmpeg(cv2):
+                return ("This build has no FFmpeg backend, so network "
+                        "cameras cannot be opened at all. On macOS, "
+                        "opencv-python-headless 4.12 is the last version "
+                        "that ships one.")
+            return "That address did not answer."
+        if sys.platform == "darwin":
+            # The first open of a device is also the one that asks macOS
+            # for camera permission, and OpenCV does not wait for the
+            # answer - it fails that attempt and would succeed on the
+            # next. Blaming another program for that is a wrong answer at
+            # exactly the moment the user is looking at the prompt.
+            return ("That device would not open. If macOS has just asked "
+                    "for permission to use the camera, allow it and press "
+                    "Start again. Otherwise it is usually already in use "
+                    "by another program.")
+        return ("That device would not open. It is usually already in use "
+                "by another program.")
+
     def run(self):
         import cv2
         cap = self._open(cv2)
@@ -155,11 +280,7 @@ class _Reader(QThread):
             cap.release()
             if self._stop:
                 return          # cancelled while it was still trying
-            self.failed.emit(
-                "That address did not answer." if not isinstance(
-                    self._source, int) else
-                "That device would not open. It is usually already in use "
-                "by another program.")
+            self.failed.emit(self._why_not_open(cv2))
             return
         try:
             if isinstance(self._source, int):

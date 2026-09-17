@@ -6,15 +6,25 @@ tifffile
 imagecodecs
 # Video window. DirectShow is the only way to see virtual
 # cameras on Windows; Qt's own camera support cannot.
-# pygrabber names the devices, OpenCV reads the frames.
+# pygrabber names the devices, OpenCV reads the frames. macOS needs no
+# equivalent: it names devices with system_profiler, which is part of the
+# system, and captures through OpenCV's AVFoundation backend.
 #
 # pygrabber is marked Windows-only because its comtypes dependency does
 # "from ctypes import HRESULT, OleDLL, WinDLL" at module scope. Both ship
 # as pure-Python py3-none-any wheels, so pip installs them anywhere
-# happily and the failure only appears at import - where list_devices()
-# catches it and reports an empty device list. That is the right
-# behaviour for a machine with no capture stack, and the wrong way to
-# find out a dependency does not belong on the platform.
+# happily and the failure only appears at import. list_devices() now
+# chooses its enumerator by platform and so never reaches that import off
+# Windows, but the marker stays: a dependency should say where it
+# belongs, and a dead DirectShow stack has no business on a Mac.
+#
+# Note for whoever next touches this line: the macOS opencv-python wheels
+# stopped carrying FFmpeg after 4.12 - 4.14 and 5.0 report "FFMPEG: NO"
+# and cannot open an RTSP stream at all, while the Windows wheels still
+# ship opencv_videoio_ffmpeg*.dll and are unaffected. Network cameras on
+# a Mac therefore need "opencv-python-headless<4.13", which is a real
+# trade-off (two years of fixes) and so is left as a decision rather
+# than made here. Local USB and capture-card cameras work on any version.
 opencv-python-headless
 pygrabber; sys_platform == "win32"
 # The QR code for the aircraft's last position. Pure Python and no
