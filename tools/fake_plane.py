@@ -29,6 +29,10 @@ ap.add_argument("--radius", type=float, default=150.0)      # m
 ap.add_argument("--speed", type=float, default=20.0)        # m/s ground
 ap.add_argument("--alt", type=float, default=100.0)         # m AGL
 ap.add_argument("--attitude-hz", type=float, default=5.0)
+ap.add_argument("--ignore-param-sets", type=int, default=0,
+                help="silently drop this many PARAM_SET writes before "
+                     "honouring one - a lossy link swallowing a write, "
+                     "which has no acknowledgement to miss")
 ap.add_argument("--ignore-mode-requests", type=int, default=0,
                 help="silently drop this many DO_SET_MODE commands before "
                      "honouring one - what a lossy link does to a button "
@@ -117,6 +121,7 @@ us = lambda: int((time.time() - T0) * 1e6)
 armed = True
 mode_loiter = 12
 mode_drops_left = args.ignore_mode_requests
+param_drops_left = args.ignore_param_sets
 
 
 def tick_heartbeat():
@@ -331,8 +336,17 @@ while True:
     elif typ == "PARAM_SET":
         pid = m.param_id.decode(errors="replace") if isinstance(m.param_id, bytes) else m.param_id
         pid = pid.rstrip("\x00")
+        if param_drops_left > 0:
+            # Pretend it never arrived. A PARAM_SET has no acknowledgement,
+            # so from the sender's side this is indistinguishable from a
+            # link that swallowed it - which is the point.
+            param_drops_left -= 1
+            log("<- PARAM_SET %s  DROPPED (%d more will be)"
+                % (pid, param_drops_left))
+            continue
         if pid in index_of:
             values[pid] = float(m.param_value)
+            log("<- PARAM_SET %s=%s  accepted" % (pid, m.param_value))
             guarded("PARAM_VALUE", send_param, pid, index_of[pid])
     elif typ == "COMMAND_LONG":
         if m.command == M.MAV_CMD_COMPONENT_ARM_DISARM:

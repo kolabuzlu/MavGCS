@@ -4187,6 +4187,8 @@ class MainWindow(QMainWindow):
         self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
         self.map_view.video_requested.connect(self.on_video_requested)
         self.map_view.qr_requested.connect(self.on_qr_requested)
+        self.map_view.terrain_follow_requested.connect(
+            self.on_terrain_follow_requested)
         self.map_view.terrain_cache_limit_changed.connect(self.on_terrain_cache_limit)
         self.map_view.terrain_cache_clear_requested.connect(self.on_terrain_cache_clear)
         # Keep the map's cache readout current: the size changes as tiles
@@ -4573,6 +4575,18 @@ class MainWindow(QMainWindow):
         )
 
     # ---- update checking ------------------------------------------------
+
+    def on_terrain_follow_requested(self, on):
+        """The Terrain Follow button, pressed.
+
+        Allowed in the air on purpose. The armed gate stops MavGCS
+        talking to a flying aircraft on its own account; it was never
+        meant to stop the pilot pressing something, and terrain following
+        is exactly the sort of thing wanted while flying.
+        """
+        link = self._require_link()
+        if link:
+            link.set_terrain_follow(bool(on))
 
     def on_qr_requested(self):
         """Show the last known position as a QR code.
@@ -5950,6 +5964,8 @@ class MainWindow(QMainWindow):
         self.link.gps_quality_update.connect(self.sensor_panel.set_gps_quality)
         self.link.fence_uploaded.connect(self.on_fence_uploaded)
         self.link.fence_enabled_update.connect(self.on_fence_enabled)
+        self.link.terrain_follow_update.connect(
+            self.map_view.set_terrain_follow)
         self.link.fence_failed.connect(self.on_fence_failed)
         self.link.set_home_result.connect(self.on_set_home_result)
         self.link.param_progress.connect(self.on_param_progress)
@@ -6171,6 +6187,10 @@ class MainWindow(QMainWindow):
         # With the link gone nothing is being sent any more, so a button
         # left lit would be claiming MavGCS is still trying.
         self.mode_panel.set_pending_mode("")
+        # Same reasoning: with no aircraft to ask, the button cannot claim
+        # to know what TERRAIN_FOLLOW is, and it certainly is not still
+        # trying to set it.
+        self.map_view.set_terrain_follow(False, False)
         self.horizon.set_ekf_status("white")
         self.horizon.set_vibe_status("white")
         # Stop the terrain radar refreshing off the last known position.

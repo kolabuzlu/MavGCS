@@ -227,6 +227,13 @@ class MavlinkLink(QThread):
     # rather than remembered from whatever was last pressed here.
     fence_enabled_update = Signal(bool)
 
+    # TERRAIN_FOLLOW as the aircraft reports it, from any source: our own
+    # write, the parameter window, or another ground station entirely.
+    # The bool is the state; the second says whether a write of ours is
+    # still outstanding, so the button can show it is working rather than
+    # looking as though the press did nothing.
+    terrain_follow_update = Signal(bool, bool)
+
     # The vehicle accepted a fence, so the map may stop showing it as
     # pending.
     fence_uploaded = Signal()
@@ -360,6 +367,12 @@ class MavlinkLink(QThread):
         self._mode_wanted = None
         self._mode_retry_next = 0.0
         self._mode_retry_until = 0.0
+        # TERRAIN_FOLLOW: what the aircraft last said, and what we have
+        # asked it to be and not yet seen echoed. See set_terrain_follow.
+        self._terrain_follow = None
+        self._tf_wanted = None
+        self._tf_retry_next = 0.0
+        self._tf_retry_until = 0.0
         self.master = None
         # mav.xxx_send() ends up doing a single socket write, but it's
         # called both from this thread's heartbeat loop and from the GUI
@@ -583,6 +596,7 @@ class MavlinkLink(QThread):
             self.apply_stream_rates()
             self._request_battery_limits()
             self._request_fence_params()
+            self._request_terrain_follow()
             self._param_retries = 0
             self._param_retry_next = time.time() + self.PARAM_RETRY_EVERY_S
             if self._want_elevator:
@@ -622,6 +636,8 @@ class MavlinkLink(QThread):
             # rather than look like it is still trying.
             # A mode press that the link swallowed, sent again.
             self._drive_mode_request(now)
+            # And the same for a terrain-following press.
+            self._drive_terrain_follow(now)
 
             if self._ftp is not None:
                 self._drive_param_ftp(now)
@@ -1020,6 +1036,11 @@ class MavlinkLink(QThread):
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
                     )
+                elif name == "TERRAIN_FOLLOW":
+                    # Whatever drew this reading - our own write, the
+                    # parameter window, another ground station, a
+                    # parameter file - the button follows the aircraft.
+                    self._on_terrain_follow_value(msg.param_value)
                 elif name == "TRIM_THROTTLE":
                     self._trim_throttle = float(msg.param_value)
                     self.trim_throttle_update.emit(self._trim_throttle)
@@ -1813,6 +1834,104 @@ class MavlinkLink(QThread):
                         self.master.target_component, name, -1)
         except Exception:
             pass
+
+    # Terrain following is a parameter, not a command, and a PARAM_SET is
+    # fire-and-forget: there is no acknowledgement, only the echoed
+    # PARAM_VALUE. On a link that drops packets a press can therefore go
+    # nowhere silently, and a pilot believing terrain following is on when
+    # it is off is the wrong way round for that mistake. So it is repeated
+    # until the aircraft echoes it, on the same bounded terms as a mode
+    # change: long enough to ride out a dropout, short enough that it
+    # cannot fight somebody changing it elsewhere.
+    TF_RETRY_EVERY_S = 1.5
+    TF_RETRY_FOR_S = 12.0
+
+    def _request_terrain_follow(self):
+        """Ask what TERRAIN_FOLLOW is, rather than assuming it is off."""
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_read_send(
+                    self.master.target_system, self.master.target_component,
+                    b"TERRAIN_FOLLOW", -1)
+        except Exception:
+            pass
+
+    def set_terrain_follow(self, on: bool):
+        """Turn terrain following on or off on the aircraft.
+
+        Deliberately allowed in flight. The armed gate exists to stop
+        MavGCS chattering at a flying aircraft on its own account - the
+        balance check's reads, the whole parameter list - not to stop the
+        pilot from pressing something. Terrain following is exactly the
+        kind of thing wanted in the air, and it is one small write.
+        """
+        if self.master is None:
+            self.command_feedback.emit(
+                "Not connected - can't change terrain following")
+            return
+        want = bool(on)
+        self._tf_wanted = want
+        now = time.time()
+        self._tf_retry_next = now + self.TF_RETRY_EVERY_S
+        self._tf_retry_until = now + self.TF_RETRY_FOR_S
+        self._send_terrain_follow(want)
+        # Report straight away so the button can show it is working; the
+        # state shown is still the aircraft's last word, not the wish.
+        self._emit_terrain_follow()
+        self.command_feedback.emit(
+            "Terrain following: asked for %s" % ("on" if want else "off"))
+
+    def _send_terrain_follow(self, want):
+        try:
+            with self._send_lock:
+                self._set_param(b"TERRAIN_FOLLOW", 1.0 if want else 0.0)
+        except Exception as e:
+            self.command_feedback.emit(
+                "Failed to set terrain following: %s" % e)
+
+    def _emit_terrain_follow(self):
+        self.terrain_follow_update.emit(bool(self._terrain_follow),
+                                        self._tf_wanted is not None)
+
+    def _drive_terrain_follow(self, now):
+        """Send the outstanding TERRAIN_FOLLOW again, or give up on it."""
+        if self._tf_wanted is None or self.master is None:
+            return
+        if now >= self._tf_retry_until:
+            wanted = self._tf_wanted
+            self._tf_wanted = None
+            self._emit_terrain_follow()
+            self.command_feedback.emit(
+                "Terrain following: the aircraft never confirmed %s - too "
+                "much of the link is being lost. Press it again."
+                % ("on" if wanted else "off"))
+            return
+        if now < self._tf_retry_next:
+            return
+        self._tf_retry_next = now + self.TF_RETRY_EVERY_S
+        self._send_terrain_follow(self._tf_wanted)
+        # Ask as well as tell: on a link losing packets in both directions
+        # the echo is as likely to go missing as the write.
+        self._request_terrain_follow()
+
+    def _on_terrain_follow_value(self, value):
+        """A TERRAIN_FOLLOW reading, from wherever it came."""
+        state = bool(int(value))
+        changed = state != self._terrain_follow
+        self._terrain_follow = state
+        if self._tf_wanted is not None and state == self._tf_wanted:
+            self._tf_wanted = None          # the aircraft agrees; done
+            self.command_feedback.emit(
+                "Terrain following is %s" % ("on" if state else "off"))
+        elif changed:
+            # Somebody else moved it - the parameter window, another
+            # ground station, or a parameter file being loaded.
+            self.command_feedback.emit(
+                "Terrain following changed to %s on the aircraft"
+                % ("on" if state else "off"))
+        self._emit_terrain_follow()
 
     def _request_battery_limits(self):
         """What the pack holds, and what the aircraft calls too low.

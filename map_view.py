@@ -222,6 +222,39 @@ LEAFLET_HTML = """
   #qr-btn:hover { background: rgba(0,0,0,0.8); border-color: rgba(255,255,255,0.30); }
   #qr-btn:active { background: rgba(0,0,0,0.95); }
 
+  #tf-btn {
+    /* Top of the left-hand stack: balance at 40, home reach at 109, ETA
+       at 162. That one is a single 21px row, so this clears it at 191.
+       Same backing, padding and radius as those readouts, because it
+       belongs to that column - the border is what says it can be pressed. */
+    position: absolute; bottom: 191px; left: 8px;
+    box-sizing: border-box;
+    padding: 4px 10px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 4px;
+    color: #cfd8e0;
+    font-family: sans-serif; font-size: 11px;
+    cursor: pointer;
+    z-index: 1000;
+  }
+  #tf-btn:hover { border-color: rgba(255,255,255,0.32); }
+  /* The same green the active flight mode uses, so "this is on" reads the
+     same wherever it appears. */
+  #tf-btn.on {
+    background: rgba(34,170,102,0.88);
+    border-color: rgba(255,255,255,0.25);
+    color: #fff; font-weight: bold;
+  }
+  /* Asked for, not yet confirmed - the amber the mode buttons use for the
+     same thing. It sits on top of the green class so a press away from an
+     already-on state still reads as pending rather than staying green. */
+  #tf-btn.pending {
+    background: rgba(216,180,0,0.88);
+    border-color: rgba(255,255,255,0.25);
+    color: #2a2200; font-weight: bold;
+  }
+
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
        same size and position so the two read as one stack of instruments.
@@ -688,6 +721,8 @@ LEAFLET_HTML = """
 </div>
 <button id="video-btn" type="button"
         title="Show a camera or capture card in its own window">Live Video</button>
+<button id="tf-btn" type="button"
+        title="TERRAIN_FOLLOW on the aircraft - green when it is on">Terrain Follow</button>
 <div id="compass" title="Heading (white), course over ground (orange), wind (blue)">
     <svg id="cp-svg" viewBox="0 0 200 200">
         <circle class="cp-face" cx="100" cy="100" r="94" />
@@ -769,6 +804,31 @@ function wireVideoButton() {
     btn.addEventListener('click', function (e) {
         e.preventDefault();
         if (bridge) { bridge.videoRequested(); }
+    });
+}
+
+// What the aircraft last said TERRAIN_FOLLOW is. The button sends the
+// opposite of this, so it toggles what is actually set rather than what
+// was last pressed here - those differ the moment anything else changes
+// it.
+var terrainFollowOn = false;
+
+function setTerrainFollow(on, pending) {
+    var btn = document.getElementById('tf-btn');
+    terrainFollowOn = !!on;
+    if (!btn) { return; }
+    btn.classList.toggle('on', !!on);
+    btn.classList.toggle('pending', !!pending);
+}
+
+function wireTerrainFollowButton() {
+    var btn = document.getElementById('tf-btn');
+    if (!btn) { return; }
+    L.DomEvent.disableClickPropagation(btn);
+    L.DomEvent.disableScrollPropagation(btn);
+    btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        if (bridge) { bridge.terrainFollowRequested(!terrainFollowOn); }
     });
 }
 
@@ -1205,6 +1265,7 @@ updateZoomIndicator();
 // After Leaflet exists, because the button borrows its click guards.
 wireVideoButton();
 wireQrButton();
+wireTerrainFollowButton();
 
 var tilesFailed = false;
 var TILE_RETRY_MS = 15000;
@@ -2994,6 +3055,7 @@ class Bridge(QObject):
     terrain_cache_clear_requested = Signal()
     video_requested = Signal()
     qr_requested = Signal()
+    terrain_follow_requested = Signal(bool)
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
@@ -3057,6 +3119,10 @@ class Bridge(QObject):
     def qrRequested(self):
         self.qr_requested.emit()
 
+    @Slot(bool)
+    def terrainFollowRequested(self, on):
+        self.terrain_follow_requested.emit(bool(on))
+
     @Slot()
     def tileCacheClearRequested(self):
         self.tile_cache_clear_requested.emit()
@@ -3083,6 +3149,7 @@ class MapView(QWebEngineView):
     terrain_cache_clear_requested = Signal()
     video_requested = Signal()
     qr_requested = Signal()
+    terrain_follow_requested = Signal(bool)
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
@@ -3133,6 +3200,8 @@ class MapView(QWebEngineView):
             self.video_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.qr_requested.connect(
             self.qr_requested, Qt.ConnectionType.QueuedConnection)
+        self._bridge.terrain_follow_requested.connect(
+            self.terrain_follow_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_cache_limit_changed.connect(
             self.terrain_cache_limit_changed, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_cache_clear_requested.connect(
@@ -3175,6 +3244,18 @@ class MapView(QWebEngineView):
         self.page().runJavaScript(
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
+
+    def set_terrain_follow(self, on: bool, pending: bool = False):
+        """Show what TERRAIN_FOLLOW is on the aircraft.
+
+        `on` is the aircraft's own last word, never what was pressed
+        here: those part company the moment the parameter window or
+        another ground station changes it. `pending` says a write of ours
+        is still outstanding.
+        """
+        self.page().runJavaScript(
+            "setTerrainFollow(%s, %s);"
+            % (json.dumps(bool(on)), json.dumps(bool(pending))))
 
     def set_eta(self, label: str, value: str = ""):
         """Time to the next waypoint, above the balance indicator.
