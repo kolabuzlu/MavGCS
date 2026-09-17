@@ -312,6 +312,42 @@ LEAFLET_HTML = """
      rather than the eye having to work out which blue is which. */
   #compass .cp-wind-shaft { stroke: #1e9fd6; stroke-width: 4; stroke-linecap: round; }
   #compass .cp-wind-head { fill: #1e9fd6; }
+  #agl-profile {
+    /* Immediately left of the terrain radar, sharing its bottom edge and
+       its backing, so the two read as one instrument: the radar says
+       where the ground is around you, this says where it is along the
+       track you are actually making good. Wider than tall because it is
+       a side-on slice - distance runs a long way, height does not. */
+    position: absolute; bottom: 26px; right: 216px;
+    width: 300px; height: 140px;
+    background: rgba(30,30,30,0.75);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    z-index: 1000;
+    overflow: hidden;
+    font-family: sans-serif;
+    display: none;          /* until there is ground to draw */
+  }
+  #agl-profile svg { display: block; width: 100%; height: 100%; }
+  #agl-profile .ap-cap { fill: #37a8db; font-size: 10px; font-weight: bold; }
+  #agl-profile .ap-agl { fill: #fff; font-size: 15px; font-weight: bold; }
+  #agl-profile .ap-ahead { fill: #cfd8e0; font-size: 13px; font-weight: bold; }
+  /* Turns amber then red as the gap ahead closes - the number is the
+     point of the whole panel, so it should not need reading to alarm. */
+  #agl-profile .ap-ahead.warn { fill: #e8c33a; }
+  #agl-profile .ap-ahead.bad  { fill: #ff6b6b; }
+  #agl-profile .ap-axis { stroke: rgba(255,255,255,0.14); stroke-width: 1; }
+  #agl-profile .ap-tick { fill: #8e9aa4; font-size: 8px; }
+  #agl-profile .ap-ground { fill: rgba(181,160,122,0.55); stroke: #b5a07a; stroke-width: 1; }
+  /* Ground standing above the aircraft is not scenery, it is the thing
+     you hit, so it is drawn in its own colour rather than the same tan. */
+  #agl-profile .ap-ground-high { fill: rgba(200,80,80,0.45); stroke: #e06060; stroke-width: 1; }
+  #agl-profile .ap-level { stroke: #37a8db; stroke-width: 1.5; }
+  #agl-profile .ap-level-ahead { stroke: #37a8db; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  #agl-profile .ap-now { stroke: rgba(255,255,255,0.30); stroke-width: 1; stroke-dasharray: 3 3; }
+  #agl-profile .ap-uav-ring { fill: rgba(55,168,219,0.25); stroke: #fff; stroke-width: 2; }
+  #agl-profile .ap-uav-dot { fill: #fff; }
+
   #terrain-radar {
     position: absolute; bottom: 26px; right: 8px;
     width: 200px; height: 200px;
@@ -755,6 +791,21 @@ LEAFLET_HTML = """
         <text class="cp-course" id="cp-course" x="100" y="79">---</text>
         <text class="cp-heading" id="cp-heading" x="100" y="103">---</text>
         <text class="cp-windtext" id="cp-windtext" x="100" y="134">--</text>
+    </svg>
+</div>
+<div id="agl-profile" title="Height above ground along the track: behind on the left, ahead on the right">
+    <svg id="ap-svg" viewBox="0 0 300 140">
+        <text id="ap-cap" class="ap-cap" x="96" y="18" text-anchor="end">AGL</text>
+        <text id="ap-agl" class="ap-agl" x="100" y="19">--</text>
+        <text id="ap-ahead" class="ap-ahead" x="292" y="18" text-anchor="end">--</text>
+        <g id="ap-ticks"></g>
+        <path id="ap-ground" class="ap-ground" d="" />
+        <path id="ap-ground-high" class="ap-ground-high" d="" />
+        <line id="ap-level-back" class="ap-level" x1="0" y1="0" x2="0" y2="0" />
+        <line id="ap-level-fwd" class="ap-level-ahead" x1="0" y1="0" x2="0" y2="0" />
+        <line id="ap-now" class="ap-now" x1="0" y1="0" x2="0" y2="0" />
+        <circle id="ap-uav-ring" class="ap-uav-ring" cx="0" cy="0" r="6" />
+        <circle id="ap-uav-dot" class="ap-uav-dot" cx="0" cy="0" r="2" />
     </svg>
 </div>
 <div id="terrain-radar">
@@ -2889,6 +2940,198 @@ function setTerrainRef(altMsl, groundSpeed, climbMps) {
     trRenderTerrainRadar();
 }
 
+// ---- height above ground along the track ------------------------------
+//
+// Two inputs arriving at very different rates. The ground comes from a
+// worker thread whenever the aircraft has moved far enough to be worth
+// re-reading tiles - seconds apart, sometimes longer. The altitude comes
+// with every telemetry frame. Keeping them apart means the trace follows
+// a climb or descent smoothly without asking the disk for a hillside that
+// has not moved.
+var apElevs = null;      // metres AMSL, or null per sample where no tile
+var apBehind = 0;        // metres of track astern
+var apAhead = 0;         // metres ahead
+var apAmsl = null;       // the aircraft, metres AMSL
+
+var AP_L = 34, AP_R = 292, AP_T = 30, AP_B = 116;   // the plot box
+
+function setAglProfile(elevs, behindM, aheadM) {
+    apElevs = elevs;
+    apBehind = behindM;
+    apAhead = aheadM;
+    drawAglProfile();
+}
+
+function setAglAltitude(amsl) {
+    apAmsl = amsl;
+    drawAglProfile();
+}
+
+function clearAglProfile() {
+    apElevs = null;
+    apAmsl = null;
+    var box = document.getElementById('agl-profile');
+    if (box) { box.style.display = 'none'; }
+}
+
+function apNiceStep(span, want) {
+    // A round number of metres per gridline, whatever the span turns out
+    // to be - 1, 2 or 5 times a power of ten. `want` is roughly how many
+    // gridlines are wanted: five reads about right at this size, and
+    // three left the distance axis labelled only at 0 and 2000.
+    var raw = span / (want || 5.0);
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var n = raw / mag;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag;
+}
+
+function drawAglProfile() {
+    var box = document.getElementById('agl-profile');
+    if (!box) { return; }
+    if (!apElevs || !apElevs.length || apAmsl === null) {
+        box.style.display = 'none';
+        return;
+    }
+    // Relative to the aircraft: negative is below it, positive is ground
+    // standing higher than it is flying.
+    var n = apElevs.length, span = apBehind + apAhead;
+    var rel = [], any = false, lo = 0, hi = 0;
+    for (var i = 0; i < n; i++) {
+        var e = apElevs[i];
+        if (e === null || e === undefined) { rel.push(null); continue; }
+        var r = e - apAmsl;
+        rel.push(r);
+        if (!any) { lo = hi = r; any = true; }
+        lo = Math.min(lo, r); hi = Math.max(hi, r);
+    }
+    if (!any) { box.style.display = 'none'; return; }
+    // 'block', not '': the stylesheet hides this panel until there is
+    // ground to draw, and clearing the inline style just lets that rule
+    // win again. It has to be overridden with a real value.
+    box.style.display = 'block';
+
+    // Always show the aircraft's own level, and never squash the picture
+    // into a sliver when the ground happens to be flat.
+    hi = Math.max(hi, 0); lo = Math.min(lo, 0);
+    if (hi - lo < 60) { lo = hi - 60; }
+    var pad = (hi - lo) * 0.12;
+    hi += pad; lo -= pad;
+
+    var xOf = function (d) {
+        return AP_L + (AP_R - AP_L) * (d + apBehind) / span;
+    };
+    var yOf = function (r) {
+        return AP_B - (AP_B - AP_T) * (r - lo) / (hi - lo);
+    };
+    var distOf = function (i) { return -apBehind + span * i / (n - 1); };
+
+    // The ground, as one filled shape down to the bottom of the box. Gaps
+    // where no tile has arrived break it rather than being bridged with a
+    // straight line, which would draw ground that was never measured.
+    var below = [], above = [];
+    var run = null;
+    for (i = 0; i < n; i++) {
+        if (rel[i] === null) {
+            if (run && run.length > 1) { below.push(run); }
+            run = null;
+            continue;
+        }
+        if (!run) { run = []; }
+        run.push([xOf(distOf(i)), yOf(rel[i])]);
+    }
+    if (run && run.length > 1) { below.push(run); }
+
+    var d = '';
+    below.forEach(function (seg) {
+        d += 'M' + seg[0][0].toFixed(1) + ',' + AP_B.toFixed(1);
+        seg.forEach(function (p) { d += 'L' + p[0].toFixed(1) + ',' + p[1].toFixed(1); });
+        d += 'L' + seg[seg.length - 1][0].toFixed(1) + ',' + AP_B.toFixed(1) + 'Z';
+    });
+    document.getElementById('ap-ground').setAttribute('d', d);
+
+    // Anything above the aircraft's level again, clipped at that level, so
+    // the part that is actually a problem is the part that is red.
+    var dh = '';
+    below.forEach(function (seg) {
+        var start = null, pts = [];
+        seg.forEach(function (p) {
+            if (p[1] <= yOf(0)) {           // smaller y is higher up
+                if (start === null) { start = p[0]; pts = []; }
+                pts.push(p);
+            } else if (start !== null) {
+                dh += apHighPath(start, pts, yOf(0));
+                start = null;
+            }
+        });
+        if (start !== null) { dh += apHighPath(start, pts, yOf(0)); }
+    });
+    document.getElementById('ap-ground-high').setAttribute('d', dh);
+
+    // The aircraft's own level: solid behind it, dashed ahead, because
+    // ahead is a projection of the current altitude rather than a fact.
+    var y0 = yOf(0), x0 = xOf(0);
+    var back = document.getElementById('ap-level-back');
+    back.setAttribute('x1', AP_L); back.setAttribute('x2', x0);
+    back.setAttribute('y1', y0); back.setAttribute('y2', y0);
+    var fwd = document.getElementById('ap-level-fwd');
+    fwd.setAttribute('x1', x0); fwd.setAttribute('x2', AP_R);
+    fwd.setAttribute('y1', y0); fwd.setAttribute('y2', y0);
+    var now = document.getElementById('ap-now');
+    now.setAttribute('x1', x0); now.setAttribute('x2', x0);
+    now.setAttribute('y1', AP_T); now.setAttribute('y2', AP_B);
+    document.getElementById('ap-uav-ring').setAttribute('cx', x0);
+    document.getElementById('ap-uav-ring').setAttribute('cy', y0);
+    document.getElementById('ap-uav-dot').setAttribute('cx', x0);
+    document.getElementById('ap-uav-dot').setAttribute('cy', y0);
+
+    // Gridlines and distance ticks.
+    var g = '';
+    var vstep = apNiceStep(hi - lo);
+    for (var v = Math.ceil(lo / vstep) * vstep; v <= hi; v += vstep) {
+        var y = yOf(v);
+        g += '<line class="ap-axis" x1="' + AP_L + '" y1="' + y.toFixed(1)
+           + '" x2="' + AP_R + '" y2="' + y.toFixed(1) + '"/>';
+        g += '<text class="ap-tick" x="' + (AP_L - 4) + '" y="' + (y + 3).toFixed(1)
+           + '" text-anchor="end">' + Math.round(v) + '</text>';
+    }
+    var hstep = apNiceStep(span);
+    for (var dm = -Math.floor(apBehind / hstep) * hstep; dm <= apAhead; dm += hstep) {
+        var x = xOf(dm);
+        g += '<text class="ap-tick" x="' + x.toFixed(1) + '" y="' + (AP_B + 12)
+           + '" text-anchor="middle">' + Math.abs(Math.round(dm)) + '</text>';
+    }
+    document.getElementById('ap-ticks').innerHTML = g;
+
+    // The two numbers. AGL is the gap right here; the one on the right is
+    // the smallest gap anywhere ahead, which is the one worth watching.
+    var mid = null, worst = null;
+    for (i = 0; i < n; i++) {
+        if (rel[i] === null) { continue; }
+        if (mid === null || Math.abs(distOf(i)) < Math.abs(distOf(mid))) { mid = i; }
+        if (distOf(i) >= 0 && (worst === null || rel[i] > rel[worst])) { worst = i; }
+    }
+    var aglEl = document.getElementById('ap-agl');
+    aglEl.textContent = (mid === null) ? '--' : Math.round(-rel[mid]) + ' m';
+    var aheadEl = document.getElementById('ap-ahead');
+    aheadEl.setAttribute('class', 'ap-ahead');
+    if (worst === null) {
+        aheadEl.textContent = '--';
+    } else {
+        var clear = -rel[worst];
+        aheadEl.textContent = '▸ ' + Math.round(clear) + ' m';
+        if (clear <= 0) { aheadEl.setAttribute('class', 'ap-ahead bad'); }
+        else if (clear < 50) { aheadEl.setAttribute('class', 'ap-ahead warn'); }
+    }
+}
+
+function apHighPath(x0, pts, yLevel) {
+    if (!pts.length) { return ''; }
+    var s = 'M' + x0.toFixed(1) + ',' + yLevel.toFixed(1);
+    pts.forEach(function (p) { s += 'L' + p[0].toFixed(1) + ',' + p[1].toFixed(1); });
+    s += 'L' + pts[pts.length - 1][0].toFixed(1) + ',' + yLevel.toFixed(1) + 'Z';
+    return s;
+}
+
 function setTerrainFan(elevJson, rangeM, angCells, radCells) {
     trFan = { elev: elevJson, rangeM: rangeM, angCells: angCells, radCells: radCells };
     trBuildTerrainGeometry();
@@ -3340,6 +3583,20 @@ class MapView(QWebEngineView):
 
     def commit_waypoints(self):
         self.page().runJavaScript("commitWaypoints();")
+
+    def update_agl_profile(self, elevations: list, behind_m: float,
+                           ahead_m: float):
+        """The ground along the track. Rare: only when it has changed."""
+        self.page().runJavaScript(
+            "setAglProfile(%s, %.1f, %.1f);"
+            % (json.dumps(elevations), behind_m, ahead_m))
+
+    def set_agl_altitude(self, amsl: float):
+        """Where the aircraft is, against that ground. Every frame, cheap."""
+        self.page().runJavaScript("setAglAltitude(%.2f);" % amsl)
+
+    def clear_agl_profile(self):
+        self.page().runJavaScript("clearAglProfile();")
 
     def update_terrain_fan(self, elevations: list, range_m: float, ang_cells: int, rad_cells: int):
         """Push a freshly-sampled terrain fan (see TerrainRadarWorker) - rare,

@@ -1,0 +1,233 @@
+"""Does the AGL panel say the right thing about the ground ahead?
+
+Two halves, tested separately because they live in different languages.
+
+The sampling is Python: track_profile walks the course from behind the
+aircraft to well ahead of it, and the distances it picks are what decides
+whether the picture is of the right piece of ground.
+
+The arithmetic that matters is JavaScript: which number is shown as the
+height above ground, which as the smallest gap ahead, and whether that
+one is coloured as a warning. Rather than reimplementing it here and
+testing the copy, the real functions are lifted out of the page the app
+serves and run in a headless browser against a stub of the SVG they
+expect. If the page changes, this follows it.
+"""
+
+import os
+import re
+import sys
+
+# The repo root, wherever this checkout happens to be. Everything below
+# imports the real modules, so this has to come before them.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("MAVLINK20", "1")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import json
+
+import map_view
+from terrain_provider import TerrainProvider, dest_point
+
+fails = []
+
+
+def note(name, ok, detail=""):
+    print("  %-4s %s%s" % ("ok" if ok else "FAIL", name,
+                           ("  (%s)" % detail) if detail else ""))
+    if not ok:
+        fails.append(name)
+
+
+# ---------------------------------------------------------------- python
+
+class FlatGround(TerrainProvider):
+    """Elevation that depends only on how far east you are, so the
+    distance a sample was taken at can be read back out of its height."""
+
+    def __init__(self):
+        pass
+
+    def elevation(self, lat, lon):
+        # cos(lat), because a degree of longitude is that much shorter
+        # away from the equator - without it this "ruler" reads about 29%
+        # long at lat 39 and the span looks wrong when it is not.
+        import math
+        return round((lon - 32.0) * 111320.0 * math.cos(math.radians(39.0)), 3)
+
+
+print("")
+print("where the ground is sampled")
+p = FlatGround()
+prof = p.track_profile(39.0, 32.0, 90.0, behind_m=400.0, ahead_m=1600.0,
+                       samples=41)
+note("one value per sample", len(prof) == 41, len(prof))
+note("the first is astern", prof[0] < -390, "%.0f m" % prof[0])
+note("the last is ahead", prof[-1] > 1590, "%.0f m" % prof[-1])
+note("the aircraft's own position is in there",
+     any(abs(v) < 1.0 for v in prof),
+     "closest to zero: %.1f m" % min(prof, key=abs))
+gaps = [prof[i + 1] - prof[i] for i in range(len(prof) - 1)]
+note("evenly spaced", max(gaps) - min(gaps) < 1.0,
+     "%.1f..%.1f m apart" % (min(gaps), max(gaps)))
+# A metre or two out over two kilometres: track_profile walks a great
+# circle, the ruler above is flat. 0.1% is the projection, not a fault.
+note("spanning what was asked, within a tenth of a percent",
+     abs((prof[-1] - prof[0]) - 2000.0) < 10.0,
+     "%.0f m" % (prof[-1] - prof[0]))
+
+print("")
+print("degenerate requests do not explode")
+note("one sample", p.track_profile(39.0, 32.0, 90.0, 100.0, 100.0, 1) == [])
+note("no span", p.track_profile(39.0, 32.0, 90.0, 0.0, 0.0, 20) == [])
+
+# ------------------------------------------------------------ javascript
+
+SRC = map_view.LEAFLET_HTML
+WANT = ("apNiceStep", "setAglProfile", "setAglAltitude", "clearAglProfile",
+        "drawAglProfile", "apHighPath")
+
+
+def lift(name):
+    """The real function, out of the real page."""
+    m = re.search(r"\nfunction %s\s*\([^)]*\)\s*\{" % re.escape(name), SRC)
+    if not m:
+        raise AssertionError("could not find function %s" % name)
+    i = SRC.index("{", m.start())
+    depth = 0
+    for j in range(i, len(SRC)):
+        if SRC[j] == "{":
+            depth += 1
+        elif SRC[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return SRC[m.start():j + 1]
+    raise AssertionError("unbalanced braces in %s" % name)
+
+
+js = "\n".join(lift(n) for n in WANT)
+# The state those functions share, declared exactly as the page declares
+# it. Without this, reading apAmsl before anything assigns it throws a
+# ReferenceError and the first draw dies silently.
+js += ("\nvar apElevs = null, apBehind = 0, apAhead = 0, apAmsl = null;"
+       "\nvar AP_L = 34, AP_R = 292, AP_T = 30, AP_B = 116;\n")
+
+# The elements the drawing writes into. Same ids as the page, so the real
+# code runs unmodified.
+PAGE = """<!doctype html><html><body>
+<div id="agl-profile" style="display:none">
+ <svg id="ap-svg" viewBox="0 0 300 140">
+  <text id="ap-agl"></text><text id="ap-ahead" class="ap-ahead"></text>
+  <g id="ap-ticks"></g>
+  <path id="ap-ground" d=""/><path id="ap-ground-high" d=""/>
+  <line id="ap-level-back"/><line id="ap-level-fwd"/><line id="ap-now"/>
+  <circle id="ap-uav-ring"/><circle id="ap-uav-dot"/>
+ </svg></div>
+<script>%s</script></body></html>""" % js
+
+from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtWidgets import QApplication
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+app = QApplication.instance() or QApplication([])
+view = QWebEngineView()
+loop = QEventLoop()
+view.loadFinished.connect(lambda ok: loop.quit())
+view.setHtml(PAGE)
+QTimer.singleShot(15000, loop.quit)
+loop.exec()
+
+
+def run(code):
+    box = {}
+    l = QEventLoop()
+    view.page().runJavaScript(code, lambda v: (box.__setitem__("v", v), l.quit()))
+    QTimer.singleShot(10000, l.quit)
+    l.exec()
+    return box.get("v")
+
+
+READ = ("JSON.stringify({agl:document.getElementById('ap-agl').textContent,"
+        "ahead:document.getElementById('ap-ahead').textContent,"
+        "cls:document.getElementById('ap-ahead').getAttribute('class'),"
+        "shown:document.getElementById('agl-profile').style.display,"
+        "high:(document.getElementById('ap-ground-high').getAttribute('d')||'').length})")
+
+
+def show(elevs, behind, ahead, amsl):
+    run("setAglProfile(%s,%s,%s); setAglAltitude(%s);"
+        % (json.dumps(elevs), behind, ahead, amsl))
+    return json.loads(run(READ) or "{}")
+
+
+print("")
+print("the page's own code, run headlessly")
+note("every function was found", len(js) > 500, "%d chars lifted" % len(js))
+
+# Ground at 900 m, aircraft at 1000 m: 100 m of air, flat all the way.
+flat = show([900.0] * 21, 500.0, 1500.0, 1000.0)
+note("height above ground", flat.get("agl") == "100 m", flat.get("agl"))
+note("and the same ahead", "100 m" in (flat.get("ahead") or ""),
+     flat.get("ahead"))
+note("no warning on flat ground", flat.get("cls") == "ap-ahead",
+     flat.get("cls"))
+note("the panel shows itself", flat.get("shown") == "block",
+     repr(flat.get("shown")))
+note("nothing drawn above the aircraft", flat.get("high") == 0)
+
+# A hill ahead reaching 970: 30 m of clearance, which is not much.
+hill = [900.0] * 11 + [910, 925, 940, 955, 965, 970, 965, 950, 930, 910]
+warn = show(hill, 500.0, 1500.0, 1000.0)
+note("still 100 m right here", warn.get("agl") == "100 m", warn.get("agl"))
+note("but the gap ahead is the hill", "30 m" in (warn.get("ahead") or ""),
+     warn.get("ahead"))
+note("and it is flagged", "warn" in (warn.get("cls") or ""), warn.get("cls"))
+
+# The same hill, with the aircraft 40 m lower: it is now above us.
+bad = show(hill, 500.0, 1500.0, 930.0)
+note("negative clearance is shown as such",
+     "-40 m" in (bad.get("ahead") or ""), bad.get("ahead"))
+note("and coloured as danger", "bad" in (bad.get("cls") or ""),
+     bad.get("cls"))
+note("the part above the aircraft is drawn separately",
+     bad.get("high") > 0, "%s chars" % bad.get("high"))
+
+print("")
+print("ground behind is not counted as a hazard ahead")
+# 21 samples over -500..1500, so 100 m apart and sample 5 is the aircraft
+# itself. The mountain is strictly astern - samples 0 to 4 - because
+# distance zero counts as ahead, and rightly: the smallest gap between
+# here and there includes here.
+behind_hill = [990.0] * 5 + [900.0] * 16
+past = show(behind_hill, 500.0, 1500.0, 1000.0)
+note("the gap ahead ignores it", "100 m" in (past.get("ahead") or ""),
+     past.get("ahead"))
+# And the converse: ground right under the aircraft is not excused.
+under = [900.0] * 5 + [985.0] + [900.0] * 15
+now = show(under, 500.0, 1500.0, 1000.0)
+note("but ground underfoot still counts", "15 m" in (now.get("ahead") or ""),
+     now.get("ahead"))
+
+print("")
+print("missing tiles")
+holes = [None] * 8 + [900.0] * 13
+gap = show(holes, 500.0, 1500.0, 1000.0)
+note("it still draws what it has", gap.get("shown") == "block")
+note("and still reports the gap ahead", "100 m" in (gap.get("ahead") or ""),
+     gap.get("ahead"))
+nothing = show([None] * 21, 500.0, 1500.0, 1000.0)
+note("no ground at all hides the panel", nothing.get("shown") == "none",
+     repr(nothing.get("shown")))
+
+print("")
+print("rounding to sensible gridlines")
+# 12 m: a fifth is 2.4, which on the 1/2/5 ladder rounds up to 5, not
+# down to 2. Worked through rather than guessed, after guessing wrong.
+for span, want in ((190.0, 50.0), (4860.0, 1000.0), (12.0, 5.0)):
+    got = run("apNiceStep(%s)" % span)
+    note("%g m span -> %g m steps" % (span, want), abs(got - want) < 1e-9,
+         "got %s" % got)
+
+print("")
+print("FAILED: %s" % ", ".join(fails) if fails else "all passed")
+sys.exit(1 if fails else 0)

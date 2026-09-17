@@ -4014,6 +4014,7 @@ class MainWindow(QMainWindow):
         # can't run on the GUI thread. See terrain_provider.py.
         self.terrain_worker = TerrainRadarWorker(self)
         self.terrain_worker.fan_ready.connect(self.on_terrain_fan_ready)
+        self.terrain_worker.profile_ready.connect(self.on_terrain_profile_ready)
         self.terrain_worker.start()
         self.vehicle_terrain_worker = terrain_provider.VehicleTerrainWorker(self)
         self.vehicle_terrain_worker.ready.connect(self.on_own_terrain)
@@ -5093,6 +5094,16 @@ class MainWindow(QMainWindow):
     def on_terrain_fan_ready(self, elevations, range_m, ang_cells, rad_cells):
         self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)
 
+    def on_terrain_profile_ready(self, elevations, behind_m, ahead_m):
+        """The ground along the track, freshly sampled.
+
+        Sent with the altitude straight after, so the panel has both
+        halves the first time it draws rather than waiting for the next
+        telemetry frame to arrive and show itself empty in the meantime.
+        """
+        self.map_view.update_agl_profile(elevations, behind_m, ahead_m)
+        self.map_view.set_agl_altitude(self._last_amsl_alt)
+
     def on_vfr(self, airspeed, groundspeed, climb, throttle=None):
         # Handed over in m/s as the aircraft sends them; the panel decides
         # whether to show m/s or kph, so that tapping it can convert what
@@ -5217,6 +5228,10 @@ class MainWindow(QMainWindow):
                 self.horizon.set_battery_voltage(None)
         if "amsl_alt" in status_dict:
             self._last_amsl_alt = float(status_dict["amsl_alt"])
+            # Cheap, and the half of the profile that changes constantly:
+            # the ground it is drawn against is only re-read when the
+            # aircraft has actually moved somewhere new.
+            self.map_view.set_agl_altitude(self._last_amsl_alt)
         if "agl" in status_dict:
             try:
                 self._last_agl = float(status_dict["agl"])
@@ -6195,6 +6210,8 @@ class MainWindow(QMainWindow):
         self.horizon.set_vibe_status("white")
         # Stop the terrain radar refreshing off the last known position.
         self.terrain_worker.clear_telemetry()
+        # No aircraft, so no height above anything.
+        self.map_view.clear_agl_profile()
 
     def closeEvent(self, event):
         # First, before anything below has a chance to take long enough

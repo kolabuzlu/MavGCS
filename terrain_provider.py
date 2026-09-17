@@ -336,6 +336,33 @@ class TerrainProvider:
                 out.append(self.elevation(clat, clon))
         return out
 
+    def track_profile(self, lat, lon, heading_deg, behind_m, ahead_m,
+                      samples):
+        """The ground along the track, as a side-on slice.
+
+        Evenly spaced from behind_m astern to ahead_m ahead, along the
+        course the aircraft is actually making good rather than where its
+        nose points - in a crosswind those differ by enough to matter over
+        a couple of kilometres, and it is the ground it will fly over that
+        counts.
+
+        Elevations are AMSL, or None where no tile has arrived yet. The
+        aircraft's own altitude is deliberately not applied here; see
+        TerrainRadarWorker.profile_ready.
+        """
+        out = []
+        span = behind_m + ahead_m
+        if samples < 2 or span <= 0:
+            return out
+        for i in range(samples):
+            dist = -behind_m + span * i / (samples - 1)
+            if dist == 0:
+                clat, clon = lat, lon
+            else:
+                clat, clon = dest_point(lat, lon, heading_deg, dist)
+            out.append(self.elevation(clat, clon))
+        return out
+
 
 class TerrainRadarWorker(QThread):
     """
@@ -347,6 +374,17 @@ class TerrainRadarWorker(QThread):
 
     # elevations (flat list, row-major), range_m, ang_cells, rad_cells
     fan_ready = Signal(list, float, int, int)
+    # The ground along the track as a side-on slice: elevations AMSL from
+    # behind_m astern to ahead_m in front, evenly spaced. Sent without the
+    # aircraft's own altitude on purpose - the ground changes slowly and
+    # costs tile reads, the altitude changes every frame and costs
+    # nothing, so they are combined where they are drawn rather than
+    # re-sampling the hillside every time the aircraft moves a metre.
+    profile_ready = Signal(list, float, float)
+    # Behind is short: it is there for context - whether the ground has
+    # been rising or falling - not for planning, which is all ahead.
+    PROFILE_BEHIND_FRAC = 0.35
+    PROFILE_SAMPLES = 80
 
     HALF_ANGLE_DEG = 60.0  # +/- -> 120 deg forward fan
     ANG_CELLS = 32
@@ -424,6 +462,17 @@ class TerrainRadarWorker(QThread):
                         self.ANG_CELLS, self.RAD_CELLS,
                     )
                     self.fan_ready.emit(elev, self._range_m, self.ANG_CELLS, self.RAD_CELLS)
+                except Exception:
+                    pass
+                try:
+                    # Same pass, same provider, and mostly the same tiles
+                    # the fan just read - the track runs up the middle of
+                    # it, so this is nearly free.
+                    behind = self._range_m * self.PROFILE_BEHIND_FRAC
+                    prof = provider.track_profile(
+                        lat, lon, heading, behind, self._range_m,
+                        self.PROFILE_SAMPLES)
+                    self.profile_ready.emit(prof, behind, self._range_m)
                 except Exception:
                     pass
                 self._last_sample = (lat, lon, heading, self._range_m, time.time())
