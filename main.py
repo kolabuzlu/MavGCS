@@ -5094,6 +5094,21 @@ class MainWindow(QMainWindow):
     def on_terrain_fan_ready(self, elevations, range_m, ang_cells, rad_cells):
         self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)
 
+    # Beyond about a 30-degree climb the aircraft is not flying a
+    # trajectory any more, it is in trouble, and the line would leave the
+    # box. And a groundspeed near zero makes the gradient meaningless -
+    # sitting still, "where will I be in two kilometres" has no answer.
+    AGL_MAX_SLOPE = 0.55
+    AGL_MIN_GROUNDSPEED = 3.0
+
+    def _agl_slope(self):
+        """Metres of height per metre along the track, or 0 if unknowable."""
+        gs = self._last_groundspeed
+        if gs is None or gs < self.AGL_MIN_GROUNDSPEED:
+            return 0.0
+        slope = (self._last_climb or 0.0) / gs
+        return max(-self.AGL_MAX_SLOPE, min(self.AGL_MAX_SLOPE, slope))
+
     def on_terrain_profile_ready(self, elevations, behind_m, ahead_m):
         """The ground along the track, freshly sampled.
 
@@ -5102,7 +5117,7 @@ class MainWindow(QMainWindow):
         telemetry frame to arrive and show itself empty in the meantime.
         """
         self.map_view.update_agl_profile(elevations, behind_m, ahead_m)
-        self.map_view.set_agl_altitude(self._last_amsl_alt)
+        self.map_view.set_agl_altitude(self._last_amsl_alt, self._agl_slope())
 
     def on_vfr(self, airspeed, groundspeed, climb, throttle=None):
         # Handed over in m/s as the aircraft sends them; the panel decides
@@ -5231,7 +5246,8 @@ class MainWindow(QMainWindow):
             # Cheap, and the half of the profile that changes constantly:
             # the ground it is drawn against is only re-read when the
             # aircraft has actually moved somewhere new.
-            self.map_view.set_agl_altitude(self._last_amsl_alt)
+            self.map_view.set_agl_altitude(self._last_amsl_alt,
+                                          self._agl_slope())
         if "agl" in status_dict:
             try:
                 self._last_agl = float(status_dict["agl"])

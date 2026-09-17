@@ -2952,6 +2952,11 @@ var apElevs = null;      // metres AMSL, or null per sample where no tile
 var apBehind = 0;        // metres of track astern
 var apAhead = 0;         // metres ahead
 var apAmsl = null;       // the aircraft, metres AMSL
+// Metres of height per metre along the track. The flight path is drawn at
+// this gradient rather than level, and - the part that matters - the gap
+// ahead is measured against it. Descending towards rising ground, a level
+// line flatters the situation exactly when it should not.
+var apSlope = 0;
 
 var AP_L = 34, AP_R = 292, AP_T = 30, AP_B = 116;   // the plot box
 
@@ -2962,8 +2967,9 @@ function setAglProfile(elevs, behindM, aheadM) {
     drawAglProfile();
 }
 
-function setAglAltitude(amsl) {
+function setAglAltitude(amsl, slope) {
     apAmsl = amsl;
+    apSlope = slope || 0;
     drawAglProfile();
 }
 
@@ -3011,8 +3017,12 @@ function drawAglProfile() {
     box.style.display = 'block';
 
     // Always show the aircraft's own level, and never squash the picture
-    // into a sliver when the ground happens to be flat.
-    hi = Math.max(hi, 0); lo = Math.min(lo, 0);
+    // into a sliver when the ground happens to be flat. The flight path's
+    // far ends count too, or a steep descent would leave the line drawn
+    // off the bottom of the box.
+    var pathBack = apSlope * -apBehind, pathFwd = apSlope * apAhead;
+    hi = Math.max(hi, 0, pathBack, pathFwd);
+    lo = Math.min(lo, 0, pathBack, pathFwd);
     if (hi - lo < 60) { lo = hi - 60; }
     var pad = (hi - lo) * 0.12;
     hi += pad; lo -= pad;
@@ -3067,15 +3077,16 @@ function drawAglProfile() {
     });
     document.getElementById('ap-ground-high').setAttribute('d', dh);
 
-    // The aircraft's own level: solid behind it, dashed ahead, because
-    // ahead is a projection of the current altitude rather than a fact.
+    // The flight path, at the gradient the aircraft is actually on:
+    // solid behind, where it has been, dashed ahead, because ahead is a
+    // projection of the present climb rate rather than a fact.
     var y0 = yOf(0), x0 = xOf(0);
     var back = document.getElementById('ap-level-back');
     back.setAttribute('x1', AP_L); back.setAttribute('x2', x0);
-    back.setAttribute('y1', y0); back.setAttribute('y2', y0);
+    back.setAttribute('y1', yOf(pathBack)); back.setAttribute('y2', y0);
     var fwd = document.getElementById('ap-level-fwd');
     fwd.setAttribute('x1', x0); fwd.setAttribute('x2', AP_R);
-    fwd.setAttribute('y1', y0); fwd.setAttribute('y2', y0);
+    fwd.setAttribute('y1', y0); fwd.setAttribute('y2', yOf(pathFwd));
     var now = document.getElementById('ap-now');
     now.setAttribute('x1', x0); now.setAttribute('x2', x0);
     now.setAttribute('y1', AP_T); now.setAttribute('y2', AP_B);
@@ -3103,12 +3114,17 @@ function drawAglProfile() {
     document.getElementById('ap-ticks').innerHTML = g;
 
     // The two numbers. AGL is the gap right here; the one on the right is
-    // the smallest gap anywhere ahead, which is the one worth watching.
-    var mid = null, worst = null;
+    // the smallest gap anywhere ahead - measured against the path the
+    // aircraft is on, not against its present altitude held level, so a
+    // descent towards rising ground reads as the problem it is.
+    var mid = null, worst = null, worstGap = null;
     for (i = 0; i < n; i++) {
         if (rel[i] === null) { continue; }
         if (mid === null || Math.abs(distOf(i)) < Math.abs(distOf(mid))) { mid = i; }
-        if (distOf(i) >= 0 && (worst === null || rel[i] > rel[worst])) { worst = i; }
+        if (distOf(i) >= 0) {
+            var gap = apSlope * distOf(i) - rel[i];
+            if (worstGap === null || gap < worstGap) { worstGap = gap; worst = i; }
+        }
     }
     var aglEl = document.getElementById('ap-agl');
     aglEl.textContent = (mid === null) ? '--' : Math.round(-rel[mid]) + ' m';
@@ -3117,7 +3133,7 @@ function drawAglProfile() {
     if (worst === null) {
         aheadEl.textContent = '--';
     } else {
-        var clear = -rel[worst];
+        var clear = worstGap;
         aheadEl.textContent = '▸ ' + Math.round(clear) + ' m';
         if (clear <= 0) { aheadEl.setAttribute('class', 'ap-ahead bad'); }
         else if (clear < 50) { aheadEl.setAttribute('class', 'ap-ahead warn'); }
@@ -3591,9 +3607,15 @@ class MapView(QWebEngineView):
             "setAglProfile(%s, %.1f, %.1f);"
             % (json.dumps(elevations), behind_m, ahead_m))
 
-    def set_agl_altitude(self, amsl: float):
-        """Where the aircraft is, against that ground. Every frame, cheap."""
-        self.page().runJavaScript("setAglAltitude(%.2f);" % amsl)
+    def set_agl_altitude(self, amsl: float, slope: float = 0.0):
+        """Where the aircraft is, and where it is going.
+
+        `slope` is metres of height gained per metre travelled along the
+        track, so the panel can draw where the aircraft will be rather
+        than only where it is.
+        """
+        self.page().runJavaScript(
+            "setAglAltitude(%.2f, %.6f);" % (amsl, slope))
 
     def clear_agl_profile(self):
         self.page().runJavaScript("clearAglProfile();")

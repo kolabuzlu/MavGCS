@@ -154,9 +154,9 @@ READ = ("JSON.stringify({agl:document.getElementById('ap-agl').textContent,"
         "high:(document.getElementById('ap-ground-high').getAttribute('d')||'').length})")
 
 
-def show(elevs, behind, ahead, amsl):
-    run("setAglProfile(%s,%s,%s); setAglAltitude(%s);"
-        % (json.dumps(elevs), behind, ahead, amsl))
+def show(elevs, behind, ahead, amsl, slope=0.0):
+    run("setAglProfile(%s,%s,%s); setAglAltitude(%s,%s);"
+        % (json.dumps(elevs), behind, ahead, amsl, slope))
     return json.loads(run(READ) or "{}")
 
 
@@ -218,6 +218,79 @@ note("and still reports the gap ahead", "100 m" in (gap.get("ahead") or ""),
 nothing = show([None] * 21, 500.0, 1500.0, 1000.0)
 note("no ground at all hides the panel", nothing.get("shown") == "none",
      repr(nothing.get("shown")))
+
+print("")
+print("the flight path is drawn at the gradient being flown")
+LINE = ("JSON.stringify({backY1:+document.getElementById('ap-level-back').getAttribute('y1'),"
+        "backY2:+document.getElementById('ap-level-back').getAttribute('y2'),"
+        "fwdY1:+document.getElementById('ap-level-fwd').getAttribute('y1'),"
+        "fwdY2:+document.getElementById('ap-level-fwd').getAttribute('y2')})")
+
+show([900.0] * 21, 500.0, 1500.0, 1000.0, 0.0)
+lvl = json.loads(run(LINE) or "{}")
+note("level flight draws a level line",
+     abs(lvl["fwdY1"] - lvl["fwdY2"]) < 0.01,
+     "%.1f -> %.1f" % (lvl["fwdY1"], lvl["fwdY2"]))
+
+show([900.0] * 21, 500.0, 1500.0, 1000.0, 0.1)      # climbing
+up = json.loads(run(LINE) or "{}")
+# Screen y grows downward, so climbing means the far end is a smaller y.
+note("climbing tilts it up", up["fwdY2"] < up["fwdY1"] - 1,
+     "%.1f -> %.1f" % (up["fwdY1"], up["fwdY2"]))
+note("and the line behind comes up from below",
+     up["backY1"] > up["backY2"] + 1,
+     "%.1f -> %.1f" % (up["backY1"], up["backY2"]))
+
+show([900.0] * 21, 500.0, 1500.0, 1000.0, -0.1)     # descending
+dn = json.loads(run(LINE) or "{}")
+note("descending tilts it down", dn["fwdY2"] > dn["fwdY1"] + 1,
+     "%.1f -> %.1f" % (dn["fwdY1"], dn["fwdY2"]))
+
+print("")
+print("and the gap ahead is measured against that path")
+# Ground rising to 960 at the far end; the aircraft at 1000. Level, that
+# is 40 m of clearance. Descending at 4 m/s over 40 m/s of groundspeed -
+# a tenth - it is 1500 * 0.1 = 150 m lower by then, so it does not clear.
+rising = [900.0] * 11 + [905, 910, 920, 930, 940, 948, 953, 957, 959, 960]
+level = show(rising, 500.0, 1500.0, 1000.0, 0.0)
+note("level flight clears it", "40 m" in (level.get("ahead") or ""),
+     level.get("ahead"))
+# 40 m is inside the fifty-metre warning band, so amber is right here.
+note("and flags it, since forty metres is not much",
+     "warn" in (level.get("cls") or ""), level.get("cls"))
+
+sinking = show(rising, 500.0, 1500.0, 1000.0, -0.1)
+note("the same ground, descending, does not clear",
+     "-" in (sinking.get("ahead") or ""), sinking.get("ahead"))
+note("and it is coloured as danger", "bad" in (sinking.get("cls") or ""),
+     sinking.get("cls"))
+
+climbing = show(rising, 500.0, 1500.0, 1000.0, 0.05)
+# Climbing lifts the far samples clear, so the tightest point becomes the
+# flat ground directly below - 100 m - rather than the ridge at the end.
+# Far better than the 40 m a level reading gives over the same ground.
+note("climbing over it reads far better than level",
+     "100 m" in (climbing.get("ahead") or ""), climbing.get("ahead"))
+note("and calmly", climbing.get("cls") == "ap-ahead", climbing.get("cls"))
+
+print("")
+print("the slope, and its guards, on the Python side")
+from types import SimpleNamespace
+import main as app_main
+calc = app_main.MainWindow._agl_slope
+stub = SimpleNamespace(AGL_MAX_SLOPE=app_main.MainWindow.AGL_MAX_SLOPE,
+                       AGL_MIN_GROUNDSPEED=app_main.MainWindow.AGL_MIN_GROUNDSPEED)
+stub._last_groundspeed, stub._last_climb = 40.0, 4.0
+note("4 m/s up at 40 m/s is a tenth", abs(calc(stub) - 0.1) < 1e-9, calc(stub))
+stub._last_climb = -4.0
+note("and downwards is negative", abs(calc(stub) + 0.1) < 1e-9, calc(stub))
+stub._last_groundspeed, stub._last_climb = 0.2, 5.0
+note("standing still gives no gradient at all", calc(stub) == 0.0, calc(stub))
+stub._last_groundspeed, stub._last_climb = 4.0, 40.0
+note("an absurd climb is capped", calc(stub) == app_main.MainWindow.AGL_MAX_SLOPE,
+     calc(stub))
+stub._last_groundspeed, stub._last_climb = 40.0, None
+note("a missing climb rate is level", calc(stub) == 0.0, calc(stub))
 
 print("")
 print("rounding to sensible gridlines")
