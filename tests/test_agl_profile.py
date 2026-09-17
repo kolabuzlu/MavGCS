@@ -221,10 +221,18 @@ note("no ground at all hides the panel", nothing.get("shown") == "none",
 
 print("")
 print("the flight path is drawn at the gradient being flown")
-LINE = ("JSON.stringify({backY1:+document.getElementById('ap-level-back').getAttribute('y1'),"
-        "backY2:+document.getElementById('ap-level-back').getAttribute('y2'),"
+# The line behind is a path now, because it traces the flown track; only
+# the projection ahead is still a plain segment.
+LINE = ("JSON.stringify({back:document.getElementById('ap-level-back').getAttribute('d')||'',"
         "fwdY1:+document.getElementById('ap-level-fwd').getAttribute('y1'),"
         "fwdY2:+document.getElementById('ap-level-fwd').getAttribute('y2')})")
+
+
+def back_ends(d):
+    """First and last y of the path behind."""
+    ys = [float(v.split(",")[1]) for v in
+          d.replace("M", " ").replace("L", " ").split() if "," in v]
+    return (ys[0], ys[-1]) if ys else (0.0, 0.0)
 
 show([900.0] * 21, 500.0, 1500.0, 1000.0, 0.0)
 lvl = json.loads(run(LINE) or "{}")
@@ -237,9 +245,9 @@ up = json.loads(run(LINE) or "{}")
 # Screen y grows downward, so climbing means the far end is a smaller y.
 note("climbing tilts it up", up["fwdY2"] < up["fwdY1"] - 1,
      "%.1f -> %.1f" % (up["fwdY1"], up["fwdY2"]))
-note("and the line behind comes up from below",
-     up["backY1"] > up["backY2"] + 1,
-     "%.1f -> %.1f" % (up["backY1"], up["backY2"]))
+b0, b1 = back_ends(up["back"])
+note("and with no track flown yet, behind falls back to the gradient too",
+     b0 > b1 + 1, "%.1f -> %.1f" % (b0, b1))
 
 show([900.0] * 21, 500.0, 1500.0, 1000.0, -0.1)     # descending
 dn = json.loads(run(LINE) or "{}")
@@ -272,6 +280,95 @@ climbing = show(rising, 500.0, 1500.0, 1000.0, 0.05)
 note("climbing over it reads far better than level",
      "100 m" in (climbing.get("ahead") or ""), climbing.get("ahead"))
 note("and calmly", climbing.get("cls") == "ap-ahead", climbing.get("cls"))
+
+print("")
+print("the line behind is the track flown, not a projection")
+BACK = ("JSON.stringify({d:document.getElementById('ap-level-back')"
+        ".getAttribute('d')||''})")
+
+# Flat ground, level now, but the aircraft climbed 200 m to get here.
+climbed = [[400.0, 800.0], [300.0, 850.0], [200.0, 920.0],
+           [100.0, 980.0], [20.0, 1000.0]]
+run("setAglProfile(%s,500,1500); setAglAltitude(1000,0,%s);"
+    % (json.dumps([900.0] * 21), json.dumps(climbed)))
+hist = json.loads(run(BACK) or "{}")["d"]
+note("it is a path with a point per fix", hist.count("L") >= 5,
+     "%d segments" % hist.count("L"))
+
+# Same aircraft, same instant, told nothing about where it has been.
+run("setAglProfile(%s,500,1500); setAglAltitude(1000,0,[]);"
+    % json.dumps([900.0] * 21))
+plain = json.loads(run(BACK) or "{}")["d"]
+note("with no history it falls back to one straight segment",
+     plain.count("L") == 1, "%d segments" % plain.count("L"))
+note("and the two are not the same line", hist != plain)
+
+# A climb must rise to the left of the aircraft: earlier fixes lower, and
+# screen y grows downward, so the first point has the largest y.
+ys = [float(v.split(",")[1]) for v in
+      hist.replace("M", " ").replace("L", " ").split() if "," in v]
+note("the climb reads as a climb", ys[0] > ys[-1] + 5,
+     "y %.0f at the oldest fix -> %.0f at the aircraft" % (ys[0], ys[-1]))
+
+print("")
+print("recording the track, on the Python side")
+from types import SimpleNamespace
+import main as app_main
+rec = app_main.MainWindow._record_agl_history
+track = app_main.MainWindow._agl_track
+
+
+def flyer():
+    s = SimpleNamespace(
+        AGL_HISTORY_MAX_M=app_main.MainWindow.AGL_HISTORY_MAX_M,
+        AGL_HISTORY_STEP_M=app_main.MainWindow.AGL_HISTORY_STEP_M)
+    from collections import deque
+    s._agl_history = deque()
+    s._agl_flown_m = 0.0
+    s._agl_last_fix = None
+    s._agl_behind_m = 1000.0
+    s._last_amsl_alt = 1000.0
+    return s
+
+
+f = flyer()
+rec(f, 39.0, 32.0)
+note("the first fix only sets the origin", len(f._agl_history) == 0)
+
+# Due east in 100 m steps. A degree of longitude here is 111320*cos(39).
+step_deg = 100.0 / (111320.0 * __import__("math").cos(__import__("math").radians(39.0)))
+for k in range(1, 21):
+    f._last_amsl_alt = 1000.0 + k
+    rec(f, 39.0, 32.0 + step_deg * k)
+note("one point per fix", len(f._agl_history) == 20, len(f._agl_history))
+note("distance adds up", abs(f._agl_flown_m - 2000.0) < 20.0,
+     "%.0f m" % f._agl_flown_m)
+
+pts = track(f)
+note("only what fits the window comes back", len(pts) <= 11,
+     "%d of 20 points, window %.0f m" % (len(pts), f._agl_behind_m))
+note("oldest first", pts[0][0] > pts[-1][0],
+     "%.0f m astern -> %.0f m" % (pts[0][0], pts[-1][0]))
+note("nothing further back than asked", max(p[0] for p in pts) <= 1000.0)
+note("and it carries the altitude of the moment",
+     pts[-1][1] > pts[0][1], "%.0f -> %.0f m" % (pts[0][1], pts[-1][1]))
+
+# Standing still must not stack up points on one spot.
+before = len(f._agl_history)
+for _ in range(10):
+    rec(f, 39.0, 32.0 + step_deg * 20)
+note("a stationary aircraft records nothing",
+     len(f._agl_history) == before, len(f._agl_history) - before)
+
+# And the buffer must not grow without bound over a long flight.
+f2 = flyer()
+rec(f2, 39.0, 32.0)
+for k in range(1, 120):
+    rec(f2, 39.0, 32.0 + step_deg * k)
+note("old track is dropped",
+     f2._agl_history[0][0] >= f2._agl_flown_m - f2.AGL_HISTORY_MAX_M,
+     "oldest kept is %.0f m back of %.0f m flown"
+     % (f2._agl_flown_m - f2._agl_history[0][0], f2._agl_flown_m))
 
 print("")
 print("the slope, and its guards, on the Python side")

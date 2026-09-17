@@ -801,7 +801,7 @@ LEAFLET_HTML = """
         <g id="ap-ticks"></g>
         <path id="ap-ground" class="ap-ground" d="" />
         <path id="ap-ground-high" class="ap-ground-high" d="" />
-        <line id="ap-level-back" class="ap-level" x1="0" y1="0" x2="0" y2="0" />
+        <path id="ap-level-back" class="ap-level" fill="none" d="" />
         <line id="ap-level-fwd" class="ap-level-ahead" x1="0" y1="0" x2="0" y2="0" />
         <line id="ap-now" class="ap-now" x1="0" y1="0" x2="0" y2="0" />
         <circle id="ap-uav-ring" class="ap-uav-ring" cx="0" cy="0" r="6" />
@@ -2957,6 +2957,12 @@ var apAmsl = null;       // the aircraft, metres AMSL
 // ahead is measured against it. Descending towards rising ground, a level
 // line flatters the situation exactly when it should not.
 var apSlope = 0;
+// Where the aircraft has actually been: [metres astern, altitude AMSL],
+// oldest first. The line behind is drawn through these rather than
+// projected backwards at the current gradient, because behind is history
+// and history is known - it climbed and descended, and a straight line
+// would be inventing a flight that was never flown.
+var apHistory = null;
 
 var AP_L = 34, AP_R = 292, AP_T = 30, AP_B = 116;   // the plot box
 
@@ -2967,9 +2973,10 @@ function setAglProfile(elevs, behindM, aheadM) {
     drawAglProfile();
 }
 
-function setAglAltitude(amsl, slope) {
+function setAglAltitude(amsl, slope, history) {
     apAmsl = amsl;
     apSlope = slope || 0;
+    apHistory = history || null;
     drawAglProfile();
 }
 
@@ -3023,6 +3030,14 @@ function drawAglProfile() {
     var pathBack = apSlope * -apBehind, pathFwd = apSlope * apAhead;
     hi = Math.max(hi, 0, pathBack, pathFwd);
     lo = Math.min(lo, 0, pathBack, pathFwd);
+    // The track flown behind has to fit too, or a climb out of a valley
+    // gets drawn above the top of the panel.
+    if (apHistory) {
+        for (i = 0; i < apHistory.length; i++) {
+            var hr = apHistory[i][1] - apAmsl;
+            hi = Math.max(hi, hr); lo = Math.min(lo, hr);
+        }
+    }
     if (hi - lo < 60) { lo = hi - 60; }
     var pad = (hi - lo) * 0.12;
     hi += pad; lo -= pad;
@@ -3082,8 +3097,27 @@ function drawAglProfile() {
     // projection of the present climb rate rather than a fact.
     var y0 = yOf(0), x0 = xOf(0);
     var back = document.getElementById('ap-level-back');
-    back.setAttribute('x1', AP_L); back.setAttribute('x2', x0);
-    back.setAttribute('y1', yOf(pathBack)); back.setAttribute('y2', y0);
+    var bd = '';
+    if (apHistory && apHistory.length > 1) {
+        // Oldest first, so this runs left to right and finishes at the
+        // aircraft. Anything older than the panel's span is dropped
+        // rather than drawn off the edge.
+        apHistory.forEach(function (pt) {
+            var hx = xOf(-pt[0]);
+            if (hx < AP_L) { return; }
+            bd += (bd ? 'L' : 'M') + hx.toFixed(1) + ','
+                + yOf(pt[1] - apAmsl).toFixed(1);
+        });
+    }
+    if (bd) {
+        bd += 'L' + x0.toFixed(1) + ',' + y0.toFixed(1);
+    } else {
+        // Nothing flown yet - just connected, or stationary. Fall back to
+        // the gradient, which at least says which way it is going.
+        bd = 'M' + AP_L + ',' + yOf(pathBack).toFixed(1)
+           + 'L' + x0.toFixed(1) + ',' + y0.toFixed(1);
+    }
+    back.setAttribute('d', bd);
     var fwd = document.getElementById('ap-level-fwd');
     fwd.setAttribute('x1', x0); fwd.setAttribute('x2', AP_R);
     fwd.setAttribute('y1', y0); fwd.setAttribute('y2', yOf(pathFwd));
@@ -3607,15 +3641,19 @@ class MapView(QWebEngineView):
             "setAglProfile(%s, %.1f, %.1f);"
             % (json.dumps(elevations), behind_m, ahead_m))
 
-    def set_agl_altitude(self, amsl: float, slope: float = 0.0):
-        """Where the aircraft is, and where it is going.
+    def set_agl_altitude(self, amsl: float, slope: float = 0.0,
+                         history=None):
+        """Where the aircraft is, where it is going, and where it has been.
 
         `slope` is metres of height gained per metre travelled along the
         track, so the panel can draw where the aircraft will be rather
-        than only where it is.
+        than only where it is. `history` is [[metres astern, altitude
+        AMSL], ...] oldest first - the climb and descent actually flown,
+        which is what the line behind is drawn through.
         """
         self.page().runJavaScript(
-            "setAglAltitude(%.2f, %.6f);" % (amsl, slope))
+            "setAglAltitude(%.2f, %.6f, %s);"
+            % (amsl, slope, json.dumps(history or [])))
 
     def clear_agl_profile(self):
         self.page().runJavaScript("clearAglProfile();")

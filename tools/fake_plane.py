@@ -20,6 +20,9 @@ import struct
 import sys
 import time
 
+# Before pymavlink is imported: it decides its dialect at import
+# time, and the app it is pretending to talk to speaks MAVLink 2.
+os.environ.setdefault("MAVLINK20", "1")
 
 from pymavlink import mavutil
 
@@ -28,6 +31,11 @@ ap.add_argument("--port", type=int, default=14550)
 ap.add_argument("--radius", type=float, default=150.0)      # m
 ap.add_argument("--speed", type=float, default=20.0)        # m/s ground
 ap.add_argument("--alt", type=float, default=100.0)         # m AGL
+ap.add_argument("--porpoise", type=float, default=3.0,
+                help="metres of gentle climb and descent either side of "
+                     "--alt, on a 46-second cycle. The default is small "
+                     "enough to be realistic cruise; raise it to exercise "
+                     "anything that draws altitude against terrain")
 ap.add_argument("--attitude-hz", type=float, default=5.0)
 ap.add_argument("--ignore-param-sets", type=int, default=0,
                 help="silently drop this many PARAM_SET writes before "
@@ -95,8 +103,8 @@ def state(t):
     heading = (math.degrees(math.atan2(vx, vy)) + 360.0) % 360.0
     lat = HOME_LAT + y / m_per_deg_lat
     lon = HOME_LON + x / m_per_deg_lon
-    alt_rel = args.alt + 3.0 * math.sin(t / 23.0)          # gentle porpoise
-    climb = 3.0 * math.cos(t / 23.0) / 23.0
+    alt_rel = args.alt + args.porpoise * math.sin(t / 23.0)          # gentle porpoise
+    climb = args.porpoise * math.cos(t / 23.0) / 23.0
     pitch = math.radians(2.0 + 2.0 * math.sin(t / 23.0))
     return dict(lat=lat, lon=lon, alt_rel=alt_rel, vx=vx, vy=vy, climb=climb,
                 heading=heading, roll=bank, pitch=pitch,

@@ -3933,6 +3933,13 @@ class MainWindow(QMainWindow):
         # horizon line levelled a second before the ground did.
         self._home_pos = None       # (lat, lon) once the vehicle reports it
         self._hud_history = deque(maxlen=240)
+        # Where the aircraft has actually been, as (metres flown, AMSL),
+        # so the AGL panel can draw the climb and descent it really did
+        # rather than a straight line projected backwards from now.
+        self._agl_history = deque()
+        self._agl_flown_m = 0.0
+        self._agl_last_fix = None
+        self._agl_behind_m = 0.0
         self._att_interval_ms = 250.0
         self._pos_interval_ms = 350.0
         self._last_att_time = None
@@ -4514,6 +4521,7 @@ class MainWindow(QMainWindow):
         self._last_alt = alt
         self._last_lat = lat
         self._last_lon = lon
+        self._record_agl_history(lat, lon)
         self.guided_panel.set_last_alt(alt)
         self.telemetry.set_value("altitude", f"{alt:.2f}")
         self.map_view.update_position(lat, lon, heading)
@@ -5101,6 +5109,40 @@ class MainWindow(QMainWindow):
     AGL_MAX_SLOPE = 0.55
     AGL_MIN_GROUNDSPEED = 3.0
 
+    # More than the longest look-behind the panel ever asks for, so a
+    # change of range never finds the history already thrown away.
+    AGL_HISTORY_MAX_M = 4000.0
+    # Below this the aircraft has not really gone anywhere, and recording
+    # it would fill the track with a stack of points at one spot.
+    AGL_HISTORY_STEP_M = 2.0
+
+    def _record_agl_history(self, lat, lon):
+        """One more point on the flown track, if it has moved far enough."""
+        previous = self._agl_last_fix
+        if previous is None:
+            self._agl_last_fix = (lat, lon)
+            return
+        step = terrain_provider.TerrainRadarWorker._haversine_m(
+            previous[0], previous[1], lat, lon)
+        if step < self.AGL_HISTORY_STEP_M:
+            return
+        self._agl_last_fix = (lat, lon)
+        self._agl_flown_m += step
+        self._agl_history.append((self._agl_flown_m, self._last_amsl_alt))
+        cutoff = self._agl_flown_m - self.AGL_HISTORY_MAX_M
+        while self._agl_history and self._agl_history[0][0] < cutoff:
+            self._agl_history.popleft()
+
+    def _agl_track(self):
+        """The flown track as the panel wants it: astern, oldest first."""
+        behind = self._agl_behind_m
+        if behind <= 0:
+            return []
+        now = self._agl_flown_m
+        return [[round(now - flown, 1), round(amsl, 1)]
+                for flown, amsl in self._agl_history
+                if 0 <= now - flown <= behind]
+
     def _agl_slope(self):
         """Metres of height per metre along the track, or 0 if unknowable."""
         gs = self._last_groundspeed
@@ -5116,8 +5158,10 @@ class MainWindow(QMainWindow):
         halves the first time it draws rather than waiting for the next
         telemetry frame to arrive and show itself empty in the meantime.
         """
+        self._agl_behind_m = behind_m
         self.map_view.update_agl_profile(elevations, behind_m, ahead_m)
-        self.map_view.set_agl_altitude(self._last_amsl_alt, self._agl_slope())
+        self.map_view.set_agl_altitude(self._last_amsl_alt, self._agl_slope(),
+                                       self._agl_track())
 
     def on_vfr(self, airspeed, groundspeed, climb, throttle=None):
         # Handed over in m/s as the aircraft sends them; the panel decides
@@ -5247,7 +5291,8 @@ class MainWindow(QMainWindow):
             # the ground it is drawn against is only re-read when the
             # aircraft has actually moved somewhere new.
             self.map_view.set_agl_altitude(self._last_amsl_alt,
-                                          self._agl_slope())
+                                          self._agl_slope(),
+                                          self._agl_track())
         if "agl" in status_dict:
             try:
                 self._last_agl = float(status_dict["agl"])
@@ -6226,7 +6271,11 @@ class MainWindow(QMainWindow):
         self.horizon.set_vibe_status("white")
         # Stop the terrain radar refreshing off the last known position.
         self.terrain_worker.clear_telemetry()
-        # No aircraft, so no height above anything.
+        # No aircraft, so no height above anything - and the track it
+        # flew belongs to that flight, not to whatever connects next.
+        self._agl_history.clear()
+        self._agl_flown_m = 0.0
+        self._agl_last_fix = None
         self.map_view.clear_agl_profile()
 
     def closeEvent(self, event):
