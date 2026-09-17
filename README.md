@@ -30,6 +30,4 @@ Created by **Derin Hakan Karakurt**
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it, and run **MavGCS.exe**. No setup needed.
 
 **macOS** - download `MavGCS-<version>-macos-<arch>.zip` for your Mac's
-processor and drag **MavGCS.app** to Applications. The app is unsigned, so
-the first launch needs one command to clear the download quarantine -
-see [INSTALL.md](INSTALL.md), which also covers the camera permission.
+processor and drag **MavGCS.app** to Applications.
