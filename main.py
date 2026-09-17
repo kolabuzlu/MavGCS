@@ -150,6 +150,16 @@ class TelemetryPanel(QFrame):
     SPEED_UNIT_SETTING = "speed_unit_kph"
     MPS_TO_KPH = 3.6
 
+    # Blank rows between the four groups of readings, in pixels. This is
+    # what sets the panel's overall height, and the HUD above it is sized
+    # as a multiple of that height, so the two grow together.
+    #
+    # It buys the height here rather than by widening setVerticalSpacing
+    # below, which would also push each caption away from its own number.
+    # The two halves of a cell read as one thing and are spaced by 1px on
+    # purpose; the air belongs between the rows, not inside them.
+    GROUP_GAP = 22
+
     FIELDS = [
         ("airspeed", "AirSpeed (m/s)"),
         ("groundspeed", "GroundSpeed (m/s)"),
@@ -187,7 +197,9 @@ class TelemetryPanel(QFrame):
         self._speed_kph = bool(
             load_settings().get(self.SPEED_UNIT_SETTING, False))
         for i, (key, text) in enumerate(self.FIELDS):
-            row = (i // 4) * 2
+            # Three rows per group - caption, value, then a spacer that
+            # the last group does not need and simply never gets filled.
+            row = (i // 4) * 3
             col = i % 4
             speed = key in self.SPEED_KEYS
             name_label = _TappableLabel(text) if speed else QLabel(text)
@@ -208,6 +220,8 @@ class TelemetryPanel(QFrame):
                     widget.setCursor(Qt.CursorShape.PointingHandCursor)
                     widget.setToolTip("Tap to switch between m/s and kph")
                     widget.clicked.connect(self.toggle_speed_unit)
+        for spacer_row in (2, 5, 8):
+            grid.setRowMinimumHeight(spacer_row, self.GROUP_GAP)
         self._apply_speed_unit()
 
     def set_speed(self, key, mps):
@@ -1924,6 +1938,101 @@ class ParametersDialog(QDialog):
                                   % (len(self._params), path))
 
 
+# Height of the command buttons in the Preflight Calibration, Flight Mode
+# and Guided Control panels. Their natural height is 20px - what a 10px
+# font and 3px of padding come to - which on a Mac reads as a thin strip
+# rather than something you would reach for in flight.
+#
+# The height of every button down the left-hand column - all twenty of
+# them, across four panels. One height for all, because a column of
+# controls at four different heights reads as four different kinds of
+# thing.
+#
+# 33px is not an arbitrary taste, and it cannot be chosen apart from
+# CONTROL_BUTTON_GAP and SECTION_GAP below, or from HUD_BLOCK_H in
+# MainWindow. Eight button rows answer to it - two in Arm/Disarm, one in
+# Preflight Calibration, four in Flight Mode, one in Guided Control - and
+# the column has a fixed amount of height to give, so every pixel added
+# to a button costs eight somewhere else. This is the number the whole
+# column is tuned with, and the only one that should need touching if the
+# fit ever has to be found again.
+#
+# It was 37 when six rows answered to it, and 35 at seven. Each button
+# taken into the scheme buys its own row's worth of cost: the Force ARM
+# row is as tall as a button now, because GET PARAMS and PARAMS sit in
+# it.
+#
+# What 33 buys, at a 1000px window: the six gaps between the seven
+# sections all come out at exactly SECTION_GAP; the top edge of the HUD
+# lands on the window's vertical middle; the data panel sits on the bottom
+# edge; every panel hugs its own buttons with PANEL_PAD and nothing more;
+# and nothing scrolls. 34 overflows by 6px, which raises a scrollbar and
+# pushes the HUD's edge off the middle with it.
+#
+# That last property is the one that is easy to lose. Height this column
+# does not use does not simply sit at the bottom - the layout hands it to
+# whichever panel will accept it, and the panel that accepts it is the
+# last one that can grow, which is Guided Control. Reducing PANEL_PAD
+# made Guided Control *taller*, from 60 to 66, until the buttons were
+# raised to take the freed height first. A panel that looks padded is
+# worth checking against this before its own margins are blamed.
+#
+# Three times the original 20px was asked for and does not fit: it needs
+# about 1170px of window height, and this screen offers 1000 once the
+# menu bar and Dock have taken theirs.
+CONTROL_BUTTON_H = 33
+
+# Gap between those buttons, across and down. 4px was what they had, and
+# against a 20px button that read as a deliberate hairline; against a
+# button twice that tall it reads as no gap at all, which is how a grid of
+# them turns into one dark slab. The buttons and the gaps have to be
+# sized together, not one after the other.
+#
+# Both directions, because a grid with air between its rows and none
+# between its columns looks like a mistake rather than a choice.
+CONTROL_BUTTON_GAP = 8
+
+# Gap between the sections of the left-hand column - between Arm/Disarm
+# and Preflight Calibration, and so on down to the gap between the HUD and
+# the data panel. One number for all of them, because a column whose gaps
+# are 7, 8, 7, 4 and 4 does not read as spacing at all, it reads as
+# whatever the layout happened to have left over.
+SECTION_GAP = 8
+
+# Gap between the rows inside the information section, which is one
+# section made of two rows. Deliberately smaller than SECTION_GAP: those
+# rows belong to each other, and spacing them as though they were separate
+# sections is what made the top of the column look like three of them.
+INFO_ROW_GAP = 4
+
+# Padding inside a panel of the left-hand column, above and below its rows
+# of buttons.
+#
+# It was 10, and the QGroupBox styling adds its own 6px margin and 4px of
+# padding on top of that, which reserved 21px above the first button
+# against 7 below it. On a single-row panel - Guided Control - that is
+# most of the panel's height, and a backdrop half again as tall as the
+# thing it sits behind reads as a mistake. 4 leaves the group box title
+# the room it needs and nothing spare.
+#
+# The Messages and Systems panels on the right keep the old 10. They are
+# a log and a status strip rather than rows of buttons, and nothing in
+# this column's arithmetic applies to them.
+PANEL_PAD = 4
+
+def _set_button_height(panel, height=CONTROL_BUTTON_H):
+    """Give every button in a panel a minimum height.
+
+    A minimum height rather than the stylesheet padding that sets it
+    today, because ModePanel swaps whole stylesheets as the mode changes -
+    normal, active, RTL, pending, abort, VTOL - and a padding written into
+    one of them would have to be written into all of them and kept in
+    step. A minimum survives any amount of restyling.
+    """
+    for btn in panel.findChildren(QPushButton):
+        btn.setMinimumHeight(height)
+
+
 class ModePanel(QGroupBox):
     """Row of flight-mode buttons; highlights whichever mode is currently
     active based on telemetry, so it also works as a mode indicator."""
@@ -1987,8 +2096,8 @@ class ModePanel(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Flight Mode", parent)
         grid = QGridLayout(self)
-        grid.setSpacing(4)
-        grid.setContentsMargins(6, 10, 6, 6)
+        grid.setSpacing(CONTROL_BUTTON_GAP)
+        grid.setContentsMargins(6, PANEL_PAD, 6, PANEL_PAD)
         self.buttons = {}
         # True while the aircraft is actually in AUTOLAND, which is when
         # that one button stops being a mode request and becomes the way
@@ -2044,6 +2153,9 @@ class ModePanel(QGroupBox):
         last_row = (len(self.MODE_ORDER) - 1) // 3
         grid.addWidget(self.vtol_btn, last_row, 1)
         grid.addWidget(self.fly_to_btn, last_row, 2)
+
+        # Last, so it reaches every button above including VTOL and Fly To.
+        _set_button_height(self)
 
     def _centre_vtol_label(self):
         """Put VTOL back in the middle of its own button.
@@ -2347,7 +2459,7 @@ class ArmDisarmPanel(QGroupBox):
         super().__init__("Arm / Disarm", parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
-        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setContentsMargins(6, PANEL_PAD, 6, PANEL_PAD)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
@@ -2413,6 +2525,13 @@ class ArmDisarmPanel(QGroupBox):
         self.disarm_btn.pressed.connect(self._start_hold)
         self.disarm_btn.released.connect(self._cancel_hold)
 
+        # Every button in this panel, which is ARM and Hold to DISARM
+        # plus GET PARAMS and PARAMS. The latter two share their row with
+        # the Force ARM checkbox, so that row is as tall as a button now
+        # and this panel accounts for two of the column's button rows -
+        # see CONTROL_BUTTON_H, which is what pays for them.
+        _set_button_height(self)
+
         self.set_armed_state(None)
 
     def _start_hold(self):
@@ -2466,8 +2585,8 @@ class PreflightCalPanel(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Preflight Calibration", parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(CONTROL_BUTTON_GAP)
+        layout.setContentsMargins(6, PANEL_PAD, 6, PANEL_PAD)
 
         self.cal_btn = QPushButton("Hold to Calibrate")
         self.cal_btn.setStyleSheet(self.BTN_STYLE)
@@ -2486,6 +2605,8 @@ class PreflightCalPanel(QGroupBox):
         self._hold_timer.timeout.connect(self._tick_hold)
         self.cal_btn.pressed.connect(self._start_hold)
         self.cal_btn.released.connect(self._cancel_hold)
+
+        _set_button_height(self)
 
     def _start_hold(self):
         self._hold_elapsed_ms = 0
@@ -3720,11 +3841,11 @@ class GuidedControlPanel(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Guided Control", parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(CONTROL_BUTTON_GAP)
+        layout.setContentsMargins(6, PANEL_PAD, 6, PANEL_PAD)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(4)
+        btn_row.setSpacing(CONTROL_BUTTON_GAP)
         self.speed_btn = QPushButton("Change Speed")
         self.altitude_btn = QPushButton("Change Altitude")
         self.loiter_radius_btn = QPushButton("Change Loiter Radius")
@@ -3740,6 +3861,8 @@ class GuidedControlPanel(QGroupBox):
         self.speed_btn.clicked.connect(self._prompt_speed)
         self.altitude_btn.clicked.connect(self._prompt_altitude)
         self.loiter_radius_btn.clicked.connect(self._prompt_loiter_radius)
+
+        _set_button_height(self)
 
     def _prompt_speed(self):
         speed, ok = QInputDialog.getDouble(
@@ -3860,7 +3983,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"MavGCS {APP_VERSION}")
         self.setWindowIcon(QIcon(resource_path("mavgcs_icon.png")))
-        self.resize(1300, 920)
+        # 1000 high, not 920, and the extra 80px is not for show. The HUD's
+        # top edge is meant to fall on the window's vertical middle, and
+        # the panels above it have to end there for that to be possible.
+        # At 920 they do not: they finish 71px lower, and the only way to
+        # pull them up was to take the command buttons back down to the
+        # thin strip they started as. 1000 is also as tall as this screen
+        # allows once the menu bar and Dock are accounted for.
+        self.resize(1300, 1000)
 
         self.horizon = ArtificialHorizon()
         self.horizon.setMinimumHeight(175)
@@ -4066,21 +4196,42 @@ class MainWindow(QMainWindow):
             QCheckBox { font-size: 10px; }
         """)
         left_layout = QVBoxLayout(left_content)
-        left_layout.setSpacing(4)
+        left_layout.setSpacing(SECTION_GAP)
         left_layout.setContentsMargins(6, 6, 6, 6)
+        # The information section: link state and vehicle state on one
+        # row, then the last command with its ACK and the flight timer.
+        #
+        # Two rows but one section, so they are wrapped in a layout of
+        # their own. Added straight to the column they were two items,
+        # which put a full SECTION_GAP between them - spacing meant for
+        # the space between sections, opening up inside one.
+        info_section = QVBoxLayout()
+        info_section.setSpacing(INFO_ROW_GAP)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status_label, stretch=1)
         status_row.addWidget(self.vehicle_state_label)
-        left_layout.addLayout(status_row)
+        info_section.addLayout(status_row)
         # Command/ACK text on the left, flight time in the space beside it.
         info_row = QHBoxLayout()
         info_col = QVBoxLayout()
-        info_col.setSpacing(4)
+        info_col.setSpacing(INFO_ROW_GAP)
         info_col.addWidget(self.command_label)
         info_col.addWidget(self.ack_label)
         info_row.addLayout(info_col, stretch=1)
         info_row.addWidget(self.flight_time_label, alignment=Qt.AlignTop)
-        left_layout.addLayout(info_row)
+        info_section.addLayout(info_row)
+        left_layout.addLayout(info_section)
+        # No stretch anywhere in this column. There were three, then one,
+        # and both arrangements bought the same thing at the same price:
+        # a stretch absorbs leftover height by opening a gap, so whichever
+        # gap it sits in stops being SECTION_GAP. As the one above this
+        # panel it was 4px wide, which made the gap here 12 against the 8
+        # everywhere else.
+        #
+        # With no stretch the seven sections are spaced by SECTION_GAP and
+        # nothing else, and the column is sized to fill its viewport
+        # exactly - see CONTROL_BUTTON_H, which is what the fit is tuned
+        # with.
         left_layout.addWidget(self.arm_panel)
         # The button lives on the arm panel now; everything that
         # updates its text still reaches it through this name.
@@ -4088,6 +4239,21 @@ class MainWindow(QMainWindow):
         self.arm_panel.params_requested.connect(self.on_show_parameters)
         self.arm_panel.get_params_requested.connect(
             self.on_refresh_parameters)
+        # The stretches between these four panels are what absorb the
+        # height this column does not otherwise use, and they are here
+        # rather than in one lump lower down for a reason worth writing
+        # out.
+        #
+        # macOS lays these panels out about 160px shorter than Windows
+        # does - same widgets, same rows, smaller font metrics - so a Mac
+        # has slack in this column that Windows never has. Collected in a
+        # single stretch it appeared as one conspicuous gap; spread
+        # between the groups it reads as the spacing the Windows build
+        # gets for free from its own taller panels.
+        #
+        # What it must not do is sit between the Guided Control panel and
+        # the HUD, or below the data panel: the HUD belongs directly under
+        # Guided Control, and the data panel belongs on the bottom edge.
         left_layout.addWidget(self.preflight_cal_panel)
         left_layout.addWidget(self.mode_panel)
         left_layout.addWidget(self.guided_panel)
@@ -4105,7 +4271,47 @@ class MainWindow(QMainWindow):
         view_area = self.view_area
         self.view_toggle_btn = view_area.button
         self.view_toggle_btn.clicked.connect(self.on_toggle_view)
-        left_layout.addWidget(view_area, stretch=1)
+        # The HUD and the data panel beneath it are one unit, and
+        # HUD_BLOCK_H is that unit's height. It is the number that decides
+        # where the top edge of the HUD falls, because the data panel is
+        # pinned to the bottom of this column: the block hangs from the
+        # bottom, so its height is its top edge.
+        #
+        # 484 puts that edge on the window's vertical middle at the
+        # default 1000px height. Stated as the block rather than as a
+        # HUD-to-data ratio because the edge is the thing being placed;
+        # a ratio got within 3px and could not be nudged closer without
+        # becoming a magic number with no meaning of its own. The ratio
+        # is still there as a consequence - 281 against 199, a little over
+        # 1.4 - it is simply not what is being chosen.
+        #
+        # The HUD used to carry the only stretch factor in this column and
+        # absorbed every pixel the panels above did not use: 377px against
+        # the data panel's 133 on a 920-high window, nearly three times
+        # the height it should have had.
+        #
+        # The 3D FPV view shares this slot on purpose and is therefore
+        # sized by the same rule. That is the intent, not a side effect:
+        # the slot is the HUD's space, whichever of the two is in it.
+        HUD_BLOCK_H = 484
+        view_area.setFixedHeight(HUD_BLOCK_H - left_layout.spacing()
+                                 - self.telemetry.sizeHint().height())
+        # Both halves of the block are pinned, not merely given a size.
+        # The HUD has a fixed height above; this pins the data panel to
+        # its natural one so that leftover height in the column can never
+        # be handed to it - a QVBoxLayout will grow whatever will accept
+        # growth, and a data panel that stretches moves the HUD's edge off
+        # the middle and spreads its own rows while doing it.
+        self.telemetry.setFixedHeight(self.telemetry.sizeHint().height())
+        # The spare height in this column goes here, above the HUD, which
+        # puts the HUD and the data panel against the bottom of the window
+        # where they belong. It cannot go below the data panel - that
+        # leaves the panel floating in the middle of the column with a gap
+        # underneath it - and it cannot be shared among the panels above,
+        # which would stretch fixed rows of buttons to fill it.
+        #
+        # No stretch here: the HUD sits directly beneath Guided Control.
+        left_layout.addWidget(view_area)
         left_layout.addWidget(self.telemetry)
 
         # Everything above is stacked with its natural size, not squeezed to
