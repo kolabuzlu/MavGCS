@@ -252,9 +252,16 @@ class _Reader(QThread):
             # address does - instantly, with nothing to show - and
             # blaming the address sends the user to check the one thing
             # that is not wrong. The macOS opencv-python wheels stopped
-            # carrying FFmpeg after 4.12; the Windows ones still do, so
-            # this is not a message Windows can produce.
-            if not _has_ffmpeg(cv2):
+            # carrying FFmpeg after 4.12; the Windows ones still do.
+            #
+            # Gated on the platform and not only on the probe, so that
+            # Windows reaches the same line V2.1.7 did without asking a
+            # question V2.1.7 never asked. The probe answering True on
+            # every Windows build there has ever been would make this
+            # gate redundant - but "the answer has always been the same"
+            # is not the same as "the answer cannot differ", and the
+            # released platform is held to the second one.
+            if sys.platform == "darwin" and not _has_ffmpeg(cv2):
                 return ("This build has no FFmpeg backend, so network "
                         "cameras cannot be opened at all. On macOS, "
                         "opencv-python-headless 4.12 is the last version "
