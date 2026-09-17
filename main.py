@@ -128,6 +128,26 @@ if MACOS:
     # this would be flown from. The HUD is only that small on that
     # screen: at WINDOW_H it is 345px.
     HUD_MIN_H = 120
+    # The fixed-width family for the readouts that are meant to line up:
+    # the link statistics, which are rewritten every tick, and the message
+    # log, where timestamps sit in a column.
+    #
+    # Not Consolas, which is what Windows asks for and has. A Mac does not
+    # have it, and the rest of that declaration does not save it: measured,
+    # "Consolas, monospace" resolves on this machine to .AppleSystemUIFont,
+    # which is proportional. The generic monospace never gets a look in, so
+    # the one property those two readouts are styled for was the one they
+    # were not getting, and digits changing width made the numbers jitter
+    # sideways as they updated. Qt says so on every launch - "Replace uses
+    # of missing font family Consolas" - and spends about 200ms of startup
+    # populating alias tables looking for it.
+    #
+    # Menlo rather than SF Mono: Menlo has shipped on every Mac since 10.6,
+    # where SF Mono is not reliably available to applications outside Xcode
+    # and Terminal. Consolas is left out of the list rather than kept in
+    # front of it, because naming it is what triggers the lookup and it can
+    # never match here.
+    MONO_FAMILY = "Menlo, monospace"
     # 1000 rather than 920. At 920 the panels above the HUD finish 71px
     # below the middle and the only way to pull them up was to take the
     # buttons back to the strips they started as. It is also as tall as a
@@ -152,6 +172,8 @@ else:
     # content exactly viewport-height and the scroll bar out of sight.
     HUD_BLOCK_H = None
     HUD_MIN_H = 175
+    # Exactly what V2.1.7 declares, character for character.
+    MONO_FAMILY = "Consolas, monospace"
     WINDOW_H = 920
 
 # Why every button in the macOS column is given a background of its own.
@@ -3487,7 +3509,8 @@ class ConnectionPanel(QGroupBox):
         self.link_stats_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.link_stats_label.setStyleSheet(
-            "color: #9aa4ad; font-size: 10px; font-family: Consolas, monospace;")
+            "color: #9aa4ad; font-size: 10px; font-family: %s;"
+            % MONO_FAMILY)
         self.link_stats_label.setToolTip(
             "What the radio link is carrying: bytes and messages a second "
             "in and out, and the share of the vehicle's frames that did not "
@@ -3637,7 +3660,7 @@ class MessagesPanel(QGroupBox):
         logo_path = resource_path("mavgcs_logo_watermark.png").replace("\\", "/")
         self.text_edit.setStyleSheet(
             "background-color: #16171a; color: white; "
-            "font-family: Consolas, monospace; font-size: 10px; border: none; "
+            f"font-family: {MONO_FAMILY}; font-size: 10px; border: none; "
             f"background-image: url({logo_path}); "
             "background-repeat: no-repeat; background-position: right; "
             # Without this the background belongs to the scrolled content and
@@ -5994,8 +6017,9 @@ class MainWindow(QMainWindow):
             "RX %s  %.0f/s     TX %s     loss %.1f%%"
             % (_rate_text(rx), stats.get("rx_mps", 0.0), _rate_text(tx), loss))
         self.link_stats_label.setStyleSheet(
-            "color: %s; font-size: 10px; font-family: Consolas, monospace;"
-            % ("#e6a23c" if loss >= self.LINK_LOSS_WARN_PCT else "#9aa4ad"))
+            "color: %s; font-size: 10px; font-family: %s;"
+            % ("#e6a23c" if loss >= self.LINK_LOSS_WARN_PCT else "#9aa4ad",
+               MONO_FAMILY))
 
     def _forget_parameters(self):
         """Drop the list, so nothing on screen outlives the vehicle."""
