@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.1.6 - Terrain Follow button added.
+Bug fixes and improvements.
+
 ## V2.1.5 - Position QR code added.
 Bug fixes and improvements.
 
