@@ -77,8 +77,16 @@ class Stub:
 
 
 def run(settings, discrete_present, on_discrete, note_written,
-        connected=False):
-    """Returns (stub, settings-after)."""
+        connected=False, platform="win32"):
+    """Returns (stub, settings-after).
+
+    The platform is faked along with everything else. Settling is
+    Windows-only by design - main.py returns immediately anywhere else -
+    but the decision it makes there is ordinary logic, worth checking
+    whatever machine runs the suite. CI runs this on macOS too, where
+    without the fake every scenario below would pass by doing nothing.
+    Scenario 8 is the one that checks the guard itself.
+    """
     store = dict(settings)
     app_main.load_settings = lambda: dict(store)
     app_main.save_setting = lambda k, v: store.__setitem__(k, v)
@@ -87,7 +95,12 @@ def run(settings, discrete_present, on_discrete, note_written,
     app_main.QTimer = FakeTimer
     FakeTimer.fired = []
     stub = Stub(connected=connected)
-    stub._settle_graphics_card(RTX if on_discrete else IRIS)
+    was = sys.platform
+    try:
+        sys.platform = platform
+        stub._settle_graphics_card(RTX if on_discrete else IRIS)
+    finally:
+        sys.platform = was
     for _ms, fn in FakeTimer.fired:       # the restart is deferred; run it
         fn()
     return stub, store
@@ -164,6 +177,19 @@ s, store = run({I: True, R: True}, discrete_present=True, on_discrete=True,
                note_written=True)
 note("cleared, so CPU rasterising stops on a card that does not need it",
      store.get(I) is False)
+
+print("")
+print("8. not Windows: the mechanism stays out of the way entirely")
+# A Mac has no registry preference to write and picks its own GPU, so
+# main.py returns before any of the above can happen. Every scenario
+# before this one reaches the logic only because run() fakes the
+# platform; this is the one that checks what the real guard does.
+for plat in ("darwin", "linux"):
+    s, store = run({}, discrete_present=True, on_discrete=False,
+                   note_written=True, platform=plat)
+    note("%s: never restarts" % plat, s.restarted == 0)
+    note("%s: writes no setting" % plat, store == {}, repr(store))
+    note("%s: says nothing" % plat, s.said == [], repr(s.said))
 
 print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")
