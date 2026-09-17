@@ -194,6 +194,34 @@ LEAFLET_HTML = """
   #video-btn:hover { background: rgba(170,74,74,0.92); }
   #video-btn:active { background: rgba(120,48,48,1); }
 
+  #qr-btn {
+    /* Sized and coloured to sit beside the credit as its equal: the same
+       black backing and the same corner radius, square because the icon
+       is. Height matches the caption's box - 11px text in 4px padding -
+       so the two share a baseline instead of one floating against the
+       other. */
+    box-sizing: border-box;
+    /* 25, deliberately a little taller than the 20px caption beside it
+       rather than flush with it. Matching the two exactly was tried and
+       looked meaner than it reads here: the caption is text to glance
+       at, this is a target to hit, and a couple of pixels of presence is
+       what separates the two. The row centres them, so the overhang is
+       even top and bottom. */
+    width: 25px; height: 25px;
+    padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 4px;
+    color: #fff;
+    cursor: pointer;
+    /* The row above ignores clicks so it cannot shadow the map; this one
+       element has to take them back. */
+    pointer-events: auto;
+  }
+  #qr-btn:hover { background: rgba(0,0,0,0.8); border-color: rgba(255,255,255,0.30); }
+  #qr-btn:active { background: rgba(0,0,0,0.95); }
+
   #compass {
     /* Directly above the terrain radar (which is 200px tall at bottom:26px),
        same size and position so the two read as one stack of instruments.
@@ -624,13 +652,40 @@ LEAFLET_HTML = """
          white-space: nowrap; overflow: hidden;
          text-overflow: ellipsis;"></div>
 </div>
-<div id="credit" style="
+<!-- The credit and the QR button ride in one row so the button stays
+     beside the text whatever the text measures - the caption is a name
+     and names are not a fixed width. The row itself takes no clicks;
+     only the button inside it does. -->
+<div id="credit-row" style="
     position: absolute; bottom: 8px; left: 8px;
-    background: rgba(0,0,0,0.6); color: white;
-    padding: 4px 10px; border-radius: 4px;
-    font-family: sans-serif; font-size: 11px;
+    display: flex; align-items: center; gap: 6px;
     z-index: 1000; pointer-events: none;
-">Created by Derin Hakan Karakurt</div>
+">
+  <div id="credit" style="
+      background: rgba(0,0,0,0.6); color: white;
+      padding: 4px 10px; border-radius: 4px;
+      font-family: sans-serif; font-size: 11px;
+  ">Created by Derin Hakan Karakurt</div>
+  <button id="qr-btn" type="button"
+          title="Show the aircraft's last position as a QR code, to scan with a phone">
+    <!-- Drawn rather than an image file, the same way the globe icon on
+         Fly To is: at this size a scaled bitmap turns the fine squares
+         into mush, and this stays crisp at any display scaling. Three
+         finder squares and a few modules - a QR code at a glance, not a
+         scannable one. -->
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+      <g fill="currentColor">
+        <path d="M3 3h7v7H3V3zm2 2v3h3V5H5z"/>
+        <path d="M14 3h7v7h-7V3zm2 2v3h3V5h-3z"/>
+        <path d="M3 14h7v7H3v-7zm2 2v3h3v-3H5z"/>
+        <rect x="14" y="14" width="3" height="3"/>
+        <rect x="18" y="18" width="3" height="3"/>
+        <rect x="14" y="19" width="2" height="2"/>
+        <rect x="19" y="14" width="2" height="2"/>
+      </g>
+    </svg>
+  </button>
+</div>
 <button id="video-btn" type="button"
         title="Show a camera or capture card in its own window">Live Video</button>
 <div id="compass" title="Heading (white), course over ground (orange), wind (blue)">
@@ -714,6 +769,20 @@ function wireVideoButton() {
     btn.addEventListener('click', function (e) {
         e.preventDefault();
         if (bridge) { bridge.videoRequested(); }
+    });
+}
+
+function wireQrButton() {
+    var btn = document.getElementById('qr-btn');
+    if (!btn) { return; }
+    // Without these the press also reaches the map underneath and drops a
+    // waypoint or opens Fly To, which is the last thing wanted from a
+    // button sitting on top of it.
+    L.DomEvent.disableClickPropagation(btn);
+    L.DomEvent.disableScrollPropagation(btn);
+    btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        if (bridge) { bridge.qrRequested(); }
     });
 }
 
@@ -1135,6 +1204,7 @@ updateZoomIndicator();
 
 // After Leaflet exists, because the button borrows its click guards.
 wireVideoButton();
+wireQrButton();
 
 var tilesFailed = false;
 var TILE_RETRY_MS = 15000;
@@ -2923,6 +2993,7 @@ class Bridge(QObject):
     terrain_cache_limit_changed = Signal(int)
     terrain_cache_clear_requested = Signal()
     video_requested = Signal()
+    qr_requested = Signal()
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
@@ -2983,6 +3054,10 @@ class Bridge(QObject):
         self.video_requested.emit()
 
     @Slot()
+    def qrRequested(self):
+        self.qr_requested.emit()
+
+    @Slot()
     def tileCacheClearRequested(self):
         self.tile_cache_clear_requested.emit()
 
@@ -3007,6 +3082,7 @@ class MapView(QWebEngineView):
     terrain_cache_limit_changed = Signal(int)
     terrain_cache_clear_requested = Signal()
     video_requested = Signal()
+    qr_requested = Signal()
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
@@ -3055,6 +3131,8 @@ class MapView(QWebEngineView):
             self.tile_cache_clear_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.video_requested.connect(
             self.video_requested, Qt.ConnectionType.QueuedConnection)
+        self._bridge.qr_requested.connect(
+            self.qr_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_cache_limit_changed.connect(
             self.terrain_cache_limit_changed, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_cache_clear_requested.connect(

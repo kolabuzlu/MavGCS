@@ -9,3 +9,7 @@ imagecodecs
 # pygrabber names the devices, OpenCV reads the frames.
 opencv-python-headless
 pygrabber
+# The QR code for the aircraft's last position. Pure Python and no
+# dependencies of its own, which matters: the code has to be drawable in
+# a field with no internet, which is exactly where it is wanted.
+segno

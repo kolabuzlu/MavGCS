@@ -2793,6 +2793,109 @@ class TelemetryRatesDialog(QDialog):
         return att, pos, full
 
 
+class PositionQrDialog(QDialog):
+    """The aircraft's last known position, as something a phone can scan.
+
+    The case this is for is an aircraft on the ground somewhere it was not
+    meant to be. The last fix is on screen already, but reading twelve
+    digits off a laptop and typing them into a phone in a field, probably
+    in a hurry, is exactly where a transposed digit costs an hour of
+    walking. Scanning cannot transpose a digit.
+
+    The link is usually gone by then, which is why this reads the last
+    position MavGCS kept rather than asking for a fresh one.
+    """
+
+    # Drops a pin and offers directions from there. Deliberately the
+    # universal https form rather than a geo: URI: geo: is Android-only
+    # in practice, while this opens the Google Maps app when it is
+    # installed and the website when it is not, on either phone.
+    MAPS_URL = "https://www.google.com/maps/search/?api=1&query=%.6f,%.6f"
+
+    def __init__(self, lat, lon, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Last known position")
+        self.setModal(True)
+        self._url = self.MAPS_URL % (lat, lon)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
+
+        image = QLabel()
+        image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = self._render(self._url)
+        if pixmap is None:
+            image.setText("A QR code could not be drawn.\n"
+                          "The coordinates below are the same thing.")
+            image.setStyleSheet("color: #e0b0b0; font-size: 12px;")
+        else:
+            image.setPixmap(pixmap)
+            # White all the way to the edge: a scanner needs the quiet
+            # zone around the code, and a dark dialog would eat it.
+            image.setStyleSheet("background: white; border-radius: 6px;")
+        layout.addWidget(image)
+
+        coords = QLabel("%.6f, %.6f" % (lat, lon))
+        coords.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        coords.setStyleSheet("font-size: 14px; font-weight: bold;")
+        # Selectable so the numbers can still be copied out by hand -
+        # scanning is the quick path, not the only one.
+        coords.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(coords)
+
+        hint = QLabel("Scan with a phone to open it in Google Maps.")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("color: #9aa4ad; font-size: 11px;")
+        layout.addWidget(hint)
+
+        row = QHBoxLayout()
+        copy_btn = QPushButton("Copy coordinates")
+        copy_btn.clicked.connect(self._copy)
+        row.addWidget(copy_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setDefault(True)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        self._coords_text = "%.6f, %.6f" % (lat, lon)
+        self._copy_btn = copy_btn
+
+    @staticmethod
+    def _render(url):
+        """The code as a pixmap, or None if it could not be made.
+
+        Imported here rather than at the top so that a build missing the
+        library still starts: a ground station that will not open is a
+        far worse outcome than one without a QR code.
+        """
+        try:
+            import io
+
+            import segno
+            buf = io.BytesIO()
+            # Error correction M: readable with a quarter of the code
+            # obscured, which on a laptop screen in daylight - fingerprints,
+            # glare, a low-resolution phone camera - is the difference
+            # between scanning first time and giving up.
+            segno.make(url, error="m").save(buf, kind="png", scale=7,
+                                            border=3)
+            pixmap = QPixmap()
+            if pixmap.loadFromData(buf.getvalue(), "PNG"):
+                return pixmap
+        except Exception:
+            pass
+        return None
+
+    def _copy(self):
+        QApplication.clipboard().setText(self._coords_text)
+        self._copy_btn.setText("Copied")
+        QTimer.singleShot(1200,
+                          lambda: self._copy_btn.setText("Copy coordinates"))
+
+
 class UpdateDialog(QDialog):
     """
     One dialog for every outcome of an update check - already current, a
@@ -4003,6 +4106,7 @@ class MainWindow(QMainWindow):
         self.map_view.tile_cache_limit_changed.connect(self.on_tile_cache_limit)
         self.map_view.tile_cache_clear_requested.connect(self.on_tile_cache_clear)
         self.map_view.video_requested.connect(self.on_video_requested)
+        self.map_view.qr_requested.connect(self.on_qr_requested)
         self.map_view.terrain_cache_limit_changed.connect(self.on_terrain_cache_limit)
         self.map_view.terrain_cache_clear_requested.connect(self.on_terrain_cache_clear)
         # Keep the map's cache readout current: the size changes as tiles
@@ -4389,6 +4493,20 @@ class MainWindow(QMainWindow):
         )
 
     # ---- update checking ------------------------------------------------
+
+    def on_qr_requested(self):
+        """Show the last known position as a QR code.
+
+        Deliberately the last position MavGCS has, not a live one: the
+        moment this is wanted most is after the aircraft is down and the
+        link with it. _last_lat is never cleared when a link drops, so
+        the fix outlives the telemetry that carried it.
+        """
+        if self._last_lat is None or self._last_lon is None:
+            self._show_link_message(
+                "No position yet - nothing to put in a QR code.")
+            return
+        PositionQrDialog(self._last_lat, self._last_lon, self).exec()
 
     def on_video_requested(self):
         """Open the video window, or bring it back if it is already up.
