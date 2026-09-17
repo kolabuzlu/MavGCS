@@ -97,14 +97,37 @@ if MACOS:
     # reserved 21px above the first button against 7 below it - most of
     # the height of a single-row panel like Guided Control.
     PANEL_PAD_TOP = PANEL_PAD_BOTTOM = 4
-    # Blank rows between the four groups of readings in the data panel,
-    # which is what sets that panel's height.
-    TELEMETRY_GROUP_GAP = 22
-    # The HUD and the data panel as one pinned unit, and this is its
-    # height. It is what places the top edge of the HUD, because the unit
-    # hangs from the bottom of the column: its height is its top edge. 484
-    # puts that edge on the window's vertical middle at WINDOW_H.
-    HUD_BLOCK_H = 484
+    # Blank rows between the four groups of readings in the data panel.
+    # 0, like Windows: the 22 this had bought the block its extra height
+    # and cost 66px of a column that turned out not to have them. See
+    # HUD_MIN_H.
+    TELEMETRY_GROUP_GAP = 0
+    # None, as on Windows: the HUD carries the column's stretch factor
+    # and absorbs whatever the panels above leave over.
+    #
+    # It was pinned at 484, which put the top edge of the HUD exactly on
+    # the window's vertical middle - and pinned the whole block to one
+    # height at every window size, so the column needed 978px whatever
+    # window it was given. The data panel then ended at y=982 on a 775px
+    # window as readily as on a 1000px one: off the bottom of the screen,
+    # behind a scroll bar. That is the same fault that was just taken out
+    # of the Windows column, and it was in this one, unnoticed because
+    # this machine's screen happens to be exactly tall enough.
+    #
+    # Stretching costs the guarantee and keeps the result: measured at
+    # WINDOW_H the top edge lands on 498 against a middle of 500. Two
+    # pixels, and it is now a consequence of where the panels above end
+    # rather than something enforced - so it holds at this window height
+    # and drifts at others, which is the honest trade for a column that
+    # cannot hide the flight readings.
+    HUD_BLOCK_H = None
+    # How far the HUD may be squeezed before the column gives up and
+    # scrolls. 175 is what it has always asked for and what Windows still
+    # gets. 120 is what lets this column fit a 13-inch MacBook Air with
+    # its Dock showing - 755px of viewport - which is the smallest screen
+    # this would be flown from. The HUD is only that small on that
+    # screen: at WINDOW_H it is 345px.
+    HUD_MIN_H = 120
     # 1000 rather than 920. At 920 the panels above the HUD finish 71px
     # below the middle and the only way to pull them up was to take the
     # buttons back to the strips they started as. It is also as tall as a
@@ -128,6 +151,7 @@ else:
     # the mechanism the Windows column is built on: it is what kept the
     # content exactly viewport-height and the scroll bar out of sight.
     HUD_BLOCK_H = None
+    HUD_MIN_H = 175
     WINDOW_H = 920
 
 # Why every button in the macOS column is given a background of its own.
@@ -4046,7 +4070,7 @@ class MainWindow(QMainWindow):
         self.resize(1300, WINDOW_H)
 
         self.horizon = ArtificialHorizon()
-        self.horizon.setMinimumHeight(175)
+        self.horizon.setMinimumHeight(HUD_MIN_H)
         self.telemetry = TelemetryPanel()
         self.mode_panel = ModePanel()
         self.arm_panel = ArmDisarmPanel()
