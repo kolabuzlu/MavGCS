@@ -11,7 +11,11 @@ Usage - real ELRS module later (just swap the connection string):
     python main.py udpin:0.0.0.0:14550      # if your module instead connects TO you
     python main.py tcp:192.168.1.50:5760
     python main.py com3:57600               # Windows serial telemetry radio
-    python main.py /dev/ttyUSB0:57600       # Linux/Mac serial telemetry radio
+    python main.py /dev/ttyUSB0:57600       # Linux serial telemetry radio
+    python main.py /dev/cu.usbserial-10:57600   # Mac serial telemetry radio
+                                             # ls /dev/cu.* to find the name;
+                                             # cu.* and not tty.*, which waits
+                                             # for a carrier a radio never raises
 
 Nothing else in this app changes when you switch from SITL to the real
 vehicle - same parsing, same widgets. Only this one string differs.

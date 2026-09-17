@@ -45,3 +45,33 @@ attempt does not succeed.
 
 If you refuse and change your mind, the switch is in System Settings ->
 Privacy & Security -> Camera.
+
+### Running from source
+
+Either platform, if you want to change MavGCS rather than just use it.
+You need Python 3.9 or newer and about 1GB for the libraries.
+
+**Windows** - `run.bat` (in PowerShell, `.\run.bat`).
+
+**macOS** - `./run.sh`.
+
+Both find a Python, install what is missing from `requirements.txt` on
+the first run, and then start the program. Anything you type after them
+is passed to `main.py`, so:
+
+```
+./run.sh                              listen on udp 14550 (the default)
+./run.sh tcp:127.0.0.1:5762           SITL over tcp
+./run.sh /dev/cu.usbserial-XXXX:57600 a radio on a serial port
+./run.sh --selftest                   check the link only, no window
+```
+
+`ls /dev/cu.*` lists the serial devices. Use the `cu.` name rather than
+the `tty.` one for the same device: opening `tty.` on a Mac waits for a
+carrier signal that a telemetry radio never raises, so it appears to
+hang.
+
+The one difference between the two scripts: `run.sh` keeps the libraries
+in `.venv/` instead of installing them into the Python it found, because
+a Homebrew or python.org Python refuses to install outside a virtual
+environment and the Xcode one is shared with the system.
