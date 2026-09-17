@@ -112,11 +112,40 @@ from update_check import UpdateChecker, UpdateDownloader, RELEASES_PAGE
 from track_export import write_track
 
 
+class _TappableLabel(QLabel):
+    """A QLabel that says when it was pressed.
+
+    QLabel has no clicked signal of its own, and the alternative - an
+    event filter on the panel - puts the handling a long way from the
+    widget it belongs to.
+    """
+
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):
+        # On release rather than press, so a press that wanders off the
+        # label before letting go does nothing, which is what every other
+        # button on the screen does.
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.rect().contains(event.position().toPoint())):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class TelemetryPanel(QFrame):
     """4x4 dashboard grid: small label above a large value, all white
     text. Values are updated by key name, same pattern as before."""
 
     # Row-major order, 4 columns - matches the requested layout exactly.
+    # Tapping either speed switches both, because comparing them is the
+    # whole point of having them side by side - one in m/s against one in
+    # kph would be a trap rather than a choice. Vertical speed is left
+    # alone: a climb rate is quoted in m/s or feet per minute, never kph.
+    SPEED_KEYS = ("airspeed", "groundspeed")
+    SPEED_NAMES = {"airspeed": "AirSpeed", "groundspeed": "GroundSpeed"}
+    SPEED_UNIT_SETTING = "speed_unit_kph"
+    MPS_TO_KPH = 3.6
+
     FIELDS = [
         ("airspeed", "AirSpeed (m/s)"),
         ("groundspeed", "GroundSpeed (m/s)"),
@@ -145,18 +174,69 @@ class TelemetryPanel(QFrame):
         grid.setVerticalSpacing(1)
         grid.setContentsMargins(8, 6, 8, 6)
         self.labels = {}
+        # The speeds as the aircraft reported them, in m/s, kept so that
+        # switching units can redraw immediately instead of waiting for
+        # the next telemetry frame - at 2 Hz on a poor link that wait is
+        # long enough to look broken.
+        self._speed_mps = {}
+        self._speed_names = {}
+        self._speed_kph = bool(
+            load_settings().get(self.SPEED_UNIT_SETTING, False))
         for i, (key, text) in enumerate(self.FIELDS):
             row = (i // 4) * 2
             col = i % 4
-            name_label = QLabel(text)
+            speed = key in self.SPEED_KEYS
+            name_label = _TappableLabel(text) if speed else QLabel(text)
             name_label.setAlignment(Qt.AlignCenter)
             name_label.setStyleSheet("color: white; font-size: 9px;")
-            value_label = QLabel("--")
+            value_label = _TappableLabel("--") if speed else QLabel("--")
             value_label.setAlignment(Qt.AlignCenter)
             value_label.setStyleSheet("color: white; font-size: 14px; font-weight: bold;")
             grid.addWidget(name_label, row, col)
             grid.addWidget(value_label, row + 1, col)
             self.labels[key] = value_label
+            if speed:
+                # Both halves of the cell answer, because the caption and
+                # the number read as one thing and there is no telling
+                # which half a finger lands on.
+                self._speed_names[key] = name_label
+                for widget in (name_label, value_label):
+                    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+                    widget.setToolTip("Tap to switch between m/s and kph")
+                    widget.clicked.connect(self.toggle_speed_unit)
+        self._apply_speed_unit()
+
+    def set_speed(self, key, mps):
+        """A speed straight from the aircraft, in m/s. The panel converts."""
+        self._speed_mps[key] = mps
+        self._render_speed(key)
+
+    def _render_speed(self, key):
+        label = self.labels.get(key)
+        if label is None:
+            return
+        mps = self._speed_mps.get(key)
+        if mps is None:
+            label.setText("--")
+            return
+        value = mps * self.MPS_TO_KPH if self._speed_kph else mps
+        label.setText("%.2f" % value)
+        if label.styleSheet() != self.NORMAL_STYLE:
+            label.setStyleSheet(self.NORMAL_STYLE)
+
+    def toggle_speed_unit(self):
+        """Switch both speeds between m/s and kph, and remember it."""
+        self._speed_kph = not self._speed_kph
+        save_setting(self.SPEED_UNIT_SETTING, self._speed_kph)
+        self._apply_speed_unit()
+
+    def _apply_speed_unit(self):
+        unit = "kph" if self._speed_kph else "m/s"
+        for key in self.SPEED_KEYS:
+            name_label = self._speed_names.get(key)
+            if name_label is not None:
+                name_label.setText("%s (%s)" % (self.SPEED_NAMES[key], unit))
+            self._render_speed(key)
 
     # A reading that did not come from the aircraft. Grey rather than
     # white, so a borrowed number never passes for one the vehicle
@@ -5000,8 +5080,11 @@ class MainWindow(QMainWindow):
         self.map_view.update_terrain_fan(elevations, range_m, ang_cells, rad_cells)
 
     def on_vfr(self, airspeed, groundspeed, climb, throttle=None):
-        self.telemetry.set_value("airspeed", f"{airspeed:.2f}")
-        self.telemetry.set_value("groundspeed", f"{groundspeed:.2f}")
+        # Handed over in m/s as the aircraft sends them; the panel decides
+        # whether to show m/s or kph, so that tapping it can convert what
+        # is already on screen rather than only what arrives next.
+        self.telemetry.set_speed("airspeed", airspeed)
+        self.telemetry.set_speed("groundspeed", groundspeed)
         self.telemetry.set_value("vspeed_mps", f"{climb:.2f}")
         self.horizon.set_airspeed(airspeed)
         self._return_home.set_airspeed(airspeed)
