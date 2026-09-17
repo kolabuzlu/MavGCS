@@ -10,9 +10,56 @@ The trick behind every AI (attitude indicator) widget:
 """
 
 import math
+import sys
+
 from PySide6.QtWidgets import QWidget, QComboBox
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QFont
 from PySide6.QtCore import Qt, QPointF, QRect, QRectF
+
+MACOS = sys.platform == "darwin"
+
+# Ask macOS for tabular figures on this instrument's labels.
+#
+# Every label here is QFont("Sans", ...). "Sans" is a fontconfig alias.
+# Windows resolves it to something and keeps doing so, untouched. macOS
+# has no family behind it - it is not in QFontDatabase.families() - and
+# falls through to .AppleSystemUIFont, which is proportional: its digits
+# are 5, 6 or 7 pixels wide depending on which digit it is.
+#
+# So every number on this widget changed width as its value changed. At
+# the 11pt bold of the airspeed and altitude readouts, "120" measured
+# 19px against "888" at 22px - which means those two, the heading and the
+# battery figures all shifted sideways while they updated, several times
+# a second, on the instrument being watched while flying.
+#
+# The fix is not a different family. That face is the one that belongs
+# here; naming a real one instead changed how the whole instrument looked
+# in order to fix how its numbers moved. "tnum" is the OpenType feature
+# for tabular figures, which the digits in that font already have -
+# asking for it leaves the typeface exactly as it was and gives every
+# digit one advance. Measured at all five sizes this widget uses, 7 to 11
+# bold: the per-digit widths collapse to a single value and "120" and
+# "888" come out identical.
+#
+# It also buys a little room rather than costing it, which is the
+# opposite of what it looks like it should do. A number can no longer be
+# made of the widest glyphs, so the widest possible reading gets
+# narrower: at 380x200, the tightest this widget is drawn, "8888.8" goes
+# from 43px to 41px inside a 48px box. Clearance at the worst case
+# improves from 5px to 7px.
+#
+# Nothing is asked for where the question does not arise: Windows gets
+# the QFont it always got, and a Qt too old to know about font features
+# keeps today's behaviour rather than failing inside paintEvent.
+HUD_TABULAR_DIGITS = MACOS and hasattr(QFont, "Tag")
+
+
+def _hud_font(*args):
+    """The font for a label on this instrument, as QFont takes it."""
+    font = QFont(*args)
+    if HUD_TABULAR_DIGITS:
+        font.setFeature(QFont.Tag("tnum"), 1)
+    return font
 
 
 class ArtificialHorizon(QWidget):
@@ -243,7 +290,7 @@ class ArtificialHorizon(QWidget):
         # underneath can be any brightness, and white on pale ground was
         # hard to read. Sized to the text so the plinth is no wider than
         # it needs to be.
-        font = QFont("Sans")
+        font = _hud_font("Sans")
         font.setPointSizeF(7.0 * scale)
         painter.setFont(font)
         text = f"{self.throttle:.0f}%" if self.throttle is not None else "--"
@@ -301,7 +348,7 @@ class ArtificialHorizon(QWidget):
         painter.drawLine(QPointF(-big, offset), QPointF(big, offset))
 
         # Pitch ladder
-        painter.setFont(QFont("Sans", 8))
+        painter.setFont(_hud_font("Sans", 8))
         for deg in range(-90, 91, 10):
             if deg == 0:
                 continue
@@ -349,7 +396,7 @@ class ArtificialHorizon(QWidget):
         painter.setClipRect(tape_rect)
         pixels_per_deg = tape_w / 60.0  # shows +/-30 deg around current heading
         cardinal = {0: "N", 90: "E", 180: "S", 270: "W"}
-        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 8, QFont.Bold))
         for delta in range(-30, 31):
             deg = round(heading + delta) % 360
             if deg % 10 != 0:
@@ -376,7 +423,7 @@ class ArtificialHorizon(QWidget):
         painter.setBrush(QBrush(QColor(15, 15, 15, 255)))
         painter.drawRect(readout_rect)
         painter.setPen(QPen(Qt.yellow))
-        painter.setFont(QFont("Sans", 10, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 10, QFont.Bold))
         text = f"{int(round(heading)):03d}" if self.heading is not None else "---"
         painter.drawText(readout_rect, Qt.AlignCenter, text)
 
@@ -427,13 +474,13 @@ class ArtificialHorizon(QWidget):
         painter.restore()
 
         painter.setPen(QPen(Qt.white))
-        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 8, QFont.Bold))
         dir_text = f"{int(round(self.wind_dir)):03d}\u00b0" if self.wind_dir is not None else "---\u00b0"
         painter.drawText(
             QRectF(wind_rect.left() + 32, wind_rect.top() + 4, wind_box_w - 36, 16),
             Qt.AlignVCenter | Qt.AlignLeft, dir_text,
         )
-        painter.setFont(QFont("Sans", 8))
+        painter.setFont(_hud_font("Sans", 8))
         speed_text = f"{self.wind_speed * 3.6:.1f} kph" if self.wind_speed is not None else "-- kph"
         painter.drawText(
             QRectF(wind_rect.left() + 32, wind_rect.top() + 20, wind_box_w - 36, 16),
@@ -451,14 +498,14 @@ class ArtificialHorizon(QWidget):
         painter.drawRect(batt_rect)
 
         painter.setPen(QPen(Qt.white))
-        painter.setFont(QFont("Sans", 10, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 10, QFont.Bold))
         total_text = f"{self.battery_voltage:.2f} V" if self.battery_voltage is not None else "-- V"
         painter.drawText(
             QRectF(batt_rect.left() + 6, batt_rect.top() + 3, batt_rect.width() - 12, 18),
             Qt.AlignVCenter | Qt.AlignLeft, total_text,
         )
 
-        painter.setFont(QFont("Sans", 8))
+        painter.setFont(_hud_font("Sans", 8))
         if self.battery_voltage is not None and self.cell_count:
             cell_text = f"{self.battery_voltage / self.cell_count:.2f} V/c"
         else:
@@ -481,7 +528,7 @@ class ArtificialHorizon(QWidget):
         # pair a real aircraft produces - a negative current beside a
         # five-figure consumption - leaves two pixels between them; at
         # 7pt it leaves seventeen.
-        painter.setFont(QFont("Sans", 7))
+        painter.setFont(_hud_font("Sans", 7))
         amps_text = ("%.1f A" % self.battery_amps
                      if self.battery_amps is not None else "-- A")
         mah_text = ("%.0f mAh" % self.battery_mah
@@ -520,7 +567,7 @@ class ArtificialHorizon(QWidget):
                           bar_w * scale, bar_h * scale)
         self._draw_throttle(painter, bar_rect, scale)
 
-        painter.setFont(QFont("Sans", 11, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 11, QFont.Bold))
 
         # Airspeed box - middle left, moved inboard to clear the bar.
         # Offset by the bar's UNSCALED width, so shrinking the bar in the
@@ -533,7 +580,7 @@ class ArtificialHorizon(QWidget):
         painter.setPen(QPen(Qt.white))
         text = f"{self.airspeed:.1f}" if self.airspeed is not None else "--"
         painter.drawText(airspeed_rect, Qt.AlignCenter, text)
-        painter.setFont(QFont("Sans", 7))
+        painter.setFont(_hud_font("Sans", 7))
         painter.drawText(
             QRectF(airspeed_rect.x(), airspeed_rect.bottom() + 2, box_w, 14),
             Qt.AlignHCenter, "IAS m/s",
@@ -552,7 +599,7 @@ class ArtificialHorizon(QWidget):
         painter.drawLine(tab.at(1), tab.at(2))
 
         # Altitude box - middle right
-        painter.setFont(QFont("Sans", 11, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 11, QFont.Bold))
         altitude_rect = QRectF(w - margin - box_w, cy - box_h / 2, box_w, box_h)
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
@@ -560,7 +607,7 @@ class ArtificialHorizon(QWidget):
         painter.setPen(QPen(Qt.white))
         text = f"{self.altitude:.1f}" if self.altitude is not None else "--"
         painter.drawText(altitude_rect, Qt.AlignCenter, text)
-        painter.setFont(QFont("Sans", 7))
+        painter.setFont(_hud_font("Sans", 7))
         painter.drawText(
             QRectF(altitude_rect.x(), altitude_rect.bottom() + 2, box_w, 14),
             Qt.AlignHCenter, "ALT m",
@@ -596,7 +643,7 @@ class ArtificialHorizon(QWidget):
         painter.drawRect(lon_rect)
 
         painter.setPen(QPen(Qt.white))
-        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 8, QFont.Bold))
         lat_text = f"LAT {self.lat:.6f}" if self.lat is not None else "LAT --"
         lon_text = f"LON {self.lon:.6f}" if self.lon is not None else "LON --"
         painter.drawText(lat_rect, Qt.AlignCenter, lat_text)
@@ -622,7 +669,7 @@ class ArtificialHorizon(QWidget):
         painter.drawRect(ekf_rect)
         painter.drawRect(vibe_rect)
 
-        painter.setFont(QFont("Sans", 8, QFont.Bold))
+        painter.setFont(_hud_font("Sans", 8, QFont.Bold))
         painter.setPen(QPen(status_colors.get(self.ekf_color, Qt.white)))
         painter.drawText(ekf_rect, Qt.AlignCenter, "EKF")
         painter.setPen(QPen(status_colors.get(self.vibe_color, Qt.white)))
