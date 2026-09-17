@@ -255,6 +255,34 @@ note("descending tilts it down", dn["fwdY2"] > dn["fwdY1"] + 1,
      "%.1f -> %.1f" % (dn["fwdY1"], dn["fwdY2"]))
 
 print("")
+print("but the projection does not get to squash the ground")
+GROUND_BAND = ("(function(){var d=document.getElementById('ap-ground')"
+               ".getAttribute('d')||'';"
+               "var ys=(d.match(/,[0-9.]+/g)||[]).map(function(s){return +s.slice(1)});"
+               "return JSON.stringify({lo:Math.min.apply(null,ys),"
+               "hi:Math.max.apply(null,ys)});})()")
+
+
+def ground_band(slope):
+    run("setAglProfile(%s,500,3500); setAglAltitude(1000,%s,[]);"
+        % (json.dumps([600.0] * 21), slope))
+    b = json.loads(run(GROUND_BAND) or "{}")
+    return b.get("lo"), b.get("hi")
+
+flat_band = ground_band(0.0)
+up_band = ground_band(0.3)          # a kilometre higher by the far end
+down_band = ground_band(-0.3)
+note("a steep climb leaves the ground where it was",
+     up_band == flat_band, "%s vs %s" % (up_band, flat_band))
+note("and so does a steep descent",
+     down_band == flat_band, "%s vs %s" % (down_band, flat_band))
+# This is the whole point: the panel is for seeing the ground, and the
+# far end of a projection is not worth compressing it into a ribbon.
+note("the ground keeps a usable slice of the box",
+     flat_band[1] - flat_band[0] >= 0 and flat_band[0] > 90,
+     "y %.0f..%.0f of the 30..116 box" % flat_band)
+
+print("")
 print("and the gap ahead is measured against that path")
 # Ground rising to 960 at the far end; the aircraft at 1000. Level, that
 # is 40 m of clearance. Descending at 4 m/s over 40 m/s of groundspeed -

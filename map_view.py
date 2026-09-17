@@ -798,11 +798,22 @@ LEAFLET_HTML = """
         <text id="ap-cap" class="ap-cap" x="96" y="18" text-anchor="end">AGL</text>
         <text id="ap-agl" class="ap-agl" x="100" y="19">--</text>
         <text id="ap-ahead" class="ap-ahead" x="292" y="18" text-anchor="end">--</text>
+        <defs>
+            <!-- The plot box. The flight path is scaled to the ground
+                 rather than to itself, so a steep climb or descent leaves
+                 the panel; this is what stops it drawing over the
+                 readouts and the axis labels on its way out. -->
+            <clipPath id="ap-clip">
+                <rect x="34" y="30" width="258" height="86" />
+            </clipPath>
+        </defs>
         <g id="ap-ticks"></g>
         <path id="ap-ground" class="ap-ground" d="" />
         <path id="ap-ground-high" class="ap-ground-high" d="" />
-        <path id="ap-level-back" class="ap-level" fill="none" d="" />
-        <line id="ap-level-fwd" class="ap-level-ahead" x1="0" y1="0" x2="0" y2="0" />
+        <g clip-path="url(#ap-clip)">
+            <path id="ap-level-back" class="ap-level" fill="none" d="" />
+            <line id="ap-level-fwd" class="ap-level-ahead" x1="0" y1="0" x2="0" y2="0" />
+        </g>
         <line id="ap-now" class="ap-now" x1="0" y1="0" x2="0" y2="0" />
         <circle id="ap-uav-ring" class="ap-uav-ring" cx="0" cy="0" r="6" />
         <circle id="ap-uav-dot" class="ap-uav-dot" cx="0" cy="0" r="2" />
@@ -3028,10 +3039,12 @@ function drawAglProfile() {
     // far ends count too, or a steep descent would leave the line drawn
     // off the bottom of the box.
     var pathBack = apSlope * -apBehind, pathFwd = apSlope * apAhead;
-    hi = Math.max(hi, 0, pathBack, pathFwd);
-    lo = Math.min(lo, 0, pathBack, pathFwd);
-    // The track flown behind has to fit too, or a climb out of a valley
-    // gets drawn above the top of the panel.
+    hi = Math.max(hi, 0); lo = Math.min(lo, 0);
+    // The track flown behind has to fit, because it happened. The
+    // projection ahead deliberately does NOT: a steep climb would put its
+    // far end a kilometre above everything else and squash the ground -
+    // the thing the panel is for - into a band a few pixels tall. It is
+    // allowed to run off the edge instead, and is clipped there.
     if (apHistory) {
         for (i = 0; i < apHistory.length; i++) {
             var hr = apHistory[i][1] - apAmsl;
