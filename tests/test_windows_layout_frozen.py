@@ -118,8 +118,16 @@ def geometry_of(tree, dumper):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        timeout=300)
     if r.returncode != 0:
-        raise RuntimeError("render failed in %s:\n%s"
-                           % (tree, r.stderr.decode("utf-8", "replace")[-2000:]))
+        # The exit code matters as much as the message: a render that
+        # printed its answer and then died tearing the process down
+        # (0xC0000409) is a different problem from one that never got
+        # there, and a blank stderr cannot tell them apart.
+        raise RuntimeError(
+            "render failed in %s\n  exit code: %d (0x%08X)\n"
+            "  stdout: %d bytes\n  stderr: %s"
+            % (tree, r.returncode, r.returncode & 0xFFFFFFFF,
+               len(r.stdout),
+               r.stderr.decode("utf-8", "replace")[-1500:] or "(empty)"))
     return json.loads(r.stdout.decode("utf-8"))
 
 
@@ -148,7 +156,29 @@ try:
         print("FAILED: %s" % ", ".join(fails))
         sys.exit(1)
 
-    print("comparing against %s at %dx%d" % (RELEASE_TAG, WIDTH, HEIGHT))
+    # Both sides must read the same settings, or the comparison is not
+    # of two code versions but of two configurations.
+    #
+    # app_paths.data_dir() answers the checkout directory when running
+    # from source, so each of these two trees has its own settings.json
+    # - and the release worktree, freshly checked out, has none at all
+    # while a working tree usually does. Settings reach the layout:
+    # MainWindow builds FpvView with load_settings()["cesium_ion_token"],
+    # and on macOS the presence of a token has been seen to change panel
+    # heights, measured as Preflight coming out 25px instead of 57px.
+    # Nothing here has ever moved on Windows over it, but a check that
+    # can report movement nobody made is worth exactly nothing on the day
+    # it does.
+    settings = os.path.join(ROOT, "settings.json")
+    released_settings = os.path.join(released, "settings.json")
+    if os.path.exists(settings):
+        shutil.copy2(settings, released_settings)
+    elif os.path.exists(released_settings):
+        os.remove(released_settings)
+
+    print("comparing against %s at %dx%d%s"
+          % (RELEASE_TAG, WIDTH, HEIGHT,
+             "" if os.path.exists(settings) else " (no saved settings)"))
     before = geometry_of(released, dumper)
     after = geometry_of(ROOT, dumper)
 
