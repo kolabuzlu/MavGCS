@@ -7,7 +7,7 @@
 <p align="center">
  <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPLv3-blue.svg"></a>
  <a href="https://github.com/kolabuzlu/MavGCS/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/kolabuzlu/MavGCS?label=Release&color=59aa29"></a>
- <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows-red?style=flat">
+ <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-red?style=flat">
 </p>
 
 ![MavGCS screenshot](mavgcs211.png)
@@ -24,7 +24,12 @@ You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to acti
 
 Created by **Derin Hakan Karakurt**
 
-### Installing & Running MavGCS (Windows) 💻
+### Installing & Running MavGCS 💻
 
-Download `MavGCS-<version>-windows.zip` from the
+**Windows** - download `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it, and run **MavGCS.exe**. No setup needed.
+
+**macOS** - download `MavGCS-<version>-macos-<arch>.zip` for your Mac's
+processor and drag **MavGCS.app** to Applications. The app is unsigned, so
+the first launch needs one command to clear the download quarantine -
+see [INSTALL.md](INSTALL.md), which also covers the camera permission.
