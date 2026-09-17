@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.1.7 - Live AGL profile added.
+Bug fixes and improvements.
+
 ## V2.1.6 - Terrain Follow button added.
 Bug fixes and improvements.
 
