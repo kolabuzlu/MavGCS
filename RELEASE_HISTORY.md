@@ -58,3 +58,4 @@ one first tagged.
 | V2.1.5 | `ebb12706ee` | 2026-09-17 | Position QR code, and terrain read to the tile edge |
 | V2.1.6 | `6233881493` | 2026-09-17 | Terrain Follow button, following the aircraft's own parameter |
 | V2.1.7 | `ea1dadeb72` | 2026-09-17 | Live AGL profile: the ground along the track, and the path flown |
+| V2.2.0 | `c3b13159df` | 2026-09-18 | macOS build added, and the Windows release held unchanged |
