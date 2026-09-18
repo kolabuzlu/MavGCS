@@ -29,5 +29,12 @@ Created by **Derin Hakan Karakurt**
 **Windows** - download `MavGCS-<version>-windows.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases), extract it, and run **MavGCS.exe**. No setup needed.
 
-**macOS** - download `MavGCS-<version>-macos-<arch>.zip` for your Mac's
-processor and drag **MavGCS.app** to Applications, and run.
+**macOS** - download `MavGCS-<version>-macos-x86_64.zip` from the same
+page and drag **MavGCS.app** to Applications. The app is unsigned, so the
+first launch needs one command to clear the download quarantine - macOS
+reports an unsigned app as "damaged", which it is not. See
+[INSTALL.md](INSTALL.md), which also covers the camera permission.
+
+This is an Intel build: native on Intel Macs, and on Apple Silicon it
+runs through Rosetta, which macOS offers to install the first time. A
+native Apple Silicon build has to be made on an Apple Silicon Mac.
