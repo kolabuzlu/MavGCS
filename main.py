@@ -3527,6 +3527,18 @@ class ConnectionPanel(QGroupBox):
         self.update_btn.setStyleSheet(self.UPDATE_STYLE)
         self.update_btn.clicked.connect(self.update_requested)
 
+        # Everything this bar asks for is already knowable: which port a
+        # radio enumerated as, which port a simulator opened, what
+        # address the machine running it has. This goes and looks.
+        self.find_btn = QPushButton("Find")
+        self.find_btn.setFixedHeight(self.FIELD_HEIGHT)
+        self.find_btn.setStyleSheet(self.UPDATE_STYLE)
+        self.find_btn.setToolTip(
+            "Search for a vehicle: serial ports, this computer's "
+            "simulator ports, incoming telemetry, and the rest of this "
+            "network. Pick a result and the fields above fill in.")
+        self.find_btn.clicked.connect(self._on_find_clicked)
+
 
         self.protocol_combo = QComboBox()
         self.protocol_combo.addItems(self.PROTOCOLS)
@@ -3602,6 +3614,7 @@ class ConnectionPanel(QGroupBox):
         # Shares the button row rather than taking one of its own: a row to
         # itself cost the map 27px of height for a control used once in a
         # while, and there is width to spare here.
+        refresh_row.addWidget(self.find_btn)
         refresh_row.addWidget(self.telemetry_btn)
         refresh_row.addWidget(self.update_btn)
         refresh_row.addWidget(self.connect_btn)
@@ -3647,6 +3660,50 @@ class ConnectionPanel(QGroupBox):
         listening_udp = protocol == "UDP (listen)"
         self.host_edit.setEnabled(not listening_udp)
         self.host_edit.setPlaceholderText("(listening)" if listening_udp else "")
+
+    def _on_find_clicked(self):
+        """Open the search, and fill the fields with whatever comes back."""
+        # Imported here rather than at the top: the finder pulls in
+        # sockets, threads and a MAVLink parser, and none of that should
+        # be a reason the program fails to start.
+        try:
+            from connection_finder import ConnectionFinderDialog
+        except Exception as exc:
+            QMessageBox.warning(self, "Find a connection",
+                                "The connection finder could not be "
+                                "loaded:\n\n%r" % (exc,))
+            return
+        dlg = ConnectionFinderDialog(self)
+        if dlg.exec() and dlg.chosen() is not None:
+            self.apply_candidate(dlg.chosen())
+
+    def apply_candidate(self, cand):
+        """Put a found connection into the fields, ready to connect.
+
+        Stops short of connecting. The search can offer something that
+        merely answered a socket, and a ground station that connected
+        itself to whatever it found would be a worse tool than one that
+        waits to be told.
+        """
+        if cand.protocol in self.PROTOCOLS:
+            self.protocol_combo.setCurrentText(cand.protocol)
+            # The combo only emits when the text actually changes, so a
+            # candidate matching the current protocol would otherwise
+            # leave the fields showing the wrong pair.
+            self._on_protocol_changed(cand.protocol)
+        if cand.protocol == "Serial":
+            i = self.serial_port_combo.findData(cand.host)
+            if i < 0:
+                i = self.serial_port_combo.findText(cand.host,
+                                                    Qt.MatchFlag.MatchContains)
+            if i >= 0:
+                self.serial_port_combo.setCurrentIndex(i)
+            j = self.baud_combo.findText(str(cand.port))
+            if j >= 0:
+                self.baud_combo.setCurrentIndex(j)
+        else:
+            self.host_edit.setText(cand.host)
+            self.port_edit.setText(str(cand.port))
 
     def contextMenuEvent(self, event):
         """Right-click reaches the same settings as the button, for anyone
