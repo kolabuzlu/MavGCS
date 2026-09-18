@@ -33,7 +33,7 @@ Created by **Derin Hakan Karakurt**
 page and drag **MavGCS.app** to Applications. The app is unsigned, so the
 first launch needs one command to clear the download quarantine - macOS
 reports an unsigned app as "damaged", which it is not. See
-[INSTALL.md](INSTALL.md), which also covers the camera permission.
+[INSTALL.md](INSTALL.md).
 
 This is an Intel build: native on Intel Macs, and on Apple Silicon it
 runs through Rosetta, which macOS offers to install the first time.
