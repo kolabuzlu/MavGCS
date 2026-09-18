@@ -67,9 +67,12 @@ packets and tears the picture; TCP is steadier and is what most cameras
 should be asked for over anything but a clean local network. Auto lets
 FFmpeg decide, which usually means UDP first.
 
-A wrong address takes thirty seconds to give up, so opening happens on
-the worker thread and Stop works throughout - a mistyped URL must not
-freeze the window that would let you fix it.
+A wrong address takes about fifteen seconds to give up, so opening
+happens on the worker thread and Stop works throughout - a mistyped URL
+must not freeze the window that would let you fix it. It used to take
+thirty, which was not a decision: the timeout option was misspelled and
+FFmpeg ignored it, so there was no limit at all and thirty seconds was
+simply where the network gave up on its own.
 
 Two more decisions worth knowing:
 
@@ -137,6 +140,23 @@ SIZES = [("1920 x 1080", (1920, 1080)),
          ("1280 x 720", (1280, 720)),
          ("640 x 480", (640, 480))]
 RATES = [60, 30, 15]
+
+# How long FFmpeg waits on a network camera, in microseconds.
+#
+# 15 seconds, and the number matters more than it looks. The option was
+# spelled "stimeout" for years - the old FFmpeg name, dropped in favour
+# of "timeout" - so the 5 seconds written here was never once in force:
+# FFmpeg ignored the line, no limit applied, and a camera that went
+# quiet could hang the reader indefinitely. Every release so far has run
+# that way.
+#
+# Which makes fixing the spelling a behaviour change, not just a repair.
+# Switching the old value on would have imposed 5 seconds for the first
+# time on users calibrated to thirty - and a real camera on a congested
+# link, the sort that took eight or twelve seconds to come up and then
+# worked, would have started failing. 15 bounds the hang without
+# reaching back into what already worked.
+RTSP_TIMEOUT_US = 15_000_000
 TRANSPORTS = [(AUTO, None), ("TCP", "tcp"), ("UDP", "udp")]
 
 
@@ -318,7 +338,8 @@ class _Reader(QThread):
         # not recognise is left in the dictionary and ignored, not
         # rejected, so old builds take stimeout and new ones take
         # timeout.
-        opts = ["timeout;5000000", "stimeout;5000000"]
+        opts = ["timeout;%d" % RTSP_TIMEOUT_US,
+                "stimeout;%d" % RTSP_TIMEOUT_US]
         if self._transport:
             opts.append("rtsp_transport;%s" % self._transport)
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts)
