@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.2.3 - Mission altitude frames added.
+Bug fixes and improvements.
+
 ## V2.2.2 - Bug fixes and improvements.
 
 ## V2.2.1 - Find button added.
