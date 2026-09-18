@@ -3497,7 +3497,7 @@ class ConnectionPanel(QGroupBox):
         # different places down the right-hand edge.
         self.setStyleSheet("""
             QGroupBox { font-size: 10px; font-weight: bold; margin-top: 6px; padding-top: 4px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 4px 2px 0 2px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }
             QComboBox, QLineEdit, QPushButton { font-size: 10px; padding: 2px 4px; }
         """ + GROUPBOX_TITLE)
         outer = QVBoxLayout(self)
@@ -4369,18 +4369,16 @@ class MainWindow(QMainWindow):
         left_content = QWidget()
         left_content.setStyleSheet("""
             QPushButton { font-size: 10px; padding: 3px 4px; }
-            """ + BUTTON_FILL + """
-            QGroupBox {
+""" + BUTTON_FILL + """            QGroupBox {
                 font-size: 10px; font-weight: bold;
                 margin-top: 6px; padding-top: 4px;
             }
             QGroupBox::title {
-                subcontrol-origin: margin; left: 6px; padding: 4px 2px 0 2px;
+                subcontrol-origin: margin; left: 6px; padding: 0 2px;
             }
             QLabel { font-size: 10px; }
             QCheckBox { font-size: 10px; }
-            """ + GROUPBOX_TITLE + """
-        """)
+        """ + GROUPBOX_TITLE)
         left_layout = QVBoxLayout(left_content)
         left_layout.setSpacing(SECTION_GAP)
         left_layout.setContentsMargins(6, 6, 6, 6)
