@@ -57,7 +57,7 @@ sys.path.insert(0, ROOT)
 # release. A tag alone could not do that: between releases there is
 # no tag to move to, and a check that cannot go green is a check people
 # start ignoring.
-APPROVED_BASELINE = "ee5c344d83"   # find button labelled F
+APPROVED_BASELINE = "c30ec9c593"   # find button, labelled Find
 
 # The size the window actually gets maximised on the machine this is
 # flown from: a 1920x1080 panel at 125% scaling, less the taskbar.
