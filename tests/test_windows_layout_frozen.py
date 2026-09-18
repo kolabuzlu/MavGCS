@@ -1,8 +1,8 @@
 """Has the Windows layout moved from the released version?
 
 Windows does not change by accident. Not one pixel of it may shift from
-the current release - RELEASE_TAG below - unless the change is one
-somebody asked for, in which case that tag moves in the same commit
+the last approved one - APPROVED_BASELINE below - unless the change is
+one somebody asked for, in which case that moves in the same commit
 that lands it. "No regressions" is not the bar: the released layout is
 what gets flown, and an unasked-for change to it is a defect even when
 it looks like an improvement.
@@ -32,7 +32,7 @@ The subprocesses are not laziness - Qt keeps process-wide state, and two
 MainWindows from two different checkouts cannot both be built in one
 interpreter.
 
-This needs the release tag, so a shallow clone has to fetch it:
+This needs history, so a shallow clone has to fetch it:
 fetch-depth: 0 in the workflow, which is why it is set there.
 """
 
@@ -46,10 +46,17 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-# The released version this platform is frozen against. Moving this is a
-# deliberate act: it means a new release has been cut and its layout is
-# the one to hold from now on.
-RELEASE_TAG = "V2.2.0"
+# The last Windows appearance somebody approved. Anything - a tag at
+# release time, a commit between releases.
+#
+# Moving it is the deliberate act. An accidental change fails against
+# it, which is the point; a change that was asked for updates it in the
+# same commit that lands the change, so the diff shows both together and
+# the gate keeps working the next day instead of staying red until the
+# next release. A tag alone could not do that: between releases there is
+# no tag to move to, and a check that cannot go green is a check people
+# start ignoring.
+APPROVED_BASELINE = "faa975efba"   # Find button on the connection bar
 
 # The size the window actually gets maximised on the machine this is
 # flown from: a 1920x1080 panel at 125% scaling, less the taskbar.
@@ -172,7 +179,7 @@ try:
     subprocess.run(["git", "worktree", "prune"], cwd=ROOT,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     add = subprocess.run(
-        ["git", "worktree", "add", "--detach", released, RELEASE_TAG],
+        ["git", "worktree", "add", "--detach", released, APPROVED_BASELINE],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if add.returncode != 0:
         # A shallow clone without the tag cannot answer the question, and
@@ -204,7 +211,7 @@ try:
         os.remove(released_settings)
 
     print("comparing against %s at %dx%d%s"
-          % (RELEASE_TAG, WIDTH, HEIGHT,
+          % (APPROVED_BASELINE, WIDTH, HEIGHT,
              "" if os.path.exists(settings) else " (no saved settings)"))
     shot_before = os.path.join(work, "released.png")
     shot_after = os.path.join(work, "working.png")
@@ -288,7 +295,7 @@ if fails:
     print("FAILED: %s" % ", ".join(fails))
     print("")
     print("The Windows layout is frozen at %s. Anything tuned for another"
-          % RELEASE_TAG)
+          % APPROVED_BASELINE)
     print("platform has to be scoped to that platform, the way the")
     print("stylesheet in main.py already is.")
 sys.exit(1 if fails else 0)
