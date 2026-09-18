@@ -2976,6 +2976,20 @@ var apHistory = null;
 
 var AP_L = 34, AP_R = 292, AP_T = 30, AP_B = 116;   // the plot box
 
+function setTerrainStatus(text) {
+    // The radar's placeholder says what the terrain is doing, not just
+    // that there is none of it. "no data" was shown for the whole of a
+    // 41MB download, which reads as a broken program rather than a busy
+    // one, and cost somebody twenty minutes deciding which.
+    //
+    // Only while there is nothing drawn: once the fan is up the radar
+    // shows the ground, and a download for the next tile along is not
+    // worth covering it with.
+    var box = document.getElementById('tr-placeholder');
+    if (!box) { return; }
+    box.textContent = text || 'Terrain Radar - no data';
+}
+
 function setAglProfile(elevs, behindM, aheadM) {
     apElevs = elevs;
     apBehind = behindM;
@@ -3648,6 +3662,11 @@ class MapView(QWebEngineView):
 
     def commit_waypoints(self):
         self.page().runJavaScript("commitWaypoints();")
+
+    def set_terrain_status(self, text):
+        """What the terrain is doing, shown where "no data" used to be."""
+        self.page().runJavaScript(
+            "setTerrainStatus(%s);" % json.dumps(text or ""))
 
     def update_agl_profile(self, elevations: list, behind_m: float,
                            ahead_m: float):

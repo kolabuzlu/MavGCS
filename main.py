@@ -4402,6 +4402,8 @@ class MainWindow(QMainWindow):
         self.terrain_worker = TerrainRadarWorker(self)
         self.terrain_worker.fan_ready.connect(self.on_terrain_fan_ready)
         self.terrain_worker.profile_ready.connect(self.on_terrain_profile_ready)
+        self.terrain_worker.terrain_status.connect(
+            self.map_view.set_terrain_status)
         self.terrain_worker.start()
         self.vehicle_terrain_worker = terrain_provider.VehicleTerrainWorker(self)
         self.vehicle_terrain_worker.ready.connect(self.on_own_terrain)

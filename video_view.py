@@ -301,9 +301,24 @@ class _Reader(QThread):
             return cv2.VideoCapture(self._source, _camera_backend(cv2),
                                     params)
         # FFmpeg reads its options from the environment at capture time.
-        # stimeout is in microseconds and stops a silent camera hanging
-        # the read for ever; the transport is the part worth choosing.
-        opts = ["stimeout;5000000"]
+        # The timeout is in microseconds and stops a silent camera
+        # hanging the read for ever; the transport is the part worth
+        # choosing.
+        #
+        # Both spellings, because the option was renamed. "stimeout" is
+        # what FFmpeg called it for years and what every example on the
+        # internet still says; it became "timeout" and the old name was
+        # dropped. OpenCV here bundles FFmpeg 7.1, which knows only the
+        # new one - so the old name alone was being silently ignored and
+        # there was no timeout at all. A camera that went quiet mid
+        # stream left the reader waiting indefinitely, with the picture
+        # frozen and no error to explain it.
+        #
+        # Passing both is safe in either direction: an option FFmpeg does
+        # not recognise is left in the dictionary and ignored, not
+        # rejected, so old builds take stimeout and new ones take
+        # timeout.
+        opts = ["timeout;5000000", "stimeout;5000000"]
         if self._transport:
             opts.append("rtsp_transport;%s" % self._transport)
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(opts)

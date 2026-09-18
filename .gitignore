@@ -14,3 +14,11 @@ settings.json
 
 # Watched runs (tools/watch_run.py) - one file per run, never committed.
 logs/
+
+# MAVProxy leaves these wherever it was started from, and it gets started
+# from here. Not this program's doing - MavGCS reads parameters over
+# MAVLink FTP into memory and writes no log of its own - but they show up
+# as untracked every time and hide anything that matters.
+mav.parm
+mav.tlog
+mav.tlog.raw

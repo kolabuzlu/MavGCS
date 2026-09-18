@@ -224,7 +224,7 @@ class TerrainProvider:
     TerrainRadarWorker's own background thread.
     """
 
-    def __init__(self):
+    def __init__(self, on_status=None):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self._tiles = OrderedDict()  # key -> _TileData, most-recently-used last
         # Two different things that used to share one set. A tile the
@@ -235,6 +235,17 @@ class TerrainProvider:
         # timeout used to remove that ground for the rest of the session.
         self._absent = set()        # no such tile, ever
         self._failed = {}           # key -> when it is worth trying again
+        # key -> (bytes so far, bytes expected). Read from the GUI thread
+        # while a worker thread writes it, hence the lock.
+        self._fetching = {}
+        self._lock = threading.Lock()
+        # Called with a line of text, or None when there is nothing to
+        # say. Set by the worker so a download can report itself while
+        # it happens - polling cannot, because the thread that would do
+        # the polling is the one blocked inside the download.
+        self._on_status = on_status
+        self._last_status = None
+        self._last_status_at = 0.0
 
     def _load_tile(self, key: str):
         if key in self._tiles:
@@ -262,7 +273,30 @@ class TerrainProvider:
             url = f"{BASE_URL}/{key}/{key}.tif"
             try:
                 with urllib.request.urlopen(url, timeout=15) as resp:
-                    raw = resp.read()
+                    # Read in chunks rather than in one call, so the
+                    # download can say how far along it is. A tile is up
+                    # to 41MB and can take minutes on a slow link; with
+                    # one blocking read there is nothing to report and
+                    # the app looks broken for the whole of it.
+                    total = 0
+                    try:
+                        total = int(resp.headers.get("Content-Length") or 0)
+                    except (TypeError, ValueError):
+                        total = 0
+                    chunks, got = [], 0
+                    with self._lock:
+                        self._fetching[key] = (0, total)
+                    self._notify(force=True)
+                    while True:
+                        chunk = resp.read(262144)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        got += len(chunk)
+                        with self._lock:
+                            self._fetching[key] = (got, total)
+                        self._notify()
+                    raw = b"".join(chunks)
                 if cache_limit_bytes() > 0:
                     # Write via a temporary file and rename: a tile is ~40MB,
                     # so a stop (or a crash) part-way through a direct write
@@ -285,6 +319,10 @@ class TerrainProvider:
                 # rather than writing this ground off for good.
                 self._failed[key] = time.monotonic() + TILE_RETRY_S
                 return None
+            finally:
+                with self._lock:
+                    self._fetching.pop(key, None)
+                self._notify(force=True)
 
         try:
             tile = _decode_tile(raw)
@@ -303,6 +341,52 @@ class TerrainProvider:
         while len(self._tiles) > MAX_CACHED_TILES:
             self._tiles.popitem(last=False)
         return tile
+
+    def _notify(self, force=False):
+        """Tell whoever is listening what the terrain is doing.
+
+        Throttled: a 41MB tile arrives in 164 chunks and the text only
+        changes by a percent or so between them, so this is a few
+        updates a second rather than a few hundred. force is for the
+        edges - the first chunk and the last - which matter more than
+        the ones between.
+        """
+        if self._on_status is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_status_at < 0.25:
+            return
+        state = self.fetch_state()
+        if state == self._last_status and not force:
+            return
+        self._last_status = state
+        self._last_status_at = now
+        try:
+            self._on_status(state)
+        except Exception:
+            pass
+
+    def fetch_state(self):
+        """What to tell the user about terrain right now, or None.
+
+        None means there is nothing to say: either the ground is drawn
+        or there is genuinely none for here. Anything else is a line of
+        text for the radar to show in place of "no data", which is what
+        it said for the whole of a 41MB download and which reads as a
+        broken program rather than a busy one.
+        """
+        with self._lock:
+            live = list(self._fetching.values())
+        if live:
+            got = sum(g for g, _t in live)
+            total = sum(t for _g, t in live)
+            if total > 0:
+                return "Downloading terrain  %d%%  (%.0f of %.0f MB)" % (
+                    100 * got // total, got / 1e6, total / 1e6)
+            return "Downloading terrain  (%.0f MB)" % (got / 1e6)
+        if self._failed:
+            return "Terrain download failed - retrying"
+        return None
 
     def retry_pending(self):
         """True while some tile failed in a way that might yet succeed.
@@ -374,6 +458,10 @@ class TerrainRadarWorker(QThread):
 
     # elevations (flat list, row-major), range_m, ang_cells, rad_cells
     fan_ready = Signal(list, float, int, int)
+    # A line of text about the terrain, or None when there is nothing to
+    # say. Emitted from inside a download, which is the only place that
+    # knows one is happening - the loop below is blocked while it runs.
+    terrain_status = Signal(object)
     # The ground along the track as a side-on slice: elevations AMSL from
     # behind_m astern to ahead_m in front, evenly spaced. Sent without the
     # aircraft's own altitude on purpose - the ground changes slowly and
@@ -435,7 +523,7 @@ class TerrainRadarWorker(QThread):
         return abs(((a - b + 540) % 360) - 180)
 
     def run(self):
-        provider = TerrainProvider()
+        provider = TerrainProvider(on_status=self.terrain_status.emit)
         while self._running:
             with self._lock:
                 telem = self._telem
