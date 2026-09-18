@@ -1,5 +1,8 @@
 # MavGCS Changelog
 
+## V2.2.1 - Find button added.
+Bug fixes and improvements.
+
 ## V2.2.0 - macOS version added.
 Bug fixes and improvements.
 
