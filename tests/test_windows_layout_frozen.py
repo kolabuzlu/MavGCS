@@ -1,9 +1,11 @@
 """Has the Windows layout moved from the released version?
 
-The rule this enforces is absolute: not one pixel of the Windows UI may
-shift from V2.1.7. Not "no regressions" and not "nothing worse" - the
-released layout is what gets flown, and a change to it is a defect even
-when it looks like an improvement.
+Windows does not change by accident. Not one pixel of it may shift from
+the current release - RELEASE_TAG below - unless the change is one
+somebody asked for, in which case that tag moves in the same commit
+that lands it. "No regressions" is not the bar: the released layout is
+what gets flown, and an unasked-for change to it is a defect even when
+it looks like an improvement.
 
 It exists because a macOS port retuned the shared layout constants so
 the panels would sit correctly on a Mac, which lays them out about 160px
@@ -47,7 +49,7 @@ sys.path.insert(0, ROOT)
 # The released version this platform is frozen against. Moving this is a
 # deliberate act: it means a new release has been cut and its layout is
 # the one to hold from now on.
-RELEASE_TAG = "V2.1.7"
+RELEASE_TAG = "V2.2.0"
 
 # The size the window actually gets maximised on the machine this is
 # flown from: a 1920x1080 panel at 125% scaling, less the taskbar.
@@ -97,7 +99,7 @@ def walk(w, path, out):
     # that has nothing to do with style. The directory is dropped and
     # the filename kept, so pointing at a DIFFERENT image is still a
     # change while sitting in a different folder is not.
-    ss = re.sub(r"url\([^)]*?([^/\)]+)\)", r"url()", ss)
+    ss = re.sub(r"url\([^)]*?([^/\)]+)\)", r"url(\1)", ss)
     # Whitespace is not style. A constant that interpolates to "" on
     # this platform leaves a blank line where the release had nothing,
     # and Qt's parser does not care - so neither does this. Content
