@@ -28,6 +28,15 @@ from pymavlink import mavutil
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=14550)
+ap.add_argument("--tcp", action="store_true",
+                help="listen on TCP instead of UDP, the way a simulator "
+                     "does. Reachable from another machine, which is what "
+                     "makes it useful for testing discovery across a "
+                     "network without a real SITL to hand.")
+ap.add_argument("--host", default="127.0.0.1",
+                help="where to send, when sending. The default keeps it "
+                     "on this machine; give another machine's address to "
+                     "have it arrive there instead.")
 ap.add_argument("--listen", action="store_true",
                 help="wait to be spoken to instead of sending. Binds the "
                      "port and answers whoever addresses it first, which "
@@ -62,12 +71,23 @@ def log(s):
     print("%7.1f PLANE %s" % (time.time() - T0, s), flush=True)
 
 
-# udpin binds and waits; pymavlink learns where to reply from the first
-# datagram that arrives, exactly as an autopilot does. udpout sends from
-# the first moment and needs nobody to speak first.
-_link = ("udpin:0.0.0.0:%d" if args.listen else "udpout:127.0.0.1:%d")
-conn = mavutil.mavlink_connection(_link % args.port,
-                                  source_system=1, source_component=1)
+# Three shapes, because a ground station has to cope with all three.
+#
+#   tcpin   binds and accepts, the way a simulator does
+#   udpin   binds and waits to be addressed, learning where to reply
+#           from the first datagram - what an autopilot set to udpin does
+#   udpout  sends from the first moment, needing nobody to speak first
+#
+# The first two are reachable from another machine; the third arrives
+# wherever --host points, which is this machine unless told otherwise.
+if args.tcp:
+    _link = "tcpin:0.0.0.0:%d" % args.port
+elif args.listen:
+    _link = "udpin:0.0.0.0:%d" % args.port
+else:
+    _link = "udpout:%s:%d" % (args.host, args.port)
+conn = mavutil.mavlink_connection(_link, source_system=1,
+                                  source_component=1)
 mav = conn.mav
 M = mavutil.mavlink
 
@@ -310,7 +330,7 @@ def ftp_reply(m, seq, session, opcode, size, req_opcode, payload):
 
 log("loiter r=%.0f m, %.0f m/s, period %.0f s, ATTITUDE %.0f Hz, to udp %d"
     % (args.radius, args.speed, period, args.attitude_hz, args.port)
-    + (" (listening)" if args.listen else ""))
+    + "  [%s]" % _link)
 tick_home(state(0), 0)
 stream_queue = []
 next_stream = 0.0
