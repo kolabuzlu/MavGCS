@@ -51,12 +51,13 @@ sys.path.insert(0, ROOT)
 #
 # Moving it is the deliberate act. An accidental change fails against
 # it, which is the point; a change that was asked for updates it in the
-# same commit that lands the change, so the diff shows both together and
-# the gate keeps working the next day instead of staying red until the
-# next release. A tag alone could not do that: between releases there is
+# commit that lands the change - which has to be the commit after it,
+# since a SHA does not exist until it is written. Make both, push both,
+# and the gate is green at the tip instead of staying red until the next
+# release. A tag alone could not do that: between releases there is
 # no tag to move to, and a check that cannot go green is a check people
 # start ignoring.
-APPROVED_BASELINE = "faa975efba"   # Find button on the connection bar
+APPROVED_BASELINE = "ee5c344d83"   # find button labelled F
 
 # The size the window actually gets maximised on the machine this is
 # flown from: a 1920x1080 panel at 125% scaling, less the taskbar.
