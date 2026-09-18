@@ -60,3 +60,4 @@ one first tagged.
 | V2.1.7 | `ea1dadeb72` | 2026-09-17 | Live AGL profile: the ground along the track, and the path flown |
 | V2.2.0 | `c3b13159df` | 2026-09-18 | macOS build added, and the Windows release held unchanged |
 | V2.2.1 | `6c09e8b6fc` | 2026-09-18 | Find button, and terrain that says it is downloading |
+| V2.2.2 | `d7e21e247a` | 2026-09-18 | A network-camera timeout that was chosen rather than inherited |
