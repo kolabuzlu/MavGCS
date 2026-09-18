@@ -96,7 +96,19 @@ if MACOS:
     # styling adds its own 6px margin and 4px padding on top, so 10 here
     # reserved 21px above the first button against 7 below it - most of
     # the height of a single-row panel like Guided Control.
-    PANEL_PAD_TOP = PANEL_PAD_BOTTOM = 4
+    # The padding inside every panel in this window, left side and right.
+    #
+    # There were four different ones: the left column at 2, Connection at
+    # (4,10,4,4), Multi-Waypoint at whatever Qt's style defaulted to, and
+    # Messages and Systems at (6,10,6,6). Next to each other that reads as
+    # carelessness rather than as four decisions - the Preflight frame was
+    # a hair off its button where the Systems frame stood well clear of
+    # its indicators.
+    #
+    # The 10px tops were for a title that used to hang into the frame.
+    # GROUPBOX_TITLE lifts it clear, so the space it needed is gone and
+    # one number does for every edge.
+    PANEL_MARGINS = (6, 6, 6, 6)
     # Blank rows between the four groups of readings in the data panel,
     # which is what sets that panel's height. 12 gives it 169px where the
     # bare rows come to 133.
@@ -161,6 +173,18 @@ if MACOS:
     # front of it, because naming it is what triggers the lookup and it can
     # never match here.
     MONO_FAMILY = "Menlo, monospace"
+    # Height of the eight indicator cells in the Systems panel - GYRO,
+    # ACC, MAG, BARO, GPS, RNGFND, PITOT, EKF. 30px, half again the 20px
+    # a 10px font and 3px of padding come to.
+    #
+    # Set as a minimum on each cell rather than by widening the padding
+    # in SensorHealthPanel.BASE, for two reasons. BASE is shared by all
+    # five state styles, and is a literal Windows reads too. And those
+    # styles are swapped wholesale as a sensor changes state - absent,
+    # off, ok, warn, failed - so a height written into one of them would
+    # have to be written into all five and kept in step, where a minimum
+    # survives any amount of restyling.
+    SENSOR_CELL_H = 30
     # 1000 rather than 920. At 920 the panels above the HUD finish 71px
     # below the middle and the only way to pull them up was to take the
     # buttons back to the strips they started as. It is also as tall as a
@@ -175,7 +199,10 @@ else:
     CONTROL_BUTTON_GAP = 4
     SECTION_GAP = 4
     INFO_ROW_GAP = 4
-    PANEL_PAD_TOP, PANEL_PAD_BOTTOM = 10, 6
+    # None: each panel keeps the margins it shipped with, which are
+    # passed at its own call site, and the two that never set any keep
+    # whatever the Windows style gives them.
+    PANEL_MARGINS = None
     # 0 means no blank rows at all, and the data panel keeps the two-row
     # stride it had.
     TELEMETRY_GROUP_GAP = 0
@@ -187,6 +214,9 @@ else:
     HUD_MIN_H = 175
     # Exactly what V2.1.7 declares, character for character.
     MONO_FAMILY = "Consolas, monospace"
+    # None means the height is never set, so the cells are whatever their
+    # padding and font make them - which is what V2.1.7 shows.
+    SENSOR_CELL_H = None
     WINDOW_H = 920
 
 # Why every button in the macOS column is given a background of its own.
@@ -213,6 +243,28 @@ else:
 # Windows is deliberately left with its own drawing: the Windows style
 # already paints a button across the full height of its widget, so there
 # is nothing there to fix and no reason to change how it looks.
+# Lift every section title clear of the frame it labels.
+#
+# A QGroupBox title is drawn in the margin above the frame, and both
+# stylesheets that set one ask for "margin-top: 6px". The title is 12px
+# tall at 10px bold, so it does not fit in six and overflows downward
+# onto the frame's own top edge - the border is drawn with a gap punched
+# either side of the text and the text sits in the line. It reads as a
+# label stuck through the box rather than a name given to it.
+#
+# 14px is the title's own height and two to spare, so the whole of it
+# clears the frame and the border runs unbroken underneath.
+#
+# Appended to those stylesheets rather than written into them: both are
+# literals Windows reads, where this is empty and the 6px stands.
+GROUPBOX_TITLE = ("""
+            QGroupBox { margin-top: 18px; padding-top: 0px; }
+            QGroupBox::title {
+                subcontrol-origin: margin; subcontrol-position: top left;
+                left: 6px; padding: 4px 2px 0 2px;
+            }
+""" if MACOS else "")
+
 BUTTON_FILL = ("""
             QPushButton {
                 background-color: palette(button);
@@ -2126,6 +2178,20 @@ class ParametersDialog(QDialog):
 # font and 3px of padding come to - which on a Mac reads as a thin strip
 # rather than something you would reach for in flight.
 #
+def _panel_margins(layout, *released):
+    """Set a panel's inside padding.
+
+    macOS uses PANEL_MARGINS for every panel. Windows is given whatever
+    that panel shipped with, passed here by the caller so the value stays
+    beside the panel it belongs to - and where a panel never set any, the
+    caller passes none and Windows is left to its style's own default.
+    """
+    if PANEL_MARGINS is not None:
+        layout.setContentsMargins(*PANEL_MARGINS)
+    elif released:
+        layout.setContentsMargins(*released)
+
+
 def _set_button_height(panel, height=CONTROL_BUTTON_H):
     """Give every button in a panel a minimum height.
 
@@ -2209,7 +2275,7 @@ class ModePanel(QGroupBox):
         super().__init__("Flight Mode", parent)
         grid = QGridLayout(self)
         grid.setSpacing(CONTROL_BUTTON_GAP)
-        grid.setContentsMargins(6, PANEL_PAD_TOP, 6, PANEL_PAD_BOTTOM)
+        _panel_margins(grid, 6, 10, 6, 6)
         self.buttons = {}
         # True while the aircraft is actually in AUTOLAND, which is when
         # that one button stops being a mode request and becomes the way
@@ -2571,7 +2637,7 @@ class ArmDisarmPanel(QGroupBox):
         super().__init__("Arm / Disarm", parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
-        layout.setContentsMargins(6, PANEL_PAD_TOP, 6, PANEL_PAD_BOTTOM)
+        _panel_margins(layout, 6, 10, 6, 6)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
@@ -2698,7 +2764,7 @@ class PreflightCalPanel(QGroupBox):
         super().__init__("Preflight Calibration", parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(CONTROL_BUTTON_GAP)
-        layout.setContentsMargins(6, PANEL_PAD_TOP, 6, PANEL_PAD_BOTTOM)
+        _panel_margins(layout, 6, 10, 6, 6)
 
         self.cal_btn = QPushButton("Hold to Calibrate")
         self.cal_btn.setStyleSheet(self.BTN_STYLE)
@@ -2762,6 +2828,9 @@ class WaypointMissionPanel(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Multi-Waypoint Mission", parent)
         layout = QVBoxLayout(self)
+        # No released margins to pass: this panel never set any, so on
+        # Windows it keeps whatever its style gives it, untouched.
+        _panel_margins(layout)
 
         self.queue_checkbox = QCheckBox("Queue waypoints on map click")
         self.queue_checkbox.toggled.connect(self.mode_toggled)
@@ -3428,11 +3497,11 @@ class ConnectionPanel(QGroupBox):
         # different places down the right-hand edge.
         self.setStyleSheet("""
             QGroupBox { font-size: 10px; font-weight: bold; margin-top: 6px; padding-top: 4px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 4px 2px 0 2px; }
             QComboBox, QLineEdit, QPushButton { font-size: 10px; padding: 2px 4px; }
-        """)
+        """ + GROUPBOX_TITLE)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(4, 10, 4, 4)
+        _panel_margins(outer, 4, 10, 4, 4)
         outer.setSpacing(3)
         row = QHBoxLayout()
         row.setSpacing(3)
@@ -3656,7 +3725,7 @@ class MessagesPanel(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Messages", parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 10, 6, 6)
+        _panel_margins(layout, 6, 10, 6, 6)
 
         self.text_edit = QPlainTextEdit()
         self.text_edit.setReadOnly(True)
@@ -3789,12 +3858,14 @@ class SensorHealthPanel(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Systems", parent)
         row = QHBoxLayout(self)
-        row.setContentsMargins(6, 10, 6, 6)
+        _panel_margins(row, 6, 10, 6, 6)
         row.setSpacing(3)
         self.cells = {}
         for attr, label in self.SENSORS:
             cell = QLabel(label)
             cell.setAlignment(Qt.AlignCenter)
+            if SENSOR_CELL_H is not None:
+                cell.setMinimumHeight(SENSOR_CELL_H)
             row.addWidget(cell, stretch=1)
             self.cells[label] = (getattr(mavutil.mavlink, attr), cell)
         self._masks = None
@@ -3955,7 +4026,7 @@ class GuidedControlPanel(QGroupBox):
         super().__init__("Guided Control", parent)
         layout = QVBoxLayout(self)
         layout.setSpacing(CONTROL_BUTTON_GAP)
-        layout.setContentsMargins(6, PANEL_PAD_TOP, 6, PANEL_PAD_BOTTOM)
+        _panel_margins(layout, 6, 10, 6, 6)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(CONTROL_BUTTON_GAP)
@@ -4304,10 +4375,11 @@ class MainWindow(QMainWindow):
                 margin-top: 6px; padding-top: 4px;
             }
             QGroupBox::title {
-                subcontrol-origin: margin; left: 6px; padding: 0 2px;
+                subcontrol-origin: margin; left: 6px; padding: 4px 2px 0 2px;
             }
             QLabel { font-size: 10px; }
             QCheckBox { font-size: 10px; }
+            """ + GROUPBOX_TITLE + """
         """)
         left_layout = QVBoxLayout(left_content)
         left_layout.setSpacing(SECTION_GAP)

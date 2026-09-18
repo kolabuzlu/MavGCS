@@ -43,17 +43,27 @@ for:
     MacBook Air 13.6in M2/M3       1470x956    829px
     MacBook Air 15in  M2/M3        1710x1112   985px
 
-The three below are the 13.6-inch and 13-inch Airs with the Dock up, and
-the 13-inch at "Larger Text" with it hidden. The last is the tightest
-thing that fits and is kept for that reason.
+The 13.6-inch Air with its Dock up is the smallest that still fits, and
+it is the only macOS size asserted. It has 6px of headroom: the column
+asks for 803px against its 809.
 
-Two configurations do not fit and are not asserted, because a red suite
-would say the code is broken when the truth is that the screen is short:
-an 11-inch Air, which is 653px however the Dock is set, and a 13-inch at
-"Larger Text" with the Dock showing at 685px. Both scroll the left
-column, which is what the scroll area is for. If either has to be flown
-from, the column needs to come down by another 100px and that means the
-command buttons going back to the thin strips they were.
+The 13-inch Airs were asserted here and are not any more, and that is a
+decision rather than a drift. The column grew when the section titles
+were lifted clear of their frames - a title is 12px and needs a band of
+its own above each frame - and when every panel was given the same
+padding. Both were asked for, both were judged on a 16-inch screen, and
+together they put the floor past what a 13-inch leaves: 803 against the
+765 a 13-inch Air with its Dock showing gives, and the 755 of a 13-inch
+at "Larger Text".
+
+So a 13-inch Air scrolls the left column now. The scroll area is there
+for exactly that and the readings are still reachable, but they are not
+all on screen at once, which on a ground station is worth knowing rather
+than discovering. Going back means roughly 40px, which is the title
+bands, or the panel padding, or a fourth cut to the HUD's minimum.
+
+An 11-inch Air has never fitted and still does not: 653px however the
+Dock is set.
 """
 
 import os
@@ -74,7 +84,7 @@ DEAD_ADDRESS = "udp:127.0.0.1:14999"
 
 SIZES = {
     "win32": [(1536, 816), (1366, 768)],
-    "darwin": [(1470, 829), (1440, 785), (1280, 775)],
+    "darwin": [(1470, 829)],
 }.get(sys.platform)
 
 if SIZES is None:
