@@ -180,5 +180,60 @@ note("Find sits immediately left of Settings",
      " | ".join(order))
 
 print("")
+print("4. the two UDP directions")
+
+# The GCS heartbeat the connect-to probe speaks first with. It has to be
+# a real frame - something waiting on udpin ignores anything that is not
+# - and it has to be a GCS, not a vehicle, because it is one.
+text, is_vehicle = cf.describe_heartbeat(cf.gcs_heartbeat())
+note("the probe announces itself as a ground station",
+     text is not None and not is_vehicle, repr(text))
+
+
+def udp_answerer(reply):
+    """Binds a UDP port, waits to be spoken to, then replies. Returns port."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+
+    def run():
+        try:
+            s.settimeout(6.0)
+            _data, addr = s.recvfrom(2048)
+            if reply:
+                s.sendto(reply, addr)
+        except OSError:
+            pass
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+    threading.Thread(target=run, daemon=True).start()
+    return port
+
+
+# The case that cannot be found by listening: it says nothing until
+# spoken to.
+port = udp_answerer(heartbeat(1, FIXED_WING))
+cand = cf.udp_connect_candidate("127.0.0.1", port, seconds=3.0)
+note("a port waiting to be spoken to is found by speaking",
+     cand is not None and cand.confirmed
+     and cand.protocol == "UDP (connect to)",
+     repr(cand.detail) if cand else "nothing")
+
+# Bound, but never answers. Must not be offered.
+port = udp_answerer(None)
+started = time.monotonic()
+cand = cf.udp_connect_candidate("127.0.0.1", port, seconds=1.0)
+took = time.monotonic() - started
+note("one that does not answer is not offered", cand is None)
+note("and it gives up on time", took < 2.0, "%.2fs" % took)
+
+# Nothing bound at all.
+cand = cf.udp_connect_candidate("127.0.0.1", 14599, seconds=0.6)
+note("an empty port is not offered", cand is None)
+
+print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")
 sys.exit(1 if fails else 0)

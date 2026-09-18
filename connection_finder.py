@@ -12,9 +12,10 @@ What gets looked at, cheapest first:
               so a SiK radio reads as a SiK radio rather than as COM7.
   Local TCP   the simulator ports on this machine. SITL opens 5760 and
               gives 5762 and 5763 to extra ground stations.
-  UDP         the ports a vehicle or a bridge sends to without being
-              asked - 14550 above all, which is the MAVLink default and
-              what nearly every telemetry bridge targets.
+  UDP         both directions. The ports a vehicle or a bridge sends to
+              without being asked - 14550 above all, the MAVLink default
+              - and the ones where something is instead waiting to be
+              spoken to, which only answer if you speak.
   The subnet  the same TCP ports on every other address in this /24.
               This is the case that is genuinely hard to guess: SITL on
               a PC, a ground station on a laptop, and nothing on either
@@ -28,10 +29,14 @@ matters: "port 5762 is open" is a fact about a socket, "ArduPlane,
 system 1" is a fact about an aircraft, and only the second one is worth
 putting in front of a pilot.
 
-Nothing here writes to a vehicle. The probe opens a socket, reads, and
-closes; on UDP it binds and listens without sending. A discovery step
-that armed something by accident would be an unusually bad bug, so the
-only MAVLink call used is the one that waits.
+One probe sends; the rest only read. Finding something that listens on
+UDP and says nothing until spoken to cannot be done by listening, so
+udp_connect_candidate() speaks first - a GCS heartbeat, the frame this
+program sends a second after Connect is pressed anyway. It carries no
+command and asks for nothing. Everything else opens a socket, reads and
+closes. A discovery step that armed something by accident would be an
+unusually bad bug, and nothing here can: no probe encodes a command, a
+mode, a parameter or an arm.
 """
 
 import os
@@ -67,6 +72,13 @@ HEARTBEAT_TIMEOUT_S = 2.5
 # How long to sit on a UDP port waiting to be spoken to. A vehicle that
 # is streaming will say something well inside this.
 UDP_LISTEN_S = 1.5
+
+# What a machine on the same wire takes to answer a datagram it was
+# going to answer at all: milliseconds. The full UDP_LISTEN_S is for
+# waiting on a vehicle that streams on its own schedule, and spending it
+# on each of 508 addresses that will never reply added twelve seconds to
+# a search for nothing.
+UDP_SWEEP_S = 0.6
 
 # The subnet sweep, widest thing here. 254 addresses against three ports
 # is 762 connects; at this many at once it lands in a few seconds.
@@ -266,12 +278,29 @@ def udp_listening_candidate(port, seconds=UDP_LISTEN_S):
         return Candidate("UDP (listen)", "0.0.0.0", str(port),
                          "UDP %d" % port,
                          "in use by another program", False)
+    # Keep reading until a heartbeat turns up rather than judging the
+    # first datagram. One datagram is one frame, and on a vehicle
+    # streaming twenty message types the odds of the first one being the
+    # heartbeat are poor - which is why this said "MAVLink from
+    # 127.0.0.1" when it could have said which aircraft.
+    import time as _time
+    deadline = _time.monotonic() + seconds
+    data, addr, seen = b"", None, b""
     try:
-        data, addr = s.recvfrom(2048)
-    except (socket.timeout, OSError):
-        return None
+        while _time.monotonic() < deadline:
+            s.settimeout(max(0.05, deadline - _time.monotonic()))
+            try:
+                data, addr = s.recvfrom(2048)
+            except (socket.timeout, OSError):
+                break
+            seen += data
+            if describe_heartbeat(seen)[1]:
+                break
     finally:
         s.close()
+    if addr is None:
+        return None
+    data = seen
     # MAVLink v1 frames start 0xFE, v2 frames 0xFD. Anything else on a
     # MAVLink port is somebody else's traffic and not worth offering.
     if not data or data[0] not in (0xFE, 0xFD):
@@ -338,6 +367,12 @@ class FinderWorker(QThread):
                 if self._stop.is_set():
                     break
                 self._emit(udp_listening_candidate(port))
+            # And the other direction on this machine: something holding
+            # the port open and waiting to be addressed.
+            for port in MAVLINK_UDP_PORTS:
+                if self._stop.is_set():
+                    break
+                self._emit(udp_connect_candidate("127.0.0.1", port))
 
         # 4. The rest of the network. Last because it is the slowest and
         #    because the three above answer most cases.
@@ -355,10 +390,9 @@ class FinderWorker(QThread):
         base = mine.rsplit(".", 1)[0]
         self.progress.emit("Searching %s.0/24..." % base)
 
-        targets = [("%s.%d" % (base, h), p)
-                   for h in range(1, 255)
-                   for p in SITL_TCP_PORTS
-                   if "%s.%d" % (base, h) != mine]
+        hosts = ["%s.%d" % (base, h) for h in range(1, 255)
+                 if "%s.%d" % (base, h) != mine]
+        targets = [(h, p) for h in hosts for p in SITL_TCP_PORTS]
 
         hits = []
         with ThreadPoolExecutor(max_workers=SWEEP_WORKERS) as pool:
@@ -369,6 +403,20 @@ class FinderWorker(QThread):
             for r in pool.map(probe, targets):
                 if r is not None:
                     hits.append(r)
+
+        # The UDP side of the same sweep. One small datagram per address
+        # and port, and only the two ports MAVLink actually uses - this
+        # is a question asked of a handful of ports, not a port scan.
+        if not self._stop.is_set():
+            self.progress.emit("Asking %s.0/24 on UDP..." % base)
+            udp_targets = [(h, p) for h in hosts for p in MAVLINK_UDP_PORTS]
+            with ThreadPoolExecutor(max_workers=SWEEP_WORKERS) as pool:
+                def ask(t):
+                    if self._stop.is_set():
+                        return None
+                    return udp_connect_candidate(t[0], t[1], UDP_SWEEP_S)
+                for cand in pool.map(ask, udp_targets):
+                    self._emit(cand)
 
         # Only the hits pay for a heartbeat, and they are few.
         for host, port in hits:
@@ -500,3 +548,56 @@ class ConnectionFinderDialog(QDialog):
     def done(self, result):
         self._stop_worker()
         super().done(result)
+
+
+def gcs_heartbeat():
+    """One GCS heartbeat, as any ground station announces itself with."""
+    from pymavlink import mavutil
+    mav = mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=190)
+    msg = mav.heartbeat_encode(
+        MAV_TYPE_GCS, mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0,
+        mavutil.mavlink.MAV_STATE_ACTIVE)
+    return msg.pack(mav)
+
+
+def udp_connect_candidate(host, port, seconds=UDP_LISTEN_S):
+    """Speak first, and see whether anything answers.
+
+    This is the one probe here that sends. It has to: an endpoint
+    listening on UDP - a vehicle, a simulator, a telemetry bridge set to
+    udpin - says nothing at all until something addresses it, and it
+    learns where to reply from the packet that arrives. Listening for it
+    would wait forever. There is no passive way to find a thing whose
+    whole design is to wait.
+
+    What it sends is a GCS heartbeat: the frame every ground station
+    announces itself with, the same one this program sends a second
+    after Connect is pressed. It carries no command, sets nothing, and
+    asks for nothing. An autopilot that receives it learns that a ground
+    station exists at this address, which is true, and which it would
+    learn a moment later anyway if the user picked this result.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(seconds)
+    try:
+        try:
+            s.sendto(gcs_heartbeat(), (host, port))
+        except OSError:
+            return None
+        import time as _time
+        deadline = _time.monotonic() + seconds
+        seen = b""
+        while _time.monotonic() < deadline:
+            s.settimeout(max(0.05, deadline - _time.monotonic()))
+            try:
+                data, _addr = s.recvfrom(2048)
+            except (socket.timeout, OSError):
+                return None
+            seen += data
+            who, is_vehicle = describe_heartbeat(seen)
+            if is_vehicle:
+                return Candidate("UDP (connect to)", host, str(port),
+                                 "%s, port %d" % (host, port), who, True)
+        return None
+    finally:
+        s.close()

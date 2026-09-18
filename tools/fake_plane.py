@@ -28,6 +28,12 @@ from pymavlink import mavutil
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=14550)
+ap.add_argument("--listen", action="store_true",
+                help="wait to be spoken to instead of sending. Binds the "
+                     "port and answers whoever addresses it first, which "
+                     "is what an autopilot set to udpin does - and what "
+                     "the app's 'UDP (connect to)' reaches. Without this "
+                     "the plane sends to the port and the app listens.")
 ap.add_argument("--radius", type=float, default=150.0)      # m
 ap.add_argument("--speed", type=float, default=20.0)        # m/s ground
 ap.add_argument("--alt", type=float, default=100.0)         # m AGL
@@ -56,7 +62,11 @@ def log(s):
     print("%7.1f PLANE %s" % (time.time() - T0, s), flush=True)
 
 
-conn = mavutil.mavlink_connection("udpout:127.0.0.1:%d" % args.port,
+# udpin binds and waits; pymavlink learns where to reply from the first
+# datagram that arrives, exactly as an autopilot does. udpout sends from
+# the first moment and needs nobody to speak first.
+_link = ("udpin:0.0.0.0:%d" if args.listen else "udpout:127.0.0.1:%d")
+conn = mavutil.mavlink_connection(_link % args.port,
                                   source_system=1, source_component=1)
 mav = conn.mav
 M = mavutil.mavlink
@@ -299,7 +309,8 @@ def ftp_reply(m, seq, session, opcode, size, req_opcode, payload):
 
 
 log("loiter r=%.0f m, %.0f m/s, period %.0f s, ATTITUDE %.0f Hz, to udp %d"
-    % (args.radius, args.speed, period, args.attitude_hz, args.port))
+    % (args.radius, args.speed, period, args.attitude_hz, args.port)
+    + (" (listening)" if args.listen else ""))
 tick_home(state(0), 0)
 stream_queue = []
 next_stream = 0.0
