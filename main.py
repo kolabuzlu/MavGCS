@@ -3530,11 +3530,16 @@ class ConnectionPanel(QGroupBox):
         # Everything this bar asks for is already knowable: which port a
         # radio enumerated as, which port a simulator opened, what
         # address the machine running it has. This goes and looks.
-        self.find_btn = QPushButton("Find")
+        self.find_btn = QPushButton("F")
         self.find_btn.setFixedHeight(self.FIELD_HEIGHT)
-        self.find_btn.setStyleSheet(self.UPDATE_STYLE)
+        # The same blue as Connect. These two are the only buttons on the
+        # bar that go and do something to the connection rather than
+        # opening a window, and one letter needs the colour to be found
+        # at all.
+        self.find_btn.setStyleSheet(
+            "color: #2af; font-size: 9px; padding: 2px 6px;")
         self.find_btn.setToolTip(
-            "Search for a vehicle: serial ports, this computer's "
+            "Find a connection. Searches serial ports, this computer's "
             "simulator ports, incoming telemetry, and the rest of this "
             "network. Pick a result and the fields above fill in.")
         self.find_btn.clicked.connect(self._on_find_clicked)
