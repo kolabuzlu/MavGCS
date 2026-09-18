@@ -97,11 +97,16 @@ if MACOS:
     # reserved 21px above the first button against 7 below it - most of
     # the height of a single-row panel like Guided Control.
     PANEL_PAD_TOP = PANEL_PAD_BOTTOM = 4
-    # Blank rows between the four groups of readings in the data panel.
-    # 0, like Windows: the 22 this had bought the block its extra height
-    # and cost 66px of a column that turned out not to have them. See
-    # HUD_MIN_H.
-    TELEMETRY_GROUP_GAP = 0
+    # Blank rows between the four groups of readings in the data panel,
+    # which is what sets that panel's height. 12 gives it 169px where the
+    # bare rows come to 133.
+    #
+    # It is also what takes height off the HUD, without the HUD being
+    # mentioned: the HUD carries this column's stretch, so it is whatever
+    # the panels above and below leave over, and every pixel the data
+    # panel gains is one the HUD loses. At a 1000px window that is 345
+    # against 133 becoming 309 against 169.
+    TELEMETRY_GROUP_GAP = 12
     # None, as on Windows: the HUD carries the column's stretch factor
     # and absorbs whatever the panels above leave over.
     #
@@ -123,11 +128,19 @@ if MACOS:
     HUD_BLOCK_H = None
     # How far the HUD may be squeezed before the column gives up and
     # scrolls. 175 is what it has always asked for and what Windows still
-    # gets. 120 is what lets this column fit a 13-inch MacBook Air with
-    # its Dock showing - 755px of viewport - which is the smallest screen
-    # this would be flown from. The HUD is only that small on that
-    # screen: at WINDOW_H it is 345px.
-    HUD_MIN_H = 120
+    # gets.
+    #
+    # 84, and it is not free of the line above. This column's floor is
+    # exactly 755px, which is the viewport a 13-inch MacBook Air with its
+    # Dock showing leaves, and it had no slack at all: the data panel's
+    # height counts against that floor, so giving it 36px took 36px from
+    # somewhere. It comes from here, because the alternatives were the
+    # button height and the section gaps, and both of those are visible
+    # at every window size where this is visible only at the smallest.
+    #
+    # So the HUD is 84px rather than 120px on a screen short enough to be
+    # at the floor, and 309px at WINDOW_H.
+    HUD_MIN_H = 84
     # The fixed-width family for the readouts that are meant to line up:
     # the link statistics, which are rewritten every tick, and the message
     # log, where timestamps sit in a column.
