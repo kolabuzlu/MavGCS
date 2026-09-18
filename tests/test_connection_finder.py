@@ -174,9 +174,9 @@ def button_row(widget):
 
 # Asked for by position, not by existence: "left of the Settings button".
 order = button_row(panel)
-note("F sits immediately left of Settings",
-     "F" in order and "Settings" in order
-     and order.index("F") == order.index("Settings") - 1,
+note("Find sits immediately left of Settings",
+     "Find" in order and "Settings" in order
+     and order.index("Find") == order.index("Settings") - 1,
      " | ".join(order))
 
 print("")

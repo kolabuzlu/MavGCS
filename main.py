@@ -3530,12 +3530,12 @@ class ConnectionPanel(QGroupBox):
         # Everything this bar asks for is already knowable: which port a
         # radio enumerated as, which port a simulator opened, what
         # address the machine running it has. This goes and looks.
-        self.find_btn = QPushButton("F")
+        self.find_btn = QPushButton("Find")
         self.find_btn.setFixedHeight(self.FIELD_HEIGHT)
         # The same blue as Connect. These two are the only buttons on the
-        # bar that go and do something to the connection rather than
-        # opening a window, and one letter needs the colour to be found
-        # at all.
+        # bar that act on the connection itself rather than opening a
+        # window, so the colour groups them - Settings and Check for
+        # Updates stay grey because that is what they are.
         self.find_btn.setStyleSheet(
             "color: #2af; font-size: 9px; padding: 2px 6px;")
         self.find_btn.setToolTip(
