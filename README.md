@@ -36,5 +36,4 @@ reports an unsigned app as "damaged", which it is not. See
 [INSTALL.md](INSTALL.md), which also covers the camera permission.
 
 This is an Intel build: native on Intel Macs, and on Apple Silicon it
-runs through Rosetta, which macOS offers to install the first time. A
-native Apple Silicon build has to be made on an Apple Silicon Mac.
+runs through Rosetta, which macOS offers to install the first time.
