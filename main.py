@@ -2903,6 +2903,92 @@ class WaypointMissionPanel(QGroupBox):
         # Clear with nothing to clear is harmless.
 
 
+class MissionStartDialog(QDialog):
+    """How high the mission flies, and what that height is measured from.
+
+    Mission Planner asks the same question as a Frame column, one row per
+    waypoint. Asked once for the mission instead, because that is the
+    choice a pilot actually makes: a plan is flown relative to home, or
+    above sea level, or following the ground - not a different datum every
+    leg. Whatever is chosen here goes on every point in the batch.
+
+    It replaced a bare QInputDialog.getDouble, which is why the altitude
+    box is a spin box with the same range and no decimals: the same
+    question, answered the same way, with a second one underneath it.
+    """
+
+    # Name, what it is measured from, and the wire name the link knows.
+    # The order is Mission Planner's, and Relative is first because it is
+    # the default and the overwhelmingly common answer.
+    FRAMES = (
+        ("Relative", "above home, where the aircraft armed", "RELATIVE"),
+        ("Absolute", "above mean sea level", "ABSOLUTE"),
+        ("Terrain", "above the ground under each waypoint", "TERRAIN"),
+    )
+
+    def __init__(self, count, alt, frame="RELATIVE", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Start Mission")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Fly through %d waypoint%s."
+            % (count, "" if count == 1 else "s")))
+
+        form = QFormLayout()
+        self.alt_spin = QDoubleSpinBox()
+        self.alt_spin.setRange(0.0, 1000.0)
+        self.alt_spin.setDecimals(0)
+        self.alt_spin.setSuffix(" m")
+        self.alt_spin.setValue(float(alt))
+        form.addRow("Altitude", self.alt_spin)
+
+        self.frame_combo = QComboBox()
+        for name, _note, key in self.FRAMES:
+            self.frame_combo.addItem(name, key)
+        at = self.frame_combo.findData(frame)
+        self.frame_combo.setCurrentIndex(at if at >= 0 else 0)
+        form.addRow("Frame", self.frame_combo)
+        layout.addLayout(form)
+
+        # What the chosen frame means, in words, under the choice.
+        # "Relative" and "Absolute" both name a datum without saying what
+        # it is, and mistaking one for the other is how an aeroplane gets
+        # sent at 120 m through ground that is already 900 m up.
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: #9aa5ad; font-size: 11px;")
+        layout.addWidget(self.note)
+        self.frame_combo.currentIndexChanged.connect(self._show_note)
+        self._show_note()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # The altitude is what gets typed; the frame is usually left alone.
+        self.alt_spin.setFocus()
+        self.alt_spin.selectAll()
+
+    def _show_note(self):
+        index = max(0, self.frame_combo.currentIndex())
+        self.note.setText("Altitudes are %s." % self.FRAMES[index][1])
+
+    @classmethod
+    def ask(cls, parent, count, alt, frame="RELATIVE"):
+        """(altitude, frame, accepted) - shaped like QInputDialog.getDouble.
+
+        The altitude and frame come back whatever the answer was, so a
+        cancelled dialog cannot be mistaken for a mission at 0 m.
+        """
+        dialog = cls(count, alt, frame, parent)
+        ok = dialog.exec() == QDialog.DialogCode.Accepted
+        return (float(dialog.alt_spin.value()),
+                str(dialog.frame_combo.currentData()), ok)
+
+
 def short_adapter(name):
     """The card's name out of the driver's full description.
 
@@ -4357,6 +4443,11 @@ class MainWindow(QMainWindow):
         # none: not in AUTO, mission done, or nothing uploaded by us.
         self._active_wp_id = -1
         self._mission_default_alt = None
+        # What the next mission's altitudes will be measured from, offered
+        # as the answer already filled in. Relative to home is where this
+        # starts and the only thing missions were sent with before the
+        # Start Mission dialog asked.
+        self._mission_frame = "RELATIVE"
         # Home's own height above sea level, which is what turns a
         # waypoint's relative altitude into something the terrain can be
         # compared against.
@@ -4876,7 +4967,11 @@ class MainWindow(QMainWindow):
                 # No altitude decided for this point yet, so there is
                 # nothing to check it against.
                 continue
-            points.append((wp["id"], wp["lat"], wp["lon"], float(alt)))
+            # The frame goes with the number: the same 80 is a different
+            # height above the ground depending on what it is measured
+            # from, and the worker is what turns one into the other.
+            points.append((wp["id"], wp["lat"], wp["lon"], float(alt),
+                           wp.get("frame", "RELATIVE")))
         self.wp_terrain_worker.check(self._home_alt_amsl, points)
 
     def _mission_points(self):
@@ -6282,7 +6377,7 @@ class MainWindow(QMainWindow):
     def on_waypoint_added(self, lat, lon, wp_id):
         self._waypoint_queue.append(
             {"id": int(wp_id), "lat": lat, "lon": lon, "alt": None,
-             "cmd": "WAYPOINT"}
+             "cmd": "WAYPOINT", "frame": "RELATIVE"}
         )
         self.waypoint_panel.set_count(len(self._waypoint_queue))
         self._recheck_waypoint_terrain()
@@ -6326,6 +6421,37 @@ class MainWindow(QMainWindow):
                     + (" - press Update to send it" if sent else "")
                 )
                 return
+
+    # What each frame is called where a pilot reads it. Used in the
+    # feedback line so the choice is confirmed in words rather than only
+    # by a four-letter tag beside the altitude on the map.
+    MISSION_FRAME_NAMES = {
+        "RELATIVE": "relative to home",
+        "ABSOLUTE": "above sea level",
+        "TERRAIN": "above the terrain",
+    }
+
+    def _warn_if_vehicle_has_no_terrain(self):
+        """Say so when a terrain mission is planned for an aircraft that
+        has no terrain data to fly it against.
+
+        A terrain-frame waypoint is flown against terrain data the AIRCRAFT
+        holds, not ours. ArduPilot wants TERRAIN_ENABLE on and tiles for
+        the area - on its own card, or streamed to it by a ground station
+        that serves them, which this does not do. Without them it will not
+        hold the height above the ground that was asked for, and nothing
+        about the upload says so: the mission is accepted either way.
+
+        TERRAIN_REPORT's spacing is zero when the aircraft holds none,
+        which is what _vehicle_terrain_is_good watches - so this is
+        answered from what the aircraft said rather than guessed at.
+        """
+        if self.link is None or self._vehicle_terrain_is_good():
+            return
+        self.on_command_feedback(
+            "Note: the aircraft reports no terrain data of its own. A "
+            "terrain mission needs TERRAIN_ENABLE on and tiles for this "
+            "area on its card - MavGCS does not stream them.")
 
     def on_waypoint_alt_changed(self, wp_id, alt):
         """An altitude typed into a waypoint's popup on the map.
@@ -6375,18 +6501,21 @@ class MainWindow(QMainWindow):
         link = self._require_link()
         if not link:
             return
-        alt, ok = QInputDialog.getDouble(
-            self,
-            "Start Mission",
-            f"Fly through {len(self._waypoint_queue)} waypoints at what "
-            f"relative altitude (m)?",
-            value=self._last_alt if self._last_alt else 30.0,
-            minValue=0.0, maxValue=1000.0, decimals=0,
+        alt, frame, ok = MissionStartDialog.ask(
+            self, len(self._waypoint_queue),
+            self._last_alt if self._last_alt else 30.0,
+            self._mission_frame,
         )
         if not ok:
             return
+        # One frame for the whole mission: every point in the batch is
+        # measured from the same thing, which is the question the dialog
+        # asked.
+        for wp in self._waypoint_queue:
+            wp["frame"] = frame
         link.upload_and_start_mission(
-            [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"))
+            [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"),
+              w.get("frame", "RELATIVE"))
              for w in self._waypoint_queue], alt
         )
         # Pin down what each point was actually sent with, so the record on
@@ -6394,6 +6523,20 @@ class MainWindow(QMainWindow):
         for wp in self._waypoint_queue:
             if wp["alt"] is None:
                 wp["alt"] = float(alt)
+        # Remembered for the next mission, the way the altitude is: a pilot
+        # flying a terrain survey plans several in a row.
+        self._mission_frame = frame
+        self.map_view.set_waypoint_frame(frame)
+        # Said after the upload line rather than before it, so the log
+        # reads in the order things happened. Relative says nothing: it is
+        # what every mission was before the dialog asked, and a line
+        # announcing the default would be noise on every flight.
+        if frame != "RELATIVE":
+            self.on_command_feedback(
+                "Mission altitudes are %s"
+                % self.MISSION_FRAME_NAMES.get(frame, frame))
+        if frame == "TERRAIN":
+            self._warn_if_vehicle_has_no_terrain()
         # Keep the batch: its altitudes stay editable, and Update re-sends it.
         self._sent_mission = list(self._waypoint_queue)
         self._mission_default_alt = alt
@@ -6431,7 +6574,8 @@ class MainWindow(QMainWindow):
             return
         default = self._mission_default_alt if self._mission_default_alt else self._last_alt
         link.upload_and_start_mission(
-            [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"))
+            [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"),
+              w.get("frame", "RELATIVE"))
              for w in self._sent_mission],
             default,
             restart=False,

@@ -64,7 +64,17 @@ while True:
         conn.mav.mission_request_int_send(255, 190, 0)
 
     elif mtype == "MISSION_ITEM_INT":
-        print(f"<< MISSION_ITEM_INT seq={msg.seq}: lat={msg.x/1e7:.6f} lon={msg.y/1e7:.6f} alt={msg.z}")
+        # The frame is printed because it is what decides where the
+        # altitude is measured from: 6 relative to home, 5 above sea
+        # level, 11 above the terrain. Without it the same alt=120 looks
+        # identical for three different places.
+        try:
+            frame_name = mavutil.mavlink.enums["MAV_FRAME"][msg.frame].name
+        except (KeyError, AttributeError):
+            frame_name = str(msg.frame)
+        print(f"<< MISSION_ITEM_INT seq={msg.seq}: lat={msg.x/1e7:.6f} "
+              f"lon={msg.y/1e7:.6f} alt={msg.z} frame={msg.frame} "
+              f"({frame_name})")
         received_items[msg.seq] = msg
         if expected_count is not None and len(received_items) < expected_count:
             conn.mav.mission_request_int_send(255, 190, len(received_items))

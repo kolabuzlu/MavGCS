@@ -691,16 +691,31 @@ class PointElevationWorker(QThread):
             self.wait(1000)
 
 
+# What a waypoint's altitude can be measured from, named as the map and
+# the link name them. Anything else is read as RELATIVE, which is what
+# the link sends for a frame it does not recognise - so the ground
+# clearance drawn on the map is worked out for the mission the vehicle is
+# actually given, not a different one.
+WAYPOINT_FRAMES = ("RELATIVE", "ABSOLUTE", "TERRAIN")
+
+
 class WaypointTerrainWorker(QThread):
     """
     Checks each waypoint against the ground underneath it, off the GUI
     thread.
 
-    A waypoint carries a height relative to home. What decides whether it
-    clears the ground is that height added to home's own height above sea
-    level, compared with the terrain elevation at the waypoint - three
-    numbers that live in three different places, which is why this is
-    worth doing in one spot rather than at each call site.
+    A waypoint carries a height and says what that height is measured
+    from: home, sea level, or the ground directly beneath it. What decides
+    whether it clears the ground is that height brought onto a common
+    datum, compared with the terrain elevation at the waypoint - numbers
+    that live in three different places, which is why this is worth doing
+    in one spot rather than at each call site.
+
+    The third frame is the interesting one. A waypoint already measured
+    from the ground beneath it needs no terrain tile and no home position
+    to be judged: the height it carries IS its clearance. That is the
+    whole point of the frame, and it means a terrain mission can be
+    checked over ground we have no data for at all.
 
     Nothing here changes what the aircraft flies. It answers one
     question for the map: how far above the ground each of these points
@@ -746,7 +761,8 @@ class WaypointTerrainWorker(QThread):
         super().__init__(parent)
         self._running = True
         self._lock = threading.Lock()
-        self._request = None        # (home_alt_amsl, [(id, lat, lon, rel_alt)])
+        # (home_alt_amsl, [(id, lat, lon, alt, frame)])
+        self._request = None
         self._last_done = None      # the request last answered, to avoid rework
         # When to have another go at a request that was answered only in
         # part. None means the answer was as complete as it will get.
@@ -756,11 +772,57 @@ class WaypointTerrainWorker(QThread):
     def check(self, home_alt_amsl, waypoints):
         """Thread-safe; call from the GUI thread whenever anything moves.
 
-        waypoints is [(id, lat, lon, relative_alt_m)]. Points whose
-        altitude is not yet decided should simply be left out.
+        waypoints is [(id, lat, lon, alt_m, frame)], where frame is one of
+        WAYPOINT_FRAMES. Points whose altitude is not yet decided should
+        simply be left out.
         """
         with self._lock:
-            self._request = (home_alt_amsl, tuple(waypoints))
+            self._request = (home_alt_amsl,
+                             tuple(self._normalise(wp) for wp in waypoints))
+
+    @staticmethod
+    def _normalise(wp):
+        """(id, lat, lon, alt, frame), whether or not a frame was given.
+
+        A four-field point is relative to home, which is what every point
+        was before the frame could be chosen - so a caller that does not
+        know about frames still gets the answer it used to get.
+        """
+        wp_id, lat, lon, alt = wp[0], wp[1], wp[2], wp[3]
+        frame = str(wp[4]).upper() if len(wp) >= 5 and wp[4] else "RELATIVE"
+        if frame not in WAYPOINT_FRAMES:
+            frame = "RELATIVE"
+        return (int(wp_id), float(lat), float(lon), float(alt), frame)
+
+    def _amsl(self, home_alt, lat, lon, alt, frame):
+        """The waypoint's height above sea level, or None.
+
+        None is not zero. A point measured from home with no home position
+        known, or from the ground over terrain we hold no tile for, has no
+        height above sea level that can be stated - and a point that
+        cannot be judged has to read as unjudged rather than as sitting at
+        sea level.
+        """
+        if frame == "ABSOLUTE":
+            return float(alt)
+        if frame == "TERRAIN":
+            ground = self._provider.elevation(lat, lon)
+            return None if ground is None else float(ground + alt)
+        return None if home_alt is None else float(home_alt + alt)
+
+    def _clearance(self, home_alt, lat, lon, alt, frame):
+        """How far above the ground this one waypoint sits, or None.
+
+        A terrain waypoint is answered without looking anything up: its
+        height is already measured from the ground beneath it.
+        """
+        if frame == "TERRAIN":
+            return float(alt)
+        amsl = self._amsl(home_alt, lat, lon, alt, frame)
+        if amsl is None:
+            return None
+        ground = self._provider.elevation(lat, lon)
+        return None if ground is None else float(amsl - ground)
 
     def clear(self):
         with self._lock:
@@ -795,24 +857,20 @@ class WaypointTerrainWorker(QThread):
         """One pass over a request: judge every point, then every leg."""
         home_alt, points = req
         clearances = []
-        # Without home's height above sea level there is nothing to
-        # compare against: a relative altitude alone says nothing
-        # about the ground.
-        if home_alt is not None:
-            for wp_id, lat, lon, rel_alt in points:
-                if not self._running:
-                    break
-                ground = self._provider.elevation(lat, lon)
-                if ground is None:
-                    # No tile for this spot. Left out rather than
-                    # guessed at: an unjudged waypoint reads as "not
-                    # checked", where a number would read as known.
-                    continue
-                clearances.append(
-                    (int(wp_id), float(home_alt + rel_alt - ground)))
+        for wp_id, lat, lon, alt, frame in points:
+            if not self._running:
+                break
+            # None where the answer cannot be had - no home position
+            # against a relative height, or no tile for this spot. Left
+            # out rather than guessed at: an unjudged waypoint reads as
+            # "not checked", where a number would read as known.
+            margin = self._clearance(home_alt, lat, lon, alt, frame)
+            if margin is None:
+                continue
+            clearances.append((int(wp_id), margin))
 
         legs = []
-        if home_alt is not None and len(points) > 1:
+        if len(points) > 1:
             for a, b in zip(points, points[1:]):
                 if not self._running:
                     break
@@ -829,8 +887,11 @@ class WaypointTerrainWorker(QThread):
             # asked again - but only while the provider says a fetch
             # might yet succeed, so ground that genuinely has no data
             # is not chased for ever.
-            complete = (home_alt is not None
-                        and len(clearances) == len(points)
+            # Deliberately not "and home_alt is not None" any more: a
+            # mission flown entirely above the terrain needs no home
+            # position, and asking again for ever over ground it never
+            # looked up would chase an answer it already has.
+            complete = (len(clearances) == len(points)
                         and (len(points) < 2
                              or len(legs) == len(points) - 1))
             self._last_done = req
@@ -853,10 +914,33 @@ class WaypointTerrainWorker(QThread):
         partially covered is judged on the part that is: half an answer
         about real ground beats none.
         """
-        _ida, lat1, lon1, alt1 = a
-        _idb, lat2, lon2, alt2 = b
+        _ida, lat1, lon1, alt1, frame1 = a
+        _idb, lat2, lon2, alt2, frame2 = b
         length = self._haversine_m(lat1, lon1, lat2, lon2)
         if length < 1.0:
+            return None
+        # A leg between two terrain waypoints is not a straight line
+        # through the air: the aircraft holds the interpolated height above
+        # whatever is beneath it, which is what the frame is for. So the
+        # clearance along it is that interpolation, and being linear its
+        # lowest point is simply the lower of the two ends - no ground
+        # lookup can improve on that, and walking the terrain would invent
+        # a hill the aeroplane climbs over.
+        #
+        # This trusts the aircraft to hold terrain data of its own, which
+        # is what terrain following is flown against. An aircraft without
+        # it will not hold this height over the ground, and the mission
+        # uploads just the same - which is why choosing the frame checks
+        # whether it has any and says so.
+        if frame1 == "TERRAIN" and frame2 == "TERRAIN":
+            return float(min(alt1, alt2))
+        # Mixed, or neither: brought onto sea level at each end and walked.
+        # Where one end is a terrain waypoint that straight line sits below
+        # the height the aeroplane will really hold near it, so this warns
+        # sooner than it needs to rather than later.
+        amsl1 = self._amsl(home_alt, lat1, lon1, alt1, frame1)
+        amsl2 = self._amsl(home_alt, lat2, lon2, alt2, frame2)
+        if amsl1 is None or amsl2 is None:
             return None
         steps = int(min(self.LEG_MAX_SAMPLES, max(2, length / self.LEG_STEP_M)))
         worst = None
@@ -869,7 +953,7 @@ class WaypointTerrainWorker(QThread):
             ground = self._provider.elevation(lat, lon)
             if ground is None:
                 continue
-            flown = home_alt + alt1 + (alt2 - alt1) * f
+            flown = amsl1 + (amsl2 - amsl1) * f
             margin = flown - ground
             if worst is None or margin < worst:
                 worst = margin

@@ -920,12 +920,50 @@ function setWaypointDefaultAlt(alt) {
     refreshWaypointIcons();
 }
 
+// What a waypoint's altitude is measured from. Relative - above home -
+// is the default and the only one this had before, so it is the one that
+// says nothing: a mission planned without touching the frame looks
+// exactly as it always did.
+var WP_FRAME_TAGS = {ABSOLUTE: ' amsl', TERRAIN: ' terr'};
+
+// Spelt out in the popup, where a height is typed. "Relative" and
+// "Absolute" name a datum without saying what it is, and getting the two
+// the wrong way round puts an aeroplane underground.
+var WP_FRAME_NOTES = {
+    RELATIVE: '', ABSOLUTE: ', above sea level',
+    TERRAIN: ', above the terrain',
+};
+
+function wpFrameTag(m) {
+    return WP_FRAME_TAGS[m._wpFrame] || '';
+}
+
+function wpFrameNote(m) {
+    return WP_FRAME_NOTES[m._wpFrame] || '';
+}
+
+// The frame chosen for the mission, applied to every point in it. Echoed
+// back from Python the same way the default altitude is, because the map
+// has to label the height it shows with what that height is measured
+// from - "120m" alone means three different places.
+//
+// The batch being sent, not every marker on the map: an older mission
+// still drawn was sent with whatever frame it was sent with, and
+// relabelling it would rewrite history.
+function setWaypointFrame(frame) {
+    for (var i = 0; i < waypointMarkers.length; i++) {
+        var m = waypointMarkers[i];
+        if (m && m._wpId) { m._wpFrame = frame; }
+    }
+    refreshWaypointIcons();
+}
+
 // The altitude a waypoint will actually be flown at: its own if it has
 // one, otherwise the mission default. Blank until either is known.
 function wpAltText(m) {
     var a = (m._wpAlt !== null && m._wpAlt !== undefined) ? m._wpAlt : wpDefaultAlt;
     if (a === null || a === undefined) return '';
-    return Math.round(a) + 'm' + (wpIsDirty(m) ? ' *' : '');
+    return Math.round(a) + 'm' + wpFrameTag(m) + (wpIsDirty(m) ? ' *' : '');
 }
 
 // How far above the ground a waypoint sits, once Python has worked it
@@ -1084,7 +1122,8 @@ function wpPopupHtml(m) {
            '>Waypoint</option>' +
            '<option value="LAND"' + (isLand ? ' selected' : '') +
            '>Land</option></select>' +
-           '<div style="margin:4px 0">Altitude (m)</div>' +
+           '<div style="margin:4px 0">Altitude (m)' + wpFrameNote(m) +
+           '</div>' +
            '<input id="wp-alt-input" type="text" value="' + shown + '" ' +
            'style="width:70px;text-align:center" ' +
            'onkeydown="if(event.key===&quot;Enter&quot;){applyWaypoint(' +
@@ -2378,6 +2417,9 @@ map.on('click', function(e) {
         m._wpNum = waypointMarkers.length + 1;
         m._wpAlt = null;                 // null = fly the mission default
         m._wpCmd = 'WAYPOINT';           // or 'LAND'; set from the popup
+        // What the altitude is measured from. Above home unless the popup
+        // says otherwise, which is the only thing this ever sent before.
+        m._wpFrame = 'RELATIVE';         // or 'ABSOLUTE' / 'TERRAIN'
         m._wpSent = false;
         refreshWpIcon(m);
         // A function, not a fixed string: the popup is rebuilt each time it
@@ -3794,6 +3836,16 @@ class MapView(QWebEngineView):
     def set_waypoint_default_alt(self, alt: float):
         """So a waypoint with no altitude of its own shows what it will fly."""
         self.page().runJavaScript(f"setWaypointDefaultAlt({float(alt)});")
+
+    def set_waypoint_frame(self, frame: str):
+        """What the batch being sent measures its altitudes from.
+
+        json.dumps rather than an f-string quote: this crosses into
+        JavaScript source, and the one thing that must not be possible is
+        a value that closes the string and continues as code.
+        """
+        self.page().runJavaScript(
+            "setWaypointFrame(%s);" % json.dumps(str(frame)))
 
     def update_adsb_contacts(self, contacts: list):
         """Push a freshly-fetched ADS-B contact list (see AdsbWorker) for the

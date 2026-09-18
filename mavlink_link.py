@@ -925,6 +925,8 @@ class MavlinkLink(QThread):
                     item = self._mission_pending[msg.seq]
                     lat, lon, alt = item[0], item[1], item[2]
                     wp_cmd = item[3] if len(item) >= 4 else "WAYPOINT"
+                    wp_frame = (item[4] if len(item) >= 5
+                                else self.DEFAULT_MISSION_FRAME)
                     # The vehicle is still asking for items, so the upload is
                     # alive however long the whole mission takes.
                     self._mission_deadline = time.time() + MISSION_STEP_TIMEOUT_S
@@ -953,7 +955,10 @@ class MavlinkLink(QThread):
                                 self.master.target_system,
                                 self.master.target_component,
                                 msg.seq,
-                                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                                self.MISSION_FRAMES.get(
+                                    wp_frame,
+                                    mavutil.mavlink
+                                    .MAV_FRAME_GLOBAL_RELATIVE_ALT_INT),
                                 self.MISSION_COMMANDS.get(
                                     wp_cmd,
                                     mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
@@ -2825,6 +2830,31 @@ class MavlinkLink(QThread):
         "LAND": mavutil.mavlink.MAV_CMD_NAV_LAND,
     }
 
+    # What a waypoint's altitude is measured from - the Frame column in
+    # Mission Planner's plan tab, and the same three choices it offers:
+    #
+    #   Relative  above home, which is wherever the aircraft armed
+    #   Absolute  above mean sea level
+    #   Terrain   above the ground directly beneath the waypoint
+    #
+    # The _INT variants because these go out as MISSION_ITEM_INT, where
+    # the coordinates are 1e7 integers; the non-INT frames mean the same
+    # datum on a message that carries floats, and mixing them is how you
+    # get a waypoint a thousand kilometres away.
+    #
+    # An unrecognised name falls back to Relative rather than being
+    # dropped, for the same reason an unknown command falls back to
+    # WAYPOINT: a frame nobody has heard of must not silently shorten a
+    # mission.
+    MISSION_FRAMES = {
+        "RELATIVE": mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        "ABSOLUTE": mavutil.mavlink.MAV_FRAME_GLOBAL_INT,
+        "TERRAIN": mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,
+    }
+    # Relative was the only frame this ever sent, so a mission planned
+    # without touching the column goes out exactly as it did before.
+    DEFAULT_MISSION_FRAME = "RELATIVE"
+
     def upload_and_start_mission(self, waypoints, alt_relative_m: float,
                                  restart: bool = True):
         """
@@ -2865,11 +2895,13 @@ class MavlinkLink(QThread):
 
         # Each point may carry its own altitude; those that don't take the
         # mission default. Each may also say what kind of item it is -
-        # an ordinary waypoint or a landing. Written as (lat, lon),
-        # (lat, lon, alt) or (lat, lon, alt, command).
+        # an ordinary waypoint or a landing - and what its altitude is
+        # measured from. Written as (lat, lon), (lat, lon, alt),
+        # (lat, lon, alt, command) or (lat, lon, alt, command, frame).
         resolved = []
         for wp in waypoints:
             cmd = wp[3] if len(wp) >= 4 and wp[3] else "WAYPOINT"
+            frame = wp[4] if len(wp) >= 5 and wp[4] else self.DEFAULT_MISSION_FRAME
             if len(wp) >= 3 and wp[2] is not None:
                 alt = float(wp[2])
             elif str(cmd).upper() == "LAND":
@@ -2879,8 +2911,13 @@ class MavlinkLink(QThread):
                 alt = 0.0
             else:
                 alt = float(alt_relative_m)
-            resolved.append((wp[0], wp[1], alt, str(cmd).upper()))
-        self._mission_pending = [placeholder + ("WAYPOINT",)] + resolved
+            resolved.append((wp[0], wp[1], alt, str(cmd).upper(),
+                             str(frame).upper()))
+        # Item 0 keeps the frame it has always had. It is a placeholder the
+        # vehicle reads as home and never flies to, and the one thing that
+        # must not become interesting.
+        self._mission_pending = [
+            placeholder + ("WAYPOINT", self.DEFAULT_MISSION_FRAME)] + resolved
         # An update to a mission already flying must not send the aircraft
         # back to waypoint 1 - it carries on from wherever it is and picks
         # up the new altitudes on the legs it hasn't flown yet.
