@@ -155,6 +155,38 @@ note("UDP (listen) switches protocol too",
                      panel.port_edit.text()))
 
 
+# Serial, with the combo populated by hand. Doing it from real hardware
+# would pass on this machine and pass on a build runner by finding
+# nothing at all, which is the shape of test that reports "ok" without
+# having checked anything.
+# Switching to Serial re-enumerates the real hardware, which would wipe
+# the ports put here on purpose. Harmless in the app - the finder read
+# the same hardware moments earlier, so the port it offers is in the
+# list - but it has to be held still to test the matching itself.
+panel._refresh_serial_ports = lambda: None
+panel.protocol_combo.setCurrentText("Serial")
+panel.serial_port_combo.clear()
+panel.serial_port_combo.addItem("COM7 - SiK Telemetry Radio (COM7)", "COM7")
+panel.serial_port_combo.addItem("COM9 - Silicon Labs CP210x (COM9)", "COM9")
+
+panel.apply_candidate(cf.Candidate("Serial", "COM9", "57600", "x"))
+note("Serial picks the port out of the dropdown, not the first one",
+     panel.protocol_combo.currentText() == "Serial"
+     and "COM9" in panel.serial_port_combo.currentText(),
+     panel.serial_port_combo.currentText())
+note("and sets the baud rate the candidate carried",
+     panel.baud_combo.currentText() == "57600",
+     panel.baud_combo.currentText())
+
+# A port the dropdown does not have - unplugged between the search and
+# the click. It must not silently select something else.
+before = panel.serial_port_combo.currentText()
+panel.apply_candidate(cf.Candidate("Serial", "COM99", "57600", "x"))
+note("a port that has gone leaves the selection alone",
+     panel.serial_port_combo.currentText() == before,
+     panel.serial_port_combo.currentText())
+
+
 def button_row(widget):
     """The labelled buttons on the bar, in the order they are drawn."""
     out = []
