@@ -8,13 +8,15 @@ and run **MavGCS.exe**. No setup needed.
 
 ### macOS
 
-Download `MavGCS-<version>-macos-<arch>.zip` from the
+Download `MavGCS-<version>-macos-x86_64.zip` from the
 [Releases page](https://github.com/kolabuzlu/MavGCS/releases) and drag
 **MavGCS.app** to your Applications folder.
 
-Pick the file that matches your Mac: `arm64` for Apple Silicon (M1 and
-later), `x86_64` for an Intel Mac. About This Mac will tell you which you
-have.
+There is one file and it fits every Mac. It is an Intel build: native on
+an Intel Mac, and on Apple Silicon (M1 and later) macOS runs it through
+Rosetta, which it offers to install the first time you open the app. A
+build that runs natively on Apple Silicon has to be made on an Apple
+Silicon Mac, which is why there is not one yet.
 
 #### "MavGCS is damaged and can't be opened"
 
