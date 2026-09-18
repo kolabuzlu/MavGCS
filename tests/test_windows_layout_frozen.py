@@ -72,7 +72,7 @@ if sys.platform != "win32":
 
 
 DUMPER = r'''
-import json, os, sys
+import json, os, re, sys
 ROOT = os.environ["TREE"]
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
@@ -88,7 +88,23 @@ for _ in range(12):
     app.processEvents()
 def walk(w, path, out):
     g = w.geometry()
-    out[path] = [g.x(), g.y(), g.width(), g.height()]
+    try:
+        ss = w.styleSheet().strip()
+    except Exception:
+        ss = ""
+    # A stylesheet can name a file, and resource_path() answers an
+    # absolute one - which differs between two checkouts for a reason
+    # that has nothing to do with style. The directory is dropped and
+    # the filename kept, so pointing at a DIFFERENT image is still a
+    # change while sitting in a different folder is not.
+    ss = re.sub(r"url\([^)]*?([^/\)]+)\)", r"url()", ss)
+    # Whitespace is not style. A constant that interpolates to "" on
+    # this platform leaves a blank line where the release had nothing,
+    # and Qt's parser does not care - so neither does this. Content
+    # changes are still caught, and anything whitespace could hide
+    # would show in the pixel comparison anyway.
+    ss = " ".join(ss.split())
+    out[path] = [[g.x(), g.y(), g.width(), g.height()], ss]
     seen = {}
     for c in w.children():
         if not (hasattr(c, "isWidgetType") and c.isWidgetType()):
@@ -98,6 +114,7 @@ def walk(w, path, out):
         walk(c, "%s/%s[%d]" % (path, cls, seen[cls]), out)
 out = {}
 walk(win, type(win).__name__, out)
+win.grab().save(os.environ["PNG"])
 sys.stdout.write(json.dumps(out, sort_keys=True))
 sys.stdout.flush()
 # Leave before Python tears the process down. A MainWindow that was
@@ -109,10 +126,10 @@ os._exit(0)
 '''
 
 
-def geometry_of(tree, dumper):
+def geometry_of(tree, dumper, png):
     """Every widget's rectangle in that checkout, keyed by tree path."""
     env = dict(os.environ)
-    env.update(TREE=tree, W=str(WIDTH), H=str(HEIGHT),
+    env.update(TREE=tree, W=str(WIDTH), H=str(HEIGHT), PNG=png,
                MAVLINK20="1", QT_QPA_PLATFORM="offscreen")
     r = subprocess.run([sys.executable, dumper], env=env,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -187,13 +204,18 @@ try:
     print("comparing against %s at %dx%d%s"
           % (RELEASE_TAG, WIDTH, HEIGHT,
              "" if os.path.exists(settings) else " (no saved settings)"))
-    before = geometry_of(released, dumper)
-    after = geometry_of(ROOT, dumper)
+    shot_before = os.path.join(work, "released.png")
+    shot_after = os.path.join(work, "working.png")
+    before = geometry_of(released, dumper, shot_before)
+    after = geometry_of(ROOT, dumper, shot_after)
 
     gone = sorted(set(before) - set(after))
     new = sorted(set(after) - set(before))
     shared = sorted(set(before) & set(after))
-    moved = [(k, before[k], after[k]) for k in shared if before[k] != after[k]]
+    moved = [(k, before[k][0], after[k][0])
+             for k in shared if before[k][0] != after[k][0]]
+    restyled = [(k, before[k][1], after[k][1])
+                for k in shared if before[k][1] != after[k][1]]
 
     note("no widget has disappeared", not gone,
          "%d gone, first: %s" % (len(gone), gone[0] if gone else ""))
@@ -201,14 +223,58 @@ try:
          "%d new, first: %s" % (len(new), new[0] if new else ""))
     note("not one widget has moved or resized", not moved,
          "%d of %d moved" % (len(moved), len(shared)))
+    # Geometry alone cannot see this. A colour, a border or a font
+    # changes what the program looks like without moving anything, and
+    # a check that only compares rectangles reports such a change as
+    # "not one widget has moved" - which is true, and useless.
+    note("not one widget has been restyled", not restyled,
+         "%d of %d restyled" % (len(restyled), len(shared)))
 
-    for key, was, now in moved[:25]:
-        short = key.replace("MainWindow/", "")
-        if len(short) > 58:
-            short = "..." + short[-55:]
-        print("       %-58s %s -> %s" % (short, was, now))
-    if len(moved) > 25:
-        print("       ... and %d more" % (len(moved) - 25))
+    def show(rows, label):
+        for key, was, now in rows[:15]:
+            short = key.replace("MainWindow/", "")
+            if len(short) > 56:
+                short = "..." + short[-53:]
+            print("       %-56s %s" % (short, label))
+            print("           released: %s" % (was,))
+            print("           working : %s" % (now,))
+        if len(rows) > 15:
+            print("       ... and %d more" % (len(rows) - 15))
+
+    show(moved, "moved")
+    show(restyled, "restyled")
+
+    # And the whole window, painted. The two records above are what the
+    # widgets say about themselves; this is what the user would see. It
+    # catches anything neither of them names - a stylesheet inherited
+    # rather than set, a palette, a font that resolved differently.
+    #
+    # Both sides are painted by the same Qt on the same machine in the
+    # same run, so there is no golden image to drift and no tolerance to
+    # tune: the answer is zero or it is a change.
+    from PySide6.QtGui import QImage
+    img_before = QImage(shot_before)
+    img_after = QImage(shot_after)
+    if img_before.isNull() or img_after.isNull():
+        note("both windows were painted", False, "a grab did not load")
+    elif img_before.size() != img_after.size():
+        note("the window is the same size", False,
+             "%dx%d vs %dx%d" % (img_before.width(), img_before.height(),
+                                 img_after.width(), img_after.height()))
+    else:
+        img_before = img_before.convertToFormat(QImage.Format_RGB32)
+        img_after = img_after.convertToFormat(QImage.Format_RGB32)
+        differing = 0
+        for y in range(img_before.height()):
+            row_b = img_before.constScanLine(y)
+            row_a = img_after.constScanLine(y)
+            if bytes(row_b) != bytes(row_a):
+                wb, wa = memoryview(bytes(row_b)), memoryview(bytes(row_a))
+                differing += sum(1 for x in range(0, len(wb), 4)
+                                 if wb[x:x + 4] != wa[x:x + 4])
+        note("not one pixel of the window has changed", differing == 0,
+             "%d of %d pixels" % (differing,
+                                  img_before.width() * img_before.height()))
 finally:
     subprocess.run(["git", "worktree", "remove", "--force", released],
                    cwd=ROOT, stdout=subprocess.DEVNULL,
