@@ -11,7 +11,7 @@
  <a href="https://github.com/kolabuzlu/MavGCS-Android"><img alt="Android version" src="https://img.shields.io/badge/Android%20version-Android-8957e5?style=flat"></a>
 </p>
 
-![MavGCS screenshot](mavgcs211.png)
+![MavGCS running on a desktop monitor, two laptops, a tablet and a radio controller, set out on a table in a field under the title FPV Ground Control Station](mavgcstabletoplogo.png)
 
 A ground control station software for **MAVLink** protocol. 🛩️
 
