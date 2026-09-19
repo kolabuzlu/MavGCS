@@ -65,3 +65,4 @@ one first tagged.
 | V2.2.4 | `2224873dcc` | 2026-09-19 | The macOS window sized to the screen it is shown on |
 | V2.2.5 | `b4cc9befe8` | 2026-09-19 | A mission that ends in a loiter instead of coming home |
 | V2.3.0 | `1e7132096d` | 2026-09-19 | Vertical speed indicator, and a frozen check that can see the HUD |
+| V2.3.1 | `f554e636c6` | 2026-09-19 | Efficiency in the flight summary, in mAh per km |
