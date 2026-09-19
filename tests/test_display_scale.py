@@ -3,10 +3,16 @@
 The macOS column is fixed-height panels stacked above a HUD that carries
 the only stretch factor, which makes the HUD the residual: every pixel a
 shorter screen takes comes out of it alone. Measured on a 13.6-inch Air -
-viewport 803 against the 16-inch's 942, a difference of 139, and the HUD
-260 against 121, a difference of 139. Nothing else moved at all. At 121
-the pitch ladder is clipped, so the instrument is losing information
-rather than looking cramped.
+viewport 771 against the 16-inch's 942, a difference of 171, and the HUD
+89 against 260, a difference of 171. Nothing else moved at all. At 89 the
+pitch ladder is clipped, so the instrument is losing information rather
+than looking cramped.
+
+Those are frame-accurate numbers, which is the only kind worth writing
+down here. An earlier pass sized the client area to the target instead
+of the frame and got 121 - macOS constrains the frame, and the title
+bar's fixed 32 points cost 39 logical pixels once scaled. Two of us made
+that same mistake independently before either noticed.
 
 The fix asked for was to treat the layout as a photograph and size it to
 the screen. What is checked here is the arithmetic that decides the
@@ -111,7 +117,7 @@ if sys.platform != "darwin":
          app_main._macos_screen_points() is None)
     before = os.environ.get("QT_SCALE_FACTOR")
     note("applying the scale does nothing",
-         app_main.apply_macos_display_scale() is None)
+         app_main.apply_macos_display_scale() == (None, None))
     note("and sets no environment variable",
          os.environ.get("QT_SCALE_FACTOR") == before,
          repr(os.environ.get("QT_SCALE_FACTOR")))
@@ -123,7 +129,7 @@ else:
 os.environ["QT_SCALE_FACTOR"] = "1.0"
 try:
     note("a factor set by hand is not overridden",
-         app_main.apply_macos_display_scale() is None
+         app_main.apply_macos_display_scale() == (None, None)
          and os.environ["QT_SCALE_FACTOR"] == "1.0",
          os.environ["QT_SCALE_FACTOR"])
 finally:

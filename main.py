@@ -7053,9 +7053,11 @@ def apply_macos_display_scale():
     The column is built out of fixed-height panels above a HUD that
     carries the only stretch factor, so the HUD is the residual: every
     pixel a shorter screen takes comes out of it and nothing else. On a
-    13.6-inch Air that leaves 121px of artificial horizon against 260 on
-    the 16-inch it was drawn for, with the pitch ladder clipped - the
-    instrument loses information, not just size.
+    13.6-inch Air that leaves 89 points of artificial horizon against 260
+    on the 16-inch it was drawn for, with the pitch ladder clipped by the
+    data panel - the instrument loses information, not just size. It is
+    5 points off its own floor, and the column is 5 points from
+    scrolling.
 
     Tuning individual constants for each screen is the other answer and
     it is the wrong one: it fixes the screens somebody owns and leaves
@@ -7078,20 +7080,30 @@ def apply_macos_display_scale():
     layout, so it goes where leftover height always goes, which is the
     HUD.
 
-    Returns the factor applied, or None if nothing was changed. An
-    existing QT_SCALE_FACTOR is left alone, so setting it by hand still
-    wins.
+    One limit inherent to the mechanism rather than to this code:
+    QT_SCALE_FACTOR is process-global and read once, so the factor is
+    whatever the main display asked for at startup. Dragging the window
+    to a second display of a different size does not rescale it, and a
+    display that changes mid-session needs a restart. There is no version
+    of this that reacts live - the factor is not a property a running
+    QGuiApplication will re-read.
+
+    Returns (factor, screen) applied, or (None, screen) if nothing was
+    changed - the screen alongside it so a caller that wants to report
+    what happened does not have to ask the window server a second time
+    and handle it answering differently. An existing QT_SCALE_FACTOR is
+    left alone, so setting it by hand still wins.
     """
     if not MACOS or os.environ.get("QT_SCALE_FACTOR"):
-        return None
+        return None, None
     screen = _macos_screen_points()
     if screen is None:
-        return None
+        return None, None
     scale = display_scale_for(screen)
     if scale is None:
-        return None
+        return None, screen
     os.environ["QT_SCALE_FACTOR"] = "%.4f" % scale
-    return scale
+    return scale, screen
 
 
 def main():
@@ -7103,11 +7115,11 @@ def main():
     # Before QApplication, which is the only moment QT_SCALE_FACTOR is
     # read. Windows never reaches this: apply_macos_display_scale returns
     # immediately off a Mac and sets nothing.
-    scale = apply_macos_display_scale()
+    scale, screen = apply_macos_display_scale()
     if scale is not None:
         print("Display scale %.3f (screen %dx%d points against the "
               "%dx%d this was drawn for)"
-              % ((scale,) + _macos_screen_points() + DESIGN_SCREEN_POINTS))
+              % ((scale,) + screen + DESIGN_SCREEN_POINTS))
     app = QApplication(sys.argv)
     window = MainWindow(connection_string)
     window.showMaximized()
