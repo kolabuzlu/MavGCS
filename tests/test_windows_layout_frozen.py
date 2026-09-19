@@ -82,7 +82,7 @@ if sys.platform != "win32":
 
 
 DUMPER = r'''
-import json, os, re, sys
+import hashlib, json, os, re, sys
 ROOT = os.environ["TREE"]
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
@@ -90,12 +90,48 @@ os.environ.setdefault("MAVLINK20", "1")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import main as app_main
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage
 app = QApplication.instance() or QApplication([])
 win = app_main.MainWindow("udp:127.0.0.1:14999")
 win.resize(int(os.environ["W"]), int(os.environ["H"]))
 win.show()
 for _ in range(12):
     app.processEvents()
+def own_paint(w):
+    """A hash of what this widget draws, for widgets that draw themselves.
+
+    win.grab() does NOT reach the artificial horizon. Measured: painting
+    the HUD's every pixel differently changes 0 of the window grab's
+    1253376, while grabbing that same widget directly differs in 3660.
+    The window holds two QWebEngineViews - the map and the FPV view -
+    and an ancestor of a native window does not re-render its children
+    into a grab; it hands back what the compositor last put there.
+
+    So the HUD, the one instrument on this screen, sat outside the
+    guarantee from the day this check was written until the day a
+    vertical speed indicator was added to it and the gate stayed green.
+
+    Only widgets whose class this project defines, and never a web view:
+    grabbing one of those is what crashes the compositor.
+    """
+    cls = type(w)
+    if cls.__module__.startswith("PySide6"):
+        return ""
+    if "WebEngine" in cls.__name__ or any(
+            "WebEngine" in b.__name__ for b in cls.__mro__):
+        return ""
+    if w.width() <= 0 or w.height() <= 0:
+        return ""
+    try:
+        img = w.grab().toImage().convertToFormat(QImage.Format_RGB32)
+        h = hashlib.sha256()
+        for y in range(img.height()):
+            h.update(bytes(img.constScanLine(y)))
+        return h.hexdigest()[:16]
+    except Exception as exc:
+        return "ungrabbable: %r" % (exc,)
+
+
 def walk(w, path, out):
     g = w.geometry()
     try:
@@ -114,7 +150,7 @@ def walk(w, path, out):
     # changes are still caught, and anything whitespace could hide
     # would show in the pixel comparison anyway.
     ss = " ".join(ss.split())
-    out[path] = [[g.x(), g.y(), g.width(), g.height()], ss]
+    out[path] = [[g.x(), g.y(), g.width(), g.height()], ss, own_paint(w)]
     seen = {}
     for c in w.children():
         if not (hasattr(c, "isWidgetType") and c.isWidgetType()):
@@ -226,6 +262,14 @@ try:
              for k in shared if before[k][0] != after[k][0]]
     restyled = [(k, before[k][1], after[k][1])
                 for k in shared if before[k][1] != after[k][1]]
+    # Only for records that carry one: an older baseline predates the
+    # third field, and comparing a hash against nothing would fail every
+    # widget rather than none.
+    repainted = [(k, before[k][2], after[k][2])
+                 for k in shared
+                 if len(before[k]) > 2 and len(after[k]) > 2
+                 and before[k][2] and after[k][2]
+                 and before[k][2] != after[k][2]]
 
     note("no widget has disappeared", not gone,
          "%d gone, first: %s" % (len(gone), gone[0] if gone else ""))
@@ -240,6 +284,17 @@ try:
     note("not one widget has been restyled", not restyled,
          "%d of %d restyled" % (len(restyled), len(shared)))
 
+    # And what each widget this project draws itself actually paints.
+    # The window grab below cannot see those - see own_paint - so
+    # without this the artificial horizon could be redrawn entirely and
+    # every other check here would still pass. It did, and they did.
+    drawn = sum(1 for k in shared
+                if len(before[k]) > 2 and before[k][2]
+                and not before[k][2].startswith("ungrabbable"))
+    note("not one widget has repainted itself", not repainted,
+         "%d of %d self-drawn widgets repainted"
+         % (len(repainted), drawn))
+
     def show(rows, label):
         for key, was, now in rows[:15]:
             short = key.replace("MainWindow/", "")
@@ -253,6 +308,7 @@ try:
 
     show(moved, "moved")
     show(restyled, "restyled")
+    show(repainted, "repainted")
 
     # And the whole window, painted. The two records above are what the
     # widgets say about themselves; this is what the user would see. It
