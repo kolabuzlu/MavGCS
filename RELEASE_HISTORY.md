@@ -63,3 +63,4 @@ one first tagged.
 | V2.2.2 | `d7e21e247a` | 2026-09-18 | A network-camera timeout that was chosen rather than inherited |
 | V2.2.3 | `abbf393d26` | 2026-09-18 | Mission altitude frames: relative to home, above sea level, or above the terrain |
 | V2.2.4 | `2224873dcc` | 2026-09-19 | The macOS window sized to the screen it is shown on |
+| V2.2.5 | `b4cc9befe8` | 2026-09-19 | A mission that ends in a loiter instead of coming home |
