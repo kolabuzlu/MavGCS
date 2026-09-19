@@ -62,3 +62,4 @@ one first tagged.
 | V2.2.1 | `6c09e8b6fc` | 2026-09-18 | Find button, and terrain that says it is downloading |
 | V2.2.2 | `d7e21e247a` | 2026-09-18 | A network-camera timeout that was chosen rather than inherited |
 | V2.2.3 | `abbf393d26` | 2026-09-18 | Mission altitude frames: relative to home, above sea level, or above the terrain |
+| V2.2.4 | `2224873dcc` | 2026-09-19 | The macOS window sized to the screen it is shown on |
