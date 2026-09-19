@@ -5764,6 +5764,7 @@ class MainWindow(QMainWindow):
         self.telemetry.set_speed("groundspeed", groundspeed)
         self.telemetry.set_value("vspeed_mps", f"{climb:.2f}")
         self.horizon.set_airspeed(airspeed)
+        self.horizon.set_climb(climb)
         self._return_home.set_airspeed(airspeed)
         if throttle is not None:
             self.horizon.set_throttle(throttle)

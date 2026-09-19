@@ -70,6 +70,7 @@ class ArtificialHorizon(QWidget):
         self.airspeed = None   # m/s, None until first update
         self.throttle = None   # percent, None until first update
         self.altitude = None   # m, None until first update
+        self.climb = None      # m/s, positive up, None until first update
         self.heading = None    # degrees, None until first update
         self.wind_dir = None   # degrees (direction wind is coming FROM), None until first update
         self.wind_speed = None  # m/s, None until first update
@@ -132,8 +133,26 @@ class ArtificialHorizon(QWidget):
     # sits this far in, which leaves the widest caption a 4px gap. Moving
     # the group keeps the caption centred under the bar it belongs to;
     # nudging the caption alone would have left it visibly off-centre.
-    # The altitude box on the right keeps the original 6px margin.
     LEFT_GROUP_MARGIN = 13.0
+    # The mirror of it, and it exists for the same reason: the vertical
+    # speed caption is centred on a bar narrower than the caption, so
+    # without room beyond the bar it would clip against the right edge
+    # exactly as the throttle's did against the left. The altitude box
+    # moves inboard with it, the way the airspeed box does on the left.
+    # It replaced a plain 6px margin, which was all the altitude box
+    # needed when nothing sat outboard of it.
+    RIGHT_GROUP_MARGIN = 13.0
+
+    # Full deflection, up or down. Ten covers what an aeroplane does:
+    # a brisk climb is 3 to 5, and anything past ten is a dive or a
+    # problem, both of which read as "hard over" and neither of which
+    # needs a number to act on.
+    VSI_FULL_SCALE_MPS = 10.0
+    # What the bar leaves between itself and the battery box above it.
+    VSI_BATTERY_GAP = 4.0
+    # Below this there is no bar worth drawing, only a smear. A HUD this
+    # short has bigger problems than its vertical speed readout.
+    VSI_MIN_H = 24.0
 
     BATTERY_BOX_W = 104
     # Three rows now: pack voltage, per-cell with the S selector beside
@@ -231,6 +250,11 @@ class ArtificialHorizon(QWidget):
         self.altitude = altitude
         self.update()
 
+    def set_climb(self, climb_mps):
+        """Vertical speed from VFR_HUD, in m/s, positive up."""
+        self.climb = climb_mps
+        self.update()
+
     def set_heading(self, heading_deg):
         self.heading = heading_deg % 360
         self.update()
@@ -309,6 +333,76 @@ class ArtificialHorizon(QWidget):
         # 170 alpha over snow or pale sand still comes out at luminance
         # 80-odd, which is not enough behind small white text. This is
         # the ground the HUD already uses where text must carry.
+        painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
+        painter.drawRect(label)
+        painter.setPen(QPen(Qt.white))
+        painter.drawText(label, Qt.AlignCenter, text)
+
+    def _draw_vsi(self, painter, rect, scale=1.0):
+        """A vertical speed bar, filling from the middle.
+
+        Up for climb, down for descent, hard over at VSI_FULL_SCALE_MPS
+        either way. Drawn even with no reading yet, so the altitude box
+        does not appear to shift sideways when the first telemetry
+        arrives - the same reason the throttle bar is.
+
+        Yellow because this is the one bar on the HUD that reads in two
+        directions, and the eye has to find which way before it reads how
+        far. Green and amber already mean "how much" on the throttle,
+        and red means a hazard elsewhere here; yellow is unclaimed and
+        carries against both sky and ground.
+        """
+        painter.setPen(QPen(QColor(255, 255, 255, 160), 1))
+        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+        painter.drawRect(rect)
+
+        # Snapped to a pixel boundary. The centre of a bar with an odd
+        # height falls on a half pixel, and then the two directions round
+        # apart - full climb drew 56 rows against full descent's 57 - and
+        # the zero line below renders as two half-lit rows instead of one
+        # line. Half a pixel of placement buys a symmetrical bar and a
+        # crisp zero.
+        mid = float(round(rect.center().y()))
+        half = rect.height() / 2.0
+        if self.climb is not None:
+            rate = max(-self.VSI_FULL_SCALE_MPS,
+                       min(self.VSI_FULL_SCALE_MPS, float(self.climb)))
+            filled = half * abs(rate) / self.VSI_FULL_SCALE_MPS
+            # Below a pixel there is nothing to draw and a rectangle of
+            # height 0.4 renders as a smear rather than a reading.
+            if filled >= 1.0:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(QColor(255, 214, 0)))
+                top = mid - filled if rate > 0 else mid
+                painter.drawRect(QRectF(rect.x() + 1, top,
+                                        rect.width() - 2, filled))
+
+        # Half-scale marks, at five up and five down.
+        painter.setPen(QPen(QColor(255, 255, 255, 110), 1))
+        for y in (mid - half * 0.5, mid + half * 0.5):
+            painter.drawLine(QPointF(rect.x(), y),
+                             QPointF(rect.x() + rect.width() * 0.45, y))
+        # Zero, drawn after the fill so it is never buried by it. Without
+        # it the bar says how fast and not which way, which is the only
+        # thing a vertical speed indicator is for.
+        painter.setPen(QPen(QColor(255, 255, 255, 220), 1))
+        painter.drawLine(QPointF(rect.x(), mid), QPointF(rect.right(), mid))
+
+        # Captioned like the throttle bar, on the same black plinth, and
+        # clamped off the right edge for the reason RIGHT_GROUP_MARGIN
+        # exists: the text is wider than the bar and how much wider
+        # depends on the platform's font.
+        font = _hud_font("Sans")
+        font.setPointSizeF(7.0 * scale)
+        painter.setFont(font)
+        text = f"{self.climb:+.1f}" if self.climb is not None else "--"
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 6.0
+        th = fm.height() + 2.0
+        left = min(max(rect.center().x() - tw / 2.0, 3.0),
+                   self.width() - tw - 3.0)
+        label = QRectF(left, rect.bottom() + 2, tw, th)
+        painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor(15, 15, 15, 210)))
         painter.drawRect(label)
         painter.setPen(QPen(Qt.white))
@@ -598,9 +692,66 @@ class ArtificialHorizon(QWidget):
         painter.drawLine(tab.at(0), tab.at(1))
         painter.drawLine(tab.at(1), tab.at(2))
 
-        # Altitude box - middle right
+        # Vertical speed, outboard of the altitude box: the mirror of the
+        # throttle bar on the left, same width and height, so the two
+        # sides of the HUD weigh the same.
+        #
+        # Centred on the horizon like the throttle bar is, then pushed
+        # down if that would put it inside the battery box. It has to be
+        # pushed and the throttle does not, because the two are not
+        # mirror images at the top: the battery box is 60px tall where
+        # the wind readout opposite it is 40, so this bar runs into its
+        # neighbour on a HUD that leaves the other one clear. Measured,
+        # it starts overlapping below about 230px of height and is 40px
+        # into the box by the macOS floor of 84.
+        #
+        # Moved rather than shortened, so the bar reads the same length
+        # at every size it can; it is only shortened when moving it down
+        # would push its foot through the caption at the bottom.
+        # Full size in both views, where the throttle bar shrinks by a
+        # tenth over the 3D scene. That is not an oversight in the
+        # mirror: the throttle gives up those pixels to clear Cesium's
+        # logo in the bottom left corner, and there is no logo under
+        # this one - the credit text opposite it was moved inboard of
+        # the bar's group instead. Vertical speed is also the reading
+        # that matters most in the view where the pilot is looking out
+        # rather than at the numbers, so it is the last thing to shrink.
+        vsi_h = bar_h
+        vsi_top = cy - vsi_h / 2.0
+        clear_of_battery = (self.battery_box_rect_for(w, h).bottom()
+                            + self.VSI_BATTERY_GAP)
+        if vsi_top < clear_of_battery:
+            vsi_top = clear_of_battery
+        # What is left between the battery box and the caption's line.
+        # On a HUD short enough - the macOS floor of 84px is one - there
+        # is no room for a bar at all once the box is cleared, and a stub
+        # clipped off by the bottom edge would read as a reading rather
+        # than as no room. Nothing is drawn instead. The altitude box
+        # stays inboard either way, so it does not jump sideways as the
+        # column is resized past the threshold.
+        vsi_h = min(vsi_h, h - margin - 14.0 - vsi_top)
+        # Whole pixels, and an even number of them. This is the only bar
+        # on the HUD that fills from its middle, so its middle has to be
+        # a pixel: at an odd height the two directions round apart and
+        # full climb drew 56 rows where full descent drew 57 - the same
+        # reading, a different length, depending on its sign.
+        vsi_top = float(round(vsi_top))
+        vsi_h = float(int(vsi_h) // 2 * 2)
+        if vsi_h >= self.VSI_MIN_H:
+            vsi_rect = QRectF(w - self.RIGHT_GROUP_MARGIN - bar_w,
+                              vsi_top, bar_w, vsi_h)
+            # 1.0, not scale: the caption is sized with the bar it
+            # belongs to, and that bar does not shrink here.
+            self._draw_vsi(painter, vsi_rect, 1.0)
+
+        # Altitude box - middle right, moved inboard to clear the bar.
+        # Offset by the bar's UNSCALED width, so shrinking the bar in the
+        # 3D overlay does not drag the altitude box sideways with it -
+        # the same rule the airspeed box follows on the left.
         painter.setFont(_hud_font("Sans", 11, QFont.Bold))
-        altitude_rect = QRectF(w - margin - box_w, cy - box_h / 2, box_w, box_h)
+        altitude_rect = QRectF(
+            w - self.RIGHT_GROUP_MARGIN - bar_w - bar_gap - box_w,
+            cy - box_h / 2, box_w, box_h)
         painter.setPen(QPen(Qt.white, 1))
         painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
         painter.drawRect(altitude_rect)

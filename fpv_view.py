@@ -92,9 +92,24 @@ CESIUM_HTML = """
      each size: 16px is comfortable, 14px is the floor where both
      words still resolve, and by 12px "ion" has gone to mush. */
   .cesium-credit-logoContainer img { max-height: 14px; width: auto; }
+  /* Clear of the vertical speed bar, which arrived at the right edge
+     after these were placed and ran over both lines.
+     44px is what the bar's group can reach: RIGHT_GROUP_MARGIN (13) plus
+     a bar up to 12px wide is 25, but the caption under it is centred on
+     the bar and wider than it - "-12.0" measures about 36px including
+     its plinth, and it is allowed within 3px of the edge. So 39px is
+     the worst case and this leaves 5px on top of it.
+     9px rather than Cesium's 12: these are two lines of legalese in a
+     cockpit view, and the licence asks for legible attribution, not for
+     prominent. Read at 1x, 9px still resolves both lines; 8 is where
+     the lower-case letters start closing up and it stops being legible,
+     which would stop satisfying the condition it is there to satisfy.
+     The logo above keeps its own 14px floor for the same reason.
+     Nothing is hidden - this moves and shrinks. */
   .cesium-credit-textContainer, .cesium-credit-expand-link {
       display: block !important; position: absolute !important;
-      right: 8px; text-align: right; padding-left: 0;
+      right: 44px !important; text-align: right; padding-left: 0;
+      font-size: 9px !important; line-height: 11px !important;
   }
   .cesium-credit-textContainer { bottom: 28px; max-width: 55%; }
   .cesium-credit-expand-link  { bottom: 42px; }
