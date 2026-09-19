@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V2.3.1 - Bug fixes and improvements.
+
 ## V2.3.0 - Vertical speed indicator added.
 Bug fixes and improvements.
 
