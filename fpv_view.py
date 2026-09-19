@@ -17,10 +17,33 @@ The wheel (or a two-finger slide) zooms, double-click returns to 1x.
 """
 
 import json
+import sys
 
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QSizePolicy
+
+# Its own predicate rather than main.py's, for the same reason
+# artificial_horizon.py has one: this is a leaf module and importing the
+# application into it to read a boolean would be the wrong way round.
+MACOS = sys.platform == "darwin"
+
+# How far in from the right edge Cesium's two credit lines sit.
+#
+# Two numbers because the answer is different on each platform and was
+# arrived at by looking at each. The vertical speed bar sits at the
+# middle of that edge and these lines at the bottom of it, so whether
+# they crowd each other depends on how tall this view is - and the two
+# platforms lay the column out differently enough that one wants the
+# lines inboard and the other does not.
+#
+# 44 is what the bar's group can reach on Windows: RIGHT_GROUP_MARGIN
+# (13) plus a bar up to 12px wide is 25, but the caption is centred on
+# the bar and wider than it - "-12.0" measures about 36px including its
+# plinth, and it may sit within 3px of the edge. 8 is where they have
+# always been, and is where they look right on a Mac; moved inboard
+# there they left a visibly empty strip beside them.
+CREDIT_RIGHT_PX = 8 if MACOS else 44
 
 # Shown when no Ion token has been entered yet.
 NO_TOKEN_HTML = """
@@ -92,19 +115,8 @@ CESIUM_HTML = """
      each size: 16px is comfortable, 14px is the floor where both
      words still resolve, and by 12px "ion" has gone to mush. */
   .cesium-credit-logoContainer img { max-height: 14px; width: auto; }
-  /* Back against the right edge, where they were before the vertical
-     speed bar arrived.
-     They were moved 44px inboard to clear that bar, which was the wrong
-     answer to the right question: the bar sits at the MIDDLE of the
-     right edge and these two lines sit at the BOTTOM of it, so on any
-     view tall enough they never met. At 746x309 the bar's caption ends
-     28px above where these start. Reserving 44px bought nothing and
-     left a visibly empty strip to the right of both lines.
-     They do collide below about 210px of view height, where the bar's
-     caption reaches down into them. That is a real but narrow case, and
-     the honest cost of it is two lines of attribution overlapping a
-     caption on a view that small - cheaper than an empty strip at every
-     size anybody actually flies with.
+  /* Inset from the right edge by CREDIT_RIGHT_PX, which is per platform
+     - see the constant for why the two differ.
      9px rather than Cesium's 12: these are two lines of legalese in a
      cockpit view, and the licence asks for legible attribution, not for
      prominent. Read at 1x, 9px still resolves both lines; 8 is where
@@ -114,7 +126,8 @@ CESIUM_HTML = """
      Nothing is hidden - this moves and shrinks. */
   .cesium-credit-textContainer, .cesium-credit-expand-link {
       display: block !important; position: absolute !important;
-      right: 8px !important; text-align: right; padding-left: 0;
+      right: %%CREDITRIGHT%%px !important;
+      text-align: right; padding-left: 0;
       font-size: 9px !important; line-height: 11px !important;
   }
   .cesium-credit-textContainer { bottom: 28px; max-width: 55%; }
@@ -524,6 +537,7 @@ class FpvView(QWebEngineView):
             return
         html = (CESIUM_HTML
                 .replace("%%BASE%%", self._origin + "/lib/cesium/")
+                .replace("%%CREDITRIGHT%%", str(CREDIT_RIGHT_PX))
                 .replace("%%TOKEN%%", self._token))
         # Served from the proxy's own origin so Cesium's assets, workers and
         # the page itself are same-origin.

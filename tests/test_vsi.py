@@ -208,5 +208,48 @@ note("a reading can be set and read back",
      == -3.5)
 
 print("")
+print("5. what the bar did to the 3D view's credit line")
+
+# Cesium's two credit lines are right-aligned at the bottom of the FPV
+# view, which is the edge the bar now occupies. Where they sit is per
+# platform: on Windows they move inboard of the bar's group, on macOS
+# they stay where they have always been, because moved inboard there
+# they left a visibly empty strip beside them.
+import fpv_view
+
+note("the inset is chosen per platform",
+     fpv_view.CREDIT_RIGHT_PX == (8 if fpv_view.MACOS else 44),
+     "%s on %s" % (fpv_view.CREDIT_RIGHT_PX,
+                   "macOS" if fpv_view.MACOS else "Windows"))
+# On Windows it has to clear the widest the bar's group reaches: the
+# margin plus a 12px bar is 25, and the caption is centred on the bar,
+# wider than it, and may sit within 3px of the edge.
+worst_case = ArtificialHorizon.RIGHT_GROUP_MARGIN + 12
+note("and on Windows it clears the bar itself",
+     fpv_view.MACOS or fpv_view.CREDIT_RIGHT_PX > worst_case,
+     "%s against the bar's %s" % (fpv_view.CREDIT_RIGHT_PX, worst_case))
+
+# The page is built by substitution, and a placeholder that survives it
+# leaves "right: %%CREDITRIGHT%%px" in the stylesheet - which the browser
+# drops silently, putting the lines wherever Cesium likes. Nothing about
+# the running app would say so.
+page = (fpv_view.CESIUM_HTML
+        .replace("%%BASE%%", "/base/")
+        .replace("%%CREDITRIGHT%%", str(fpv_view.CREDIT_RIGHT_PX))
+        .replace("%%TOKEN%%", "token"))
+import re
+leftover = re.findall(r"%%[A-Z]+%%", page)
+note("every placeholder in the page is substituted", not leftover,
+     ", ".join(leftover) or "none left")
+note("and the rule carries the platform's number",
+     "right: %dpx !important;" % fpv_view.CREDIT_RIGHT_PX in page)
+# The licence asks for legible attribution, not for prominent. Nine is
+# the floor; the logo keeps its own 14.
+note("the credit is shrunk but not to nothing",
+     "font-size: 9px !important;" in page)
+note("and the logo keeps its legibility floor",
+     "max-height: 14px" in page)
+
+print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")
 sys.exit(1 if fails else 0)
