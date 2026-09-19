@@ -6982,12 +6982,132 @@ def _selftest(connection_string):
     return 0 if ok else 1
 
 
+# The screen this layout was drawn for: a 16-inch MacBook Pro, 1792x1120
+# points. Every macOS constant in the block at the top of this file was
+# chosen against it, and on it the column is right.
+DESIGN_SCREEN_POINTS = (1792, 1120)
+
+
+def _macos_screen_points():
+    """The main display's size in points, before Qt exists to be asked.
+
+    Qt could answer this and cannot answer it in time: QT_SCALE_FACTOR is
+    read when QGuiApplication is constructed, and constructing one to
+    find the screen size is the very thing we need the answer before
+    doing. CoreGraphics has no such ordering problem - it is a C call
+    against the window server, answerable at any point in the process's
+    life.
+
+    Points rather than backing pixels, which is what CGDisplayPixelsWide
+    reports for the current mode and the unit every number in the layout
+    is written in. A Retina display in its default scaled mode says 1470
+    wide, not 2940.
+
+    None when it cannot be had - no display, a headless runner, a
+    framework that would not load. The caller then leaves the scale
+    alone, which is what this shipped with.
+    """
+    try:
+        import ctypes
+        lib = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework"
+            "/ApplicationServices")
+        lib.CGMainDisplayID.restype = ctypes.c_uint32
+        lib.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+        lib.CGDisplayPixelsWide.restype = ctypes.c_size_t
+        lib.CGDisplayPixelsHigh.argtypes = [ctypes.c_uint32]
+        lib.CGDisplayPixelsHigh.restype = ctypes.c_size_t
+        display = lib.CGMainDisplayID()
+        width = int(lib.CGDisplayPixelsWide(display))
+        height = int(lib.CGDisplayPixelsHigh(display))
+    except Exception:
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def display_scale_for(screen_points, design=DESIGN_SCREEN_POINTS):
+    """The factor that fits the design screen onto this one, or None.
+
+    One number for both axes, so the picture keeps its shape. The smaller
+    of the two ratios, because the larger one would fit the picture to
+    the axis it is not constrained by and push the other off the edge.
+
+    None means leave it alone: a screen that IS the design screen, give
+    or take a rounding error, would otherwise be scaled by something like
+    0.998 and put every widget in the window on a fractional boundary for
+    no gain whatever.
+
+    Separate from the call that applies it so the arithmetic can be
+    tested off a Mac. It is the part with a wrong answer available to it;
+    the rest is a window-server call and an environment variable.
+    """
+    if not screen_points or min(screen_points) <= 0:
+        return None
+    scale = min(screen_points[0] / design[0], screen_points[1] / design[1])
+    return None if abs(scale - 1.0) < 0.01 else scale
+
+
+def apply_macos_display_scale():
+    """Fit the whole window to this display as one picture, macOS only.
+
+    The column is built out of fixed-height panels above a HUD that
+    carries the only stretch factor, so the HUD is the residual: every
+    pixel a shorter screen takes comes out of it and nothing else. On a
+    13.6-inch Air that leaves 121px of artificial horizon against 260 on
+    the 16-inch it was drawn for, with the pitch ladder clipped - the
+    instrument loses information, not just size.
+
+    Tuning individual constants for each screen is the other answer and
+    it is the wrong one: it fixes the screens somebody owns and leaves
+    the next one broken. Scaling is the only fix that is independent of
+    the display. So the layout is treated as a photograph - everything
+    keeps its position and its proportion relative to everything else,
+    and the whole thing is sized to the screen it is shown on.
+
+    QT_SCALE_FACTOR does this as a real re-layout at a different scale
+    rather than a stretched bitmap, so it stays sharp: at 0.82 a 10px
+    font is laid out and hinted at 8.2px, not drawn at 10 and squashed.
+
+    One honest limit. This is a FIT, not a four-corner stretch: the
+    factor is one number, so the picture keeps its aspect ratio and one
+    axis is left with slack rather than being pulled out to the edge.
+    A true independent x and y stretch needs the widget tree inside a
+    QGraphicsProxyWidget, and QWebEngineView cannot live in a
+    QGraphicsScene - the map is one, and so is the FPV view, which sits
+    in the HUD's own slot. The slack is not wasted: the layout is still a
+    layout, so it goes where leftover height always goes, which is the
+    HUD.
+
+    Returns the factor applied, or None if nothing was changed. An
+    existing QT_SCALE_FACTOR is left alone, so setting it by hand still
+    wins.
+    """
+    if not MACOS or os.environ.get("QT_SCALE_FACTOR"):
+        return None
+    screen = _macos_screen_points()
+    if screen is None:
+        return None
+    scale = display_scale_for(screen)
+    if scale is None:
+        return None
+    os.environ["QT_SCALE_FACTOR"] = "%.4f" % scale
+    return scale
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--selftest":
         sys.exit(_selftest(args[1] if len(args) > 1 else "udpin:0.0.0.0:14550"))
 
     connection_string = args[0] if args else "udpin:0.0.0.0:14550"
+    # Before QApplication, which is the only moment QT_SCALE_FACTOR is
+    # read. Windows never reaches this: apply_macos_display_scale returns
+    # immediately off a Mac and sets nothing.
+    scale = apply_macos_display_scale()
+    if scale is not None:
+        print("Display scale %.3f (screen %dx%d points against the "
+              "%dx%d this was drawn for)"
+              % ((scale,) + _macos_screen_points() + DESIGN_SCREEN_POINTS))
     app = QApplication(sys.argv)
     window = MainWindow(connection_string)
     window.showMaximized()
