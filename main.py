@@ -1449,8 +1449,36 @@ class FlightStats:
                         f"{self.volt_start:.2f} V / {self.volt_end:.2f} V"))
             out.append(("Battery lowest", f"{self.volt_min:.2f} V"))
         if self.mah_start is not None and self.mah_end is not None:
-            out.append(("Consumed", f"{self.mah_end - self.mah_start:.0f} mAh"))
+            consumed = self.mah_end - self.mah_start
+            out.append(("Consumed", f"{consumed:.0f} mAh"))
+            # What a kilometre costs out of the pack. Every other figure
+            # here describes the flight; this one describes the aircraft,
+            # which is why it is worth having - it is the number that
+            # compares one propeller, one airframe or one loading against
+            # another across flights of different lengths.
+            out.append(("Efficiency", self._efficiency_text(consumed)))
         return out
+
+    # Under this, the answer is noise rather than efficiency. A stationary
+    # aircraft still accumulates GPS scatter as distance flown, and the
+    # milliamp-hours taken over the first hundred metres are mostly what
+    # it burns sitting still with the motor armed. Dividing anyway gives a
+    # confident four-figure number that means nothing, which is worse than
+    # declining to answer.
+    MIN_EFFICIENCY_DISTANCE_M = 100.0
+
+    def _efficiency_text(self, consumed_mah):
+        """Milliamp-hours per kilometre, or "--" where there is no answer.
+
+        Negative consumption means the autopilot's counter was reset
+        mid-flight; the subtraction is then measuring the reset rather
+        than the aircraft.
+        """
+        if self.distance_m < self.MIN_EFFICIENCY_DISTANCE_M:
+            return "--"
+        if consumed_mah < 0:
+            return "--"
+        return "%.1f mAh/km" % (consumed_mah / (self.distance_m / 1000.0))
 
     def as_text(self) -> str:
         rows = self.rows()
