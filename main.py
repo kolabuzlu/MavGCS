@@ -24,7 +24,7 @@ vehicle - same parsing, same widgets. Only this one string differs.
 # This is MavGCS V1.15.0 - a flight summary when the vehicle disarms:
 # time, distance, speeds, altitudes and battery use for the flight just
 # flown. See CHANGELOG.md.
-APP_VERSION = "V2.2.4"
+APP_VERSION = "V2.2.5"
 
 # Whether to ask Windows for the discrete graphics card. Absent means
 # never chosen, which counts as yes: this is on unless it is turned off.
