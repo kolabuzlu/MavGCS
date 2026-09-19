@@ -358,6 +358,7 @@ class Recorder:
 
     _last_alt = 30.0
     _mission_frame = "RELATIVE"
+    _mission_end = "RTL"
     _mission_default_alt = None
     MISSION_FRAME_NAMES = app_main.MainWindow.MISSION_FRAME_NAMES
 
@@ -431,7 +432,7 @@ def start_mission(answer, queue=None):
     return window, queue
 
 
-window, queue = start_mission((120.0, "ABSOLUTE", True))
+window, queue = start_mission((120.0, "ABSOLUTE", "RTL", True))
 sent = window.uploaded[0][0]
 note("the chosen frame reaches every point sent",
      [wp[4] for wp in sent] == ["ABSOLUTE"] * 3,
@@ -453,7 +454,7 @@ note("a frame other than relative is said out loud",
 # Cancelling must send nothing at all. The dialog hands back an altitude
 # either way, and a cancelled mission read as "0 m" would fly a plan into
 # the ground.
-window, queue = start_mission((120.0, "TERRAIN", False))
+window, queue = start_mission((120.0, "TERRAIN", "RTL", False))
 note("cancelling sends no mission", window.uploaded == [])
 note("and changes nothing about the points",
      [wp["frame"] for wp in queue] == ["RELATIVE"] * 3,
@@ -464,10 +465,10 @@ note("nor what the next dialog will open on",
 # Terrain is the frame the aircraft can quietly fail to honour: without
 # terrain data of its own ArduPilot flies the height relative to home
 # instead, and the mission uploads either way.
-window, _ = start_mission((80.0, "TERRAIN", True))
+window, _ = start_mission((80.0, "TERRAIN", "RTL", True))
 note("choosing terrain checks the aircraft has terrain data",
      window.warned == 1, "%d warnings" % window.warned)
-window, _ = start_mission((80.0, "RELATIVE", True))
+window, _ = start_mission((80.0, "RELATIVE", "RTL", True))
 note("choosing relative does not", window.warned == 0)
 note("and relative says nothing extra either",
      not any("above" in t for t in window.said), window.said)
@@ -499,6 +500,121 @@ note("the tag is on the altitude label",
 note("and the popup says it in words",
      "above sea level" in page and "above the terrain" in page)
 
+
+print("")
+print("9. what the aircraft does when the mission runs out")
+
+note("loiter is LOITER_UNLIM on the wire",
+     MavlinkLink.MISSION_COMMANDS["LOITER"]
+     == mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM)
+# An ordinary waypoint and a landing must not have moved for it.
+note("and the other two are unchanged",
+     MavlinkLink.MISSION_COMMANDS["WAYPOINT"]
+     == mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+     and MavlinkLink.MISSION_COMMANDS["LAND"]
+     == mavutil.mavlink.MAV_CMD_NAV_LAND)
+
+items, _ = upload([(40.1, 29.1, 100.0, "WAYPOINT"),
+                   (40.2, 29.2, 120.0, "LOITER")])
+note("a loiter reaches the wire as one",
+     items[2]["command"] == mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM,
+     items[2]["command"])
+note("and the points before it are still ordinary waypoints",
+     items[1]["command"] == mavutil.mavlink.MAV_CMD_NAV_WAYPOINT)
+note("a loiter keeps its altitude, unlike a landing",
+     items[2]["alt"] == 120.0, items[2]["alt"])
+
+dialog = app_main.MissionStartDialog(3, 45.0)
+note("the dialog offers both endings",
+     [dialog.end_combo.itemText(i)
+      for i in range(dialog.end_combo.count())] == ["RTL", "Loiter"],
+     [dialog.end_combo.itemText(i)
+      for i in range(dialog.end_combo.count())])
+# RTL first and default: it is what every mission did before the dialog
+# asked, so an unchanged habit produces an unchanged mission.
+note("RTL is what it opens on", dialog.end_combo.currentData() == "RTL")
+for index, word in ((0, "returns home"), (1, "circles")):
+    dialog.end_combo.setCurrentIndex(index)
+    note("choosing %s explains itself" % dialog.end_combo.currentText(),
+         word in dialog.note.text(), dialog.note.text().replace("\n", " / "))
+note("and the frame is still explained alongside it",
+     "above home" in dialog.note.text(), dialog.note.text().replace("\n", " / "))
+dialog = app_main.MissionStartDialog(1, 30.0, "RELATIVE", "LOITER")
+note("it reopens on the ending last used",
+     dialog.end_combo.currentData() == "LOITER")
+dialog = app_main.MissionStartDialog(1, 30.0, "RELATIVE", "NONSENSE")
+note("and falls back to RTL rather than empty",
+     dialog.end_combo.currentData() == "RTL")
+
+# RTL changes nothing about the mission - that is the whole of what it
+# means. This is the check that it stays that way.
+window, queue = start_mission((120.0, "RELATIVE", "RTL", True))
+sent = window.uploaded[0][0]
+note("RTL leaves every waypoint an ordinary one",
+     [wp[3] for wp in sent] == ["WAYPOINT", "WAYPOINT", "LAND"],
+     [wp[3] for wp in sent])
+
+window, queue = start_mission((120.0, "RELATIVE", "LOITER", True))
+sent = window.uploaded[0][0]
+note("loiter rewrites the last waypoint",
+     sent[-1][3] == "LOITER", sent[-1][3])
+note("and only the last one",
+     [wp[3] for wp in sent[:-1]] == ["WAYPOINT", "WAYPOINT"],
+     [wp[3] for wp in sent[:-1]])
+# The user chose this: the dialog is the more recent statement of intent.
+# It must not be a silent one - the point that was going to put the
+# aeroplane on the ground now keeps it in the air indefinitely.
+note("overwriting a landing is said out loud",
+     any("no longer lands" in t for t in window.said), window.said)
+note("and the loiter itself is announced",
+     any("circle waypoint 3" in t for t in window.said), window.said)
+note("the ending is remembered for the next mission",
+     window._mission_end == "LOITER", window._mission_end)
+
+# One waypoint: it is both the first and the last, so it is the one that
+# becomes the loiter. Worth its own check because "the last of one" is
+# exactly the index a loop gets wrong.
+single = [{"id": 1, "lat": 40.1, "lon": 29.1, "alt": 90.0,
+           "cmd": "WAYPOINT", "frame": "RELATIVE"}]
+window, queue = start_mission((120.0, "RELATIVE", "LOITER", True), single)
+sent = window.uploaded[0][0]
+note("a single waypoint becomes the loiter itself",
+     len(sent) == 1 and sent[0][3] == "LOITER", [wp[3] for wp in sent])
+
+# A landing that is NOT last is not touched by the ending at all.
+mixed = [{"id": 1, "lat": 40.1, "lon": 29.1, "alt": None, "cmd": "LAND",
+          "frame": "RELATIVE"},
+         {"id": 2, "lat": 40.2, "lon": 29.2, "alt": 90.0, "cmd": "WAYPOINT",
+          "frame": "RELATIVE"}]
+window, queue = start_mission((120.0, "RELATIVE", "LOITER", True), mixed)
+sent = window.uploaded[0][0]
+note("a landing that is not last is left alone",
+     sent[0][3] == "LAND" and sent[1][3] == "LOITER",
+     [wp[3] for wp in sent])
+note("and nothing is said about overwriting one",
+     not any("no longer lands" in t for t in window.said), window.said)
+
+# Cancelling must not rewrite anything, the same as it must not send.
+window, queue = start_mission((120.0, "RELATIVE", "LOITER", False))
+note("cancelling leaves the last waypoint as it was",
+     queue[-1]["cmd"] == "LAND", queue[-1]["cmd"])
+note("and does not remember the ending",
+     window._mission_end == "RTL", window._mission_end)
+
+print("")
+print("10. the map shows which point loiters")
+
+note("the popup offers Loiter as a type",
+     "['LOITER', 'Loiter']" in page.replace('"', "'"))
+# Without it, a point the dialog made a loiter would show as an ordinary
+# waypoint and be silently turned back into one by Apply.
+note("all three types are offered",
+     all("'%s'" % k in page for k in ("WAYPOINT", "LAND", "LOITER")))
+note("and the marker is badged LOITER",
+     "LOITER" in page.split("WP_CMD_BADGES")[1].split("}")[0],
+     page.split("WP_CMD_BADGES")[1].split("}")[0][:70])
+note("distinctly from LAND",
+     "LAND" in page.split("WP_CMD_BADGES")[1].split("}")[0])
 
 print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")

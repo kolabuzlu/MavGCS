@@ -934,6 +934,30 @@ var WP_FRAME_NOTES = {
     TERRAIN: ', above the terrain',
 };
 
+// What a waypoint can be. Loiter is here because the Start Mission
+// dialog can put it on the last point, and a popup that did not offer it
+// would show that point as an ordinary waypoint and silently turn it
+// back into one the moment Apply was pressed.
+var WP_TYPES = [
+    ['WAYPOINT', 'Waypoint'], ['LAND', 'Land'], ['LOITER', 'Loiter'],
+];
+// The badge drawn above the marker, and its colour. An ordinary waypoint
+// has none - it is the default, and a badge on every point would say
+// nothing. Green reads as "this is where it comes down"; blue as "this
+// is where it stays".
+var WP_CMD_BADGES = {LAND: ['LAND', '#7ee08a'], LOITER: ['LOITER', '#8ab4f8']};
+
+function wpTypeOptions(current) {
+    var html = '';
+    for (var i = 0; i < WP_TYPES.length; i++) {
+        var key = WP_TYPES[i][0];
+        html += '<option value="' + key + '"' +
+                (current === key ? ' selected' : '') + '>' +
+                WP_TYPES[i][1] + '</option>';
+    }
+    return html;
+}
+
 function wpFrameTag(m) {
     return WP_FRAME_TAGS[m._wpFrame] || '';
 }
@@ -1105,7 +1129,8 @@ function wpPopupHtml(m) {
         hint = '<div style="font-size:10px;color:#ffc107">not sent yet - ' +
                'press Update</div>';
     }
-    var isLand = (m._wpCmd === 'LAND');
+    var cmd = m._wpCmd || 'WAYPOINT';
+    var isLand = (cmd === 'LAND');
     wpAltBeforeLand = null;
     // A landing point's altitude is where it touches down, which is the
     // ground - so it says 0 rather than inheriting the mission's cruise
@@ -1118,10 +1143,7 @@ function wpPopupHtml(m) {
            '<div style="margin:4px 0">Type</div>' +
            '<select id="wp-cmd-input" onchange="wpTypeChanged()" ' +
            'style="width:96px;text-align:center">' +
-           '<option value="WAYPOINT"' + (isLand ? '' : ' selected') +
-           '>Waypoint</option>' +
-           '<option value="LAND"' + (isLand ? ' selected' : '') +
-           '>Land</option></select>' +
+           wpTypeOptions(cmd) + '</select>' +
            '<div style="margin:4px 0">Altitude (m)' + wpFrameNote(m) +
            '</div>' +
            '<input id="wp-alt-input" type="text" value="' + shown + '" ' +
@@ -1630,11 +1652,11 @@ function clearHome() {
 function refreshWpIcon(m) {
     m.setIcon(waypointIcon(m._wpNum, !!m._wpSent, wpAltText(m), wpIsDirty(m),
                            !!m._belowTerrain, wpAglText(m), !!m._outsideFence,
-                           m._wpCmd === 'LAND', !!m._wpActive));
+                           m._wpCmd, !!m._wpActive));
 }
 
 function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
-                      outsideFence, isLand, isActive) {
+                      outsideFence, wpCmd, isActive) {
     var fill   = sent ? '#5b6b78' : '#3af';
     var text   = sent ? '#cfd8e0' : 'white';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
@@ -1682,14 +1704,15 @@ function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
               (belowTerrain ? ' style="color:#ff8a80"' : '') + '>' +
               aglText + '</div>';
     }
-    // A landing point is marked by a badge rather than a colour: the
-    // colours here already carry state - sent, unsent, outside the fence,
-    // into the ground - and a landing waypoint can be any of those at the
+    // A landing or a loiter is marked by a badge rather than a colour:
+    // the colours here already carry state - sent, unsent, outside the
+    // fence, into the ground - and either type can be any of those at the
     // same time. The badge sits above the altitude so the stack reads
     // downwards as type, height, clearance.
-    var cmd = isLand
-        ? '<div class="wp-cmd-label" style="bottom:' +
-          (aglText ? 48 : (altText ? 36 : 24)) + 'px">LAND</div>'
+    var badge = WP_CMD_BADGES[wpCmd];
+    var cmd = badge
+        ? '<div class="wp-cmd-label" style="color:' + badge[1] + ';bottom:' +
+          (aglText ? 48 : (altText ? 36 : 24)) + 'px">' + badge[0] + '</div>'
         : '';
     var label  = altText
         ? '<div class="wp-alt-label"' +

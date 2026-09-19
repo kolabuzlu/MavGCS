@@ -2821,13 +2821,19 @@ class MavlinkLink(QThread):
         except Exception as e:
             self.command_feedback.emit(f"Failed to run preflight calibration: {e}")
 
-    # What a waypoint's type means on the wire. Only these two for now:
-    # an ordinary point to fly through, and one to land at. Anything not
-    # named here falls back to an ordinary waypoint rather than being
-    # dropped, so an unknown type cannot silently shorten a mission.
+    # What a waypoint's type means on the wire: an ordinary point to fly
+    # through, one to land at, and one to circle at until told otherwise.
+    # Anything not named here falls back to an ordinary waypoint rather
+    # than being dropped, so an unknown type cannot silently shorten a
+    # mission.
+    #
+    # LOITER_UNLIM ends a mission rather than continuing it - the
+    # aircraft orbits that point and never reaches an item after it. It
+    # is therefore only ever put on the last one.
     MISSION_COMMANDS = {
         "WAYPOINT": mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
         "LAND": mavutil.mavlink.MAV_CMD_NAV_LAND,
+        "LOITER": mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM,
     }
 
     # What a waypoint's altitude is measured from - the Frame column in

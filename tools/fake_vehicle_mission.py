@@ -72,9 +72,17 @@ while True:
             frame_name = mavutil.mavlink.enums["MAV_FRAME"][msg.frame].name
         except (KeyError, AttributeError):
             frame_name = str(msg.frame)
+        # The command decides what the aircraft DOES at the point: fly
+        # through it, land on it, or orbit it until told otherwise. Two
+        # missions that differ only in their last command look identical
+        # without it, which is the case worth watching.
+        try:
+            cmd_name = mavutil.mavlink.enums["MAV_CMD"][msg.command].name
+        except (KeyError, AttributeError):
+            cmd_name = str(msg.command)
         print(f"<< MISSION_ITEM_INT seq={msg.seq}: lat={msg.x/1e7:.6f} "
               f"lon={msg.y/1e7:.6f} alt={msg.z} frame={msg.frame} "
-              f"({frame_name})")
+              f"({frame_name}) command={msg.command} ({cmd_name})")
         received_items[msg.seq] = msg
         if expected_count is not None and len(received_items) < expected_count:
             conn.mav.mission_request_int_send(255, 190, len(received_items))

@@ -2926,7 +2926,24 @@ class MissionStartDialog(QDialog):
         ("Terrain", "above the ground under each waypoint", "TERRAIN"),
     )
 
-    def __init__(self, count, alt, frame="RELATIVE", parent=None):
+    # What happens when the aircraft reaches the end of the mission.
+    #
+    # RTL sends nothing extra. An ArduPilot mission that runs out of
+    # items returns home on its own, so the option names what the
+    # aircraft already does rather than adding a command to make it do
+    # it - which is why it is first and why it is the default: it is the
+    # behaviour every mission this has ever uploaded already had.
+    #
+    # Loiter is the one that changes the mission. The last waypoint goes
+    # out as LOITER_UNLIM instead of an ordinary waypoint, and the
+    # aircraft circles there until it is told otherwise.
+    ENDINGS = (
+        ("RTL", "the aircraft returns home when the mission ends", "RTL"),
+        ("Loiter", "the aircraft circles the last waypoint until you tell "
+                   "it otherwise", "LOITER"),
+    )
+
+    def __init__(self, count, alt, frame="RELATIVE", end="RTL", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Start Mission")
 
@@ -2949,17 +2966,27 @@ class MissionStartDialog(QDialog):
         at = self.frame_combo.findData(frame)
         self.frame_combo.setCurrentIndex(at if at >= 0 else 0)
         form.addRow("Frame", self.frame_combo)
+
+        self.end_combo = QComboBox()
+        for name, _note, key in self.ENDINGS:
+            self.end_combo.addItem(name, key)
+        at = self.end_combo.findData(end)
+        self.end_combo.setCurrentIndex(at if at >= 0 else 0)
+        form.addRow("At the end", self.end_combo)
         layout.addLayout(form)
 
-        # What the chosen frame means, in words, under the choice.
-        # "Relative" and "Absolute" both name a datum without saying what
-        # it is, and mistaking one for the other is how an aeroplane gets
-        # sent at 120 m through ground that is already 900 m up.
+        # What the two choices mean, in words, under them. "Relative" and
+        # "Absolute" both name a datum without saying what it is, and
+        # mistaking one for the other is how an aeroplane gets sent at
+        # 120 m through ground that is already 900 m up. The ending reads
+        # plainly enough as a word, but what it does to the mission does
+        # not: one of them rewrites the last waypoint.
         self.note = QLabel()
         self.note.setWordWrap(True)
         self.note.setStyleSheet("color: #9aa5ad; font-size: 11px;")
         layout.addWidget(self.note)
         self.frame_combo.currentIndexChanged.connect(self._show_note)
+        self.end_combo.currentIndexChanged.connect(self._show_note)
         self._show_note()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
@@ -2973,20 +3000,24 @@ class MissionStartDialog(QDialog):
         self.alt_spin.selectAll()
 
     def _show_note(self):
-        index = max(0, self.frame_combo.currentIndex())
-        self.note.setText("Altitudes are %s." % self.FRAMES[index][1])
+        frame = max(0, self.frame_combo.currentIndex())
+        end = max(0, self.end_combo.currentIndex())
+        self.note.setText("Altitudes are %s.\nAt the end, %s."
+                          % (self.FRAMES[frame][1], self.ENDINGS[end][1]))
 
     @classmethod
-    def ask(cls, parent, count, alt, frame="RELATIVE"):
-        """(altitude, frame, accepted) - shaped like QInputDialog.getDouble.
+    def ask(cls, parent, count, alt, frame="RELATIVE", end="RTL"):
+        """(altitude, frame, ending, accepted).
 
-        The altitude and frame come back whatever the answer was, so a
-        cancelled dialog cannot be mistaken for a mission at 0 m.
+        Every answer comes back whatever the outcome was, so a cancelled
+        dialog cannot be mistaken for a mission at 0 m; the caller reads
+        the flag, not the values.
         """
-        dialog = cls(count, alt, frame, parent)
+        dialog = cls(count, alt, frame, end, parent)
         ok = dialog.exec() == QDialog.DialogCode.Accepted
         return (float(dialog.alt_spin.value()),
-                str(dialog.frame_combo.currentData()), ok)
+                str(dialog.frame_combo.currentData()),
+                str(dialog.end_combo.currentData()), ok)
 
 
 def short_adapter(name):
@@ -4448,6 +4479,11 @@ class MainWindow(QMainWindow):
         # starts and the only thing missions were sent with before the
         # Start Mission dialog asked.
         self._mission_frame = "RELATIVE"
+        # What the next mission does when it runs out of waypoints, offered
+        # as the answer already filled in. RTL is where this starts and
+        # what every mission did before the dialog asked: ArduPilot returns
+        # home at the end of a mission on its own.
+        self._mission_end = "RTL"
         # Home's own height above sea level, which is what turns a
         # waypoint's relative altitude into something the terrain can be
         # compared against.
@@ -6401,14 +6437,25 @@ class MainWindow(QMainWindow):
         self._active_wp_id = wp_id
         self.map_view.set_active_waypoint(wp_id)
 
+    # What a waypoint can be, as the map and the link both name it, and
+    # what to call it in a sentence. Anything else is an ordinary
+    # waypoint - a type nobody has heard of must not reach the aircraft.
+    WAYPOINT_CMD_NAMES = {
+        "WAYPOINT": "ordinary waypoint",
+        "LAND": "LAND",
+        "LOITER": "a loiter the aircraft holds until told otherwise",
+    }
+
     def on_waypoint_cmd_changed(self, wp_id, cmd):
-        """A waypoint was made a landing point, or made an ordinary one.
+        """A waypoint was made a landing, a loiter, or an ordinary point.
 
         Looks in the sent mission as well as the queue, for the same reason
         the altitude does: a point stays editable after it has flown to the
         vehicle, and Update re-sends it.
         """
-        cmd = "LAND" if str(cmd).upper() == "LAND" else "WAYPOINT"
+        cmd = str(cmd).upper()
+        if cmd not in self.WAYPOINT_CMD_NAMES:
+            cmd = "WAYPOINT"
         for wp in self._waypoint_queue + self._sent_mission:
             if wp["id"] == int(wp_id):
                 if wp.get("cmd") == cmd:
@@ -6416,8 +6463,7 @@ class MainWindow(QMainWindow):
                 wp["cmd"] = cmd
                 sent = wp in self._sent_mission
                 self.on_command_feedback(
-                    "Waypoint set to %s"
-                    % ("LAND" if cmd == "LAND" else "ordinary waypoint")
+                    "Waypoint set to %s" % self.WAYPOINT_CMD_NAMES[cmd]
                     + (" - press Update to send it" if sent else "")
                 )
                 return
@@ -6501,10 +6547,10 @@ class MainWindow(QMainWindow):
         link = self._require_link()
         if not link:
             return
-        alt, frame, ok = MissionStartDialog.ask(
+        alt, frame, end, ok = MissionStartDialog.ask(
             self, len(self._waypoint_queue),
             self._last_alt if self._last_alt else 30.0,
-            self._mission_frame,
+            self._mission_frame, self._mission_end,
         )
         if not ok:
             return
@@ -6513,6 +6559,22 @@ class MainWindow(QMainWindow):
         # asked.
         for wp in self._waypoint_queue:
             wp["frame"] = frame
+        # Loiter rewrites the last waypoint, and only the last: the
+        # aircraft never reaches an item after a LOITER_UNLIM, so putting
+        # one anywhere else would silently discard the rest of the
+        # mission. RTL rewrites nothing - a mission that runs out of
+        # items returns home by itself, which is what every mission this
+        # has uploaded already did.
+        #
+        # It overwrites a landing too. That is the user's decision, asked
+        # and answered: the dialog is the more recent statement of
+        # intent. It is not allowed to be a silent one, so it is said
+        # out loud below.
+        last = self._waypoint_queue[-1]
+        overwrote_landing = (end == "LOITER"
+                             and last.get("cmd", "WAYPOINT") == "LAND")
+        if end == "LOITER":
+            last["cmd"] = "LOITER"
         link.upload_and_start_mission(
             [(w["lat"], w["lon"], w["alt"], w.get("cmd", "WAYPOINT"),
               w.get("frame", "RELATIVE"))
@@ -6526,17 +6588,31 @@ class MainWindow(QMainWindow):
         # Remembered for the next mission, the way the altitude is: a pilot
         # flying a terrain survey plans several in a row.
         self._mission_frame = frame
+        self._mission_end = end
         self.map_view.set_waypoint_frame(frame)
         # Said after the upload line rather than before it, so the log
         # reads in the order things happened. Relative says nothing: it is
         # what every mission was before the dialog asked, and a line
-        # announcing the default would be noise on every flight.
+        # announcing the default would be noise on every flight. RTL says
+        # nothing for the same reason.
         if frame != "RELATIVE":
             self.on_command_feedback(
                 "Mission altitudes are %s"
                 % self.MISSION_FRAME_NAMES.get(frame, frame))
         if frame == "TERRAIN":
             self._warn_if_vehicle_has_no_terrain()
+        if end == "LOITER":
+            self.on_command_feedback(
+                "The aircraft will circle waypoint %d until told otherwise"
+                % len(self._waypoint_queue))
+        # Overwriting a landing is allowed and was asked for, but it is
+        # not allowed to be quiet about it: the point that was going to
+        # put the aeroplane on the ground is now going to keep it in the
+        # air indefinitely.
+        if overwrote_landing:
+            self.on_command_feedback(
+                "That waypoint was set to Land - it is now a loiter, so "
+                "the mission no longer lands.")
         # Keep the batch: its altitudes stay editable, and Update re-sends it.
         self._sent_mission = list(self._waypoint_queue)
         self._mission_default_alt = alt
