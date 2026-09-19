@@ -92,13 +92,19 @@ CESIUM_HTML = """
      each size: 16px is comfortable, 14px is the floor where both
      words still resolve, and by 12px "ion" has gone to mush. */
   .cesium-credit-logoContainer img { max-height: 14px; width: auto; }
-  /* Clear of the vertical speed bar, which arrived at the right edge
-     after these were placed and ran over both lines.
-     44px is what the bar's group can reach: RIGHT_GROUP_MARGIN (13) plus
-     a bar up to 12px wide is 25, but the caption under it is centred on
-     the bar and wider than it - "-12.0" measures about 36px including
-     its plinth, and it is allowed within 3px of the edge. So 39px is
-     the worst case and this leaves 5px on top of it.
+  /* Back against the right edge, where they were before the vertical
+     speed bar arrived.
+     They were moved 44px inboard to clear that bar, which was the wrong
+     answer to the right question: the bar sits at the MIDDLE of the
+     right edge and these two lines sit at the BOTTOM of it, so on any
+     view tall enough they never met. At 746x309 the bar's caption ends
+     28px above where these start. Reserving 44px bought nothing and
+     left a visibly empty strip to the right of both lines.
+     They do collide below about 210px of view height, where the bar's
+     caption reaches down into them. That is a real but narrow case, and
+     the honest cost of it is two lines of attribution overlapping a
+     caption on a view that small - cheaper than an empty strip at every
+     size anybody actually flies with.
      9px rather than Cesium's 12: these are two lines of legalese in a
      cockpit view, and the licence asks for legible attribution, not for
      prominent. Read at 1x, 9px still resolves both lines; 8 is where
@@ -108,7 +114,7 @@ CESIUM_HTML = """
      Nothing is hidden - this moves and shrinks. */
   .cesium-credit-textContainer, .cesium-credit-expand-link {
       display: block !important; position: absolute !important;
-      right: 44px !important; text-align: right; padding-left: 0;
+      right: 8px !important; text-align: right; padding-left: 0;
       font-size: 9px !important; line-height: 11px !important;
   }
   .cesium-credit-textContainer { bottom: 28px; max-width: 55%; }
