@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V2.2.4 - Bug fixes and improvements.
+
 ## V2.2.3 - Bug fixes and improvements.
 
 ## V2.2.2 - Bug fixes and improvements.
