@@ -5,6 +5,7 @@
  <a href="https://github.com/kolabuzlu/MavGCS/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/kolabuzlu/MavGCS?label=Release&color=59aa29"></a>
  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-red?style=flat">
  <a href="https://github.com/kolabuzlu/MavGCS-Android"><img alt="Android version" src="https://img.shields.io/badge/Android%20version-Android-8957e5?style=flat"></a>
+ <a href="https://github.com/kolabuzlu/MavGCS-iOS"><img alt="iOS version" src="https://img.shields.io/badge/iOS%20version-iOS-lightgrey?style=flat"></a>
 </p>
 
 ![MavGCS running on a desktop monitor, two laptops, a tablet and a radio controller, set out on a table in a field under the title FPV Ground Control Station](mavgcstabletoplogosmall.png)
@@ -19,7 +20,8 @@ You can monitor HUD and vital information about flight, use weather radar, exper
 
 You need to get free token from [ion.cesium.com](http://ion.cesium.com/) to activate 3D FPV view.
 
-There is an Android version too: [MavGCS Android](https://github.com/kolabuzlu/MavGCS-Android).
+There are Android and iPhone versions too: [MavGCS Android](https://github.com/kolabuzlu/MavGCS-Android)
+and [MavGCS iOS](https://github.com/kolabuzlu/MavGCS-iOS).
 
 Created by **Derin Hakan Karakurt**
 
