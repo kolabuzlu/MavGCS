@@ -5339,8 +5339,15 @@ class MainWindow(QMainWindow):
         self._adapter_tries += 1
         try:
             self.map_view.dump_graphics_adapter(self._on_graphics_adapter)
-        except Exception:
+        except Exception as exc:
             self._adapter_timer.stop()
+            # Said, not swallowed. V2.3.2 failed here on every launch and
+            # nothing anywhere recorded it, so the lost graphics-card
+            # restart was found by the user rather than by any log.
+            try:
+                print("GPUADAPTER failed: %r" % (exc,), flush=True)
+            except Exception:
+                pass
 
     def _on_graphics_adapter(self, name):
         """The answer, or nothing yet if the page is still coming up."""

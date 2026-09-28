@@ -27,8 +27,18 @@ then it is gone for good with nothing on screen to say so.
 It was intermittent because it is a race: whether the push beats the
 load varies run to run. That is also why nobody had found it by using
 the program.
+
+And the first version of the fix broke something real. Section 6 then
+demanded that every call to the page go through the queue, so the two
+questions the app asks the page went through it too - and the queue
+takes no callback. Both raised on every call, main.py swallowed it, and
+V2.3.2 never learned which graphics card it was on: the first launch
+never restarted onto the discrete card. The user noticed; no check here
+did, because none of them ever asked the page a question. Sections 7
+and 8 do.
 """
 
+import ast
 import io
 import os
 import sys
@@ -50,13 +60,20 @@ def note(name, ok, detail=""):
 
 
 class FakePage:
-    """Records what would have reached the page."""
+    """Records what would have reached the page, and answers questions."""
+
+    answer = "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU)"
 
     def __init__(self):
         self.ran = []
+        self.asked = []
 
-    def runJavaScript(self, script):
-        self.ran.append(script)
+    def runJavaScript(self, script, callback=None):
+        if callback is None:
+            self.ran.append(script)
+        else:
+            self.asked.append(script)
+            callback(self.answer)
 
 
 def fresh():
@@ -158,19 +175,69 @@ note("and what it keeps is the newest",
      view._pending_js[-1][:40])
 
 print("")
-print("6. every call site actually goes through it")
+print("6. every statement goes through it, and nothing else does")
 
-# The fix is only worth as much as its coverage: one method still
-# reaching for the page directly is one readout that still races. Two
-# call sites are allowed, and they are the runner itself.
+# The fix is only worth as much as its coverage: one statement still
+# reaching for the page directly is one readout that still races. So
+# exactly four methods may call the page directly: the runner's two, and
+# the two questions, which must not be held (see 7). Named, not counted -
+# a bare count is how the questions were forced into the queue before.
 source = io.open(os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "map_view.py"), encoding="utf-8").read()
-direct = source.count("self.page().runJavaScript(")
-note("only the runner talks to the page directly", direct == 2,
-     "%d direct call sites" % direct)
-note("and everything else goes through _run_js",
+tree = ast.parse(source)
+direct = set()
+for fn in ast.walk(tree):
+    if isinstance(fn, ast.FunctionDef):
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "runJavaScript"):
+                direct.add(fn.name)
+note("only the runner and the two questions talk to the page directly",
+     direct == {"_run_js", "_on_load_finished",
+                "dump_graphics_adapter", "dump_draw_state"},
+     ", ".join(sorted(direct)))
+note("and every statement goes through _run_js",
      source.count("self._run_js(") >= 40,
      "%d routed" % source.count("self._run_js("))
+
+print("")
+print("7. the two questions get their answers")
+
+# Before the page is up as well as after: asked early, a question goes
+# to the page anyway and comes back empty, and the app asks again. What
+# it must never do is raise, or sit in a queue that cannot answer it.
+for label, ask in (("which graphics card", MapView.dump_graphics_adapter),
+                   ("what is being drawn", MapView.dump_draw_state)):
+    for ready in (False, True):
+        view, page = fresh()
+        view._page_ready = ready
+        got = []
+        try:
+            ask(view, got.append)
+            error = None
+        except Exception as exc:
+            error = exc
+        note("'%s', asked %s, is answered" % (
+                 label, "once the page is up" if ready else "early"),
+             error is None and got == [FakePage.answer],
+             repr(error) if error else "")
+        note("and is not left waiting in the queue", view._pending_js == [],
+             "%d held" % len(view._pending_js))
+
+print("")
+print("8. nothing hands the runner a callback it would drop")
+
+# The shape of the V2.3.2 mistake, checked everywhere at once: _run_js
+# takes one statement and returns nothing, so a call passing it anything
+# more is a question that will never be answered.
+calls = [n for n in ast.walk(tree)
+         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+         and n.func.attr == "_run_js"]
+wrong = ["line %d" % n.lineno for n in calls
+         if len(n.args) != 1 or n.keywords]
+note("every _run_js call passes exactly one statement", not wrong,
+     ", ".join(wrong) if wrong else "%d calls" % len(calls))
 
 print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")

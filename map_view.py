@@ -3659,6 +3659,16 @@ class MapView(QWebEngineView):
         setters that make up all of this page's API today and a silent
         fault the day somebody adds one that accumulates; replaying a
         dozen redundant statements costs nothing worth having.
+
+        Statements only. The two questions this class asks the page -
+        dump_graphics_adapter and dump_draw_state - go straight to it, and
+        must: a question wants its answer now, and this runner has no way
+        to hand one back. V2.3.2 routed both through here, so both raised
+        a TypeError on every call, and main.py's adapter check swallowed
+        it. That release never learned which graphics card it was on - so
+        it never made the one restart onto the discrete card, and never
+        printed the card at all. Asked before the page is up, a question
+        simply answers empty and its caller asks again, as in V2.3.1.
         """
         if self._page_ready:
             self.page().runJavaScript(script)
@@ -3866,13 +3876,15 @@ class MapView(QWebEngineView):
     })()
     """
 
+    # The two questions. Straight to the page, never through _run_js,
+    # which cannot return an answer - see the note there.
     def dump_graphics_adapter(self, callback):
         """Which GPU the map is drawing on. Empty until the page is up."""
-        self._run_js(self._ADAPTER_PROBE, callback)
+        self.page().runJavaScript(self._ADAPTER_PROBE, callback)
 
     def dump_draw_state(self, callback):
         """Ask the page what it is currently drawing (watcher only)."""
-        self._run_js("JSON.stringify(mavgcsDrawState());",
+        self.page().runJavaScript("JSON.stringify(mavgcsDrawState());",
                                   callback)
 
     def set_fence_failed(self, reason):

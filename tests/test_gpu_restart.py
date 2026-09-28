@@ -3,6 +3,10 @@
 Drives the real MainWindow._settle_graphics_card against a stub, so no
 window is built and a mistake cannot actually restart anything. Settings
 are an in-memory dict, so the user's settings.json is never touched.
+
+Section 9 checks the step before all of that - that the app gets the
+card's name from the map at all. V2.3.2 lost it, and sections 1-8 all
+passed, because every one of them hands the settling the name directly.
 """
 
 import os
@@ -190,6 +194,96 @@ for plat in ("darwin", "linux"):
     note("%s: never restarts" % plat, s.restarted == 0)
     note("%s: writes no setting" % plat, store == {}, repr(store))
     note("%s: says nothing" % plat, s.said == [], repr(s.said))
+
+print("")
+print("9. the card's name actually reaches the settling")
+# Every scenario above starts from the name. The app gets it by asking
+# the map, every 3 seconds until the page answers, and V2.3.2 broke that
+# step: the map's method raised on every call, _report_graphics_adapter
+# swallowed it, and settling never ran - so the first launch never
+# restarted onto the discrete card. This runs the real chain, from the
+# timer's call through the map's real method to the settling. Only the
+# page itself is faked, and settling is recorded rather than run.
+import contextlib
+import io
+
+from map_view import MapView
+
+
+class FakePage:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def runJavaScript(self, script, callback=None):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        if callback is not None:
+            callback(self.answer)
+
+
+class FakeRepeatTimer:
+    def __init__(self):
+        self.active = True
+
+    def stop(self):
+        self.active = False
+
+
+class Chain:
+    """Only what asking for the card touches."""
+
+    _report_graphics_adapter = app_main.MainWindow._report_graphics_adapter
+    _on_graphics_adapter = app_main.MainWindow._on_graphics_adapter
+
+    def __init__(self, answer):
+        self._adapter_tries = 0
+        self._graphics_adapter = ""
+        self._adapter_timer = FakeRepeatTimer()
+        view = MapView.__new__(MapView)     # no browser engine, no page load
+        view._page_ready = False
+        view._pending_js = []
+        page = FakePage(answer)
+        view.page = lambda: page
+        self.map_view = view
+        self.said = []
+        self.settled = []
+
+    def on_command_feedback(self, message):
+        self.said.append(message)
+
+    def _settle_graphics_card(self, name):
+        self.settled.append(name)
+
+
+def tick(chain):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        chain._report_graphics_adapter()
+    return out.getvalue()
+
+
+for label, card in (("the RTX", RTX), ("the Iris", IRIS)):
+    c = Chain(card)
+    tick(c)
+    note("on %s: the name reaches the settling" % label,
+         c.settled == [card], repr(c.settled)[:60])
+    note("on %s: the card is named in the messages" % label,
+         any(m.startswith("Graphics: rendering on ") for m in c.said),
+         repr(c.said)[:60])
+    note("on %s: and asking stops once answered" % label,
+         c._adapter_timer.active is False)
+
+c = Chain("")                   # the page is not up yet
+tick(c)
+note("no answer yet: keeps asking rather than giving up",
+     c._adapter_timer.active is True and c.settled == [])
+
+c = Chain(RuntimeError("the map could not be asked"))
+logged = tick(c)
+note("a map that cannot be asked stops the asking - never a flight",
+     c._adapter_timer.active is False and c.settled == [])
+note("and the failure is said in the log, not swallowed",
+     "GPUADAPTER failed" in logged, logged.strip()[:60])
 
 print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")
