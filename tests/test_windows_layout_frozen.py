@@ -125,12 +125,34 @@ def own_paint(w):
     deterministic where the window grab was not, which is the only
     property a gate needs.
 
-    Only widgets whose class this project defines, and never a web view:
-    grabbing one of those is what crashes the compositor.
+    Every widget, and never a web view.
+
+    This used to cover only widgets whose class the project defines -
+    the 19 that draw themselves, the artificial horizon among them. An
+    ordinary button, label or group box was left to the window grab,
+    which is the check that does not work across these two renders: it
+    saw 0 of 1253376 pixels change when "Find" became "Fnid", which are
+    different glyphs. So an ordinary widget whose look changed while its
+    size, stylesheet and text stayed the same - an icon swap, a greyed
+    control, a palette set in code - passed every check here.
+
+    Widened after measuring, not before. Three renders of the same tree
+    hashed 150 widgets each, 131 of them ordinary Qt, hidden ones
+    included: all 150 identical on every run, with no grab errors. So no
+    focus ring, caret or scrollbar flickers at dump time, and hashing the
+    lot does not produce the false failures that get a gate ignored.
+    Re-measure before trusting it again on a new Qt, a new platform
+    plugin, or anything animated.
+
+    A container's grab includes its children's pixels, so one changed
+    leaf reports as that leaf plus each widget it sits inside. The
+    deepest path in the list is the one that actually changed.
+
+    Web views are still skipped. Their content is tiles and a page that
+    arrive asynchronously, so it is not reproducible run to run, and this
+    project's history has them crashing the compositor when grabbed.
     """
     cls = type(w)
-    if cls.__module__.startswith("PySide6"):
-        return ""
     if "WebEngine" in cls.__name__ or any(
             "WebEngine" in b.__name__ for b in cls.__mro__):
         return ""
@@ -365,8 +387,8 @@ try:
     drawn = sum(1 for k in shared
                 if len(before[k]) > 2 and before[k][2]
                 and not before[k][2].startswith("ungrabbable"))
-    note("not one widget has repainted itself", not repainted,
-         "%d of %d self-drawn widgets repainted"
+    note("not one widget has changed how it looks", not repainted,
+         "%d of %d widgets repainted"
          % (len(repainted), drawn))
 
     # With the version taken out, the title should read the same across
