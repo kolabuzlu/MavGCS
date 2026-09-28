@@ -66,3 +66,4 @@ one first tagged.
 | V2.2.5 | `b4cc9befe8` | 2026-09-19 | A mission that ends in a loiter instead of coming home |
 | V2.3.0 | `1e7132096d` | 2026-09-19 | Vertical speed indicator, and a frozen check that can see the HUD |
 | V2.3.1 | `f554e636c6` | 2026-09-19 | Efficiency in the flight summary, in mAh per km |
+| V2.3.2 | `ff0a3db4fc` | 2026-09-28 | Nothing sent to the map can be lost, and both platforms have a layout gate |
