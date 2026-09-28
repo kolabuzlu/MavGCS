@@ -3613,22 +3613,77 @@ class MapView(QWebEngineView):
             trail_max = 8000
         trail_max = max(2, min(trail_max, 100000))
         html = html.replace("%%TRAIL_MAX%%", str(trail_max))
+        # Held until the page can run them - see _run_js. Connected before
+        # setHtml, because the load this starts is the one being waited on.
+        self._page_ready = False
+        self._pending_js = []
+        self.loadFinished.connect(self._on_load_finished)
+
         # base URL lets the relative CDN references resolve sanely
         self.setHtml(html, QUrl("https://localhost/"))
 
+    # A page that never loads is a broken application, not a queue to
+    # manage, so this only has to stop an unbounded list. Position arrives
+    # at a few hertz and the load takes about a second, so a normal run
+    # holds a handful.
+    MAX_PENDING_JS = 500
+
+    def _run_js(self, script: str):
+        """Run one statement in the page, or hold it until the page exists.
+
+        Everything this class sends the map goes through here, because the
+        page is not ready when the application starts pushing to it. The
+        window is short - construction to loadFinished - but four calls
+        land inside it on a normal launch, and before this they were lost
+        with a ReferenceError into a console nobody reads.
+
+        Two of the four self-corrected, being telemetry-driven: the
+        return-home badge and the centre of gravity are pushed again on
+        the next packet. The other two did not. The cache readouts are
+        pushed once at startup and then only when a limit is changed or a
+        cache cleared, so losing that one call left both figures blank for
+        the whole session with nothing to say why.
+
+        Held in order and replayed in order rather than collapsed by
+        function name. Collapsing would be a sound optimisation for the
+        setters that make up all of this page's API today and a silent
+        fault the day somebody adds one that accumulates; replaying a
+        dozen redundant statements costs nothing worth having.
+        """
+        if self._page_ready:
+            self.page().runJavaScript(script)
+            return
+        if len(self._pending_js) >= self.MAX_PENDING_JS:
+            del self._pending_js[0]
+        self._pending_js.append(script)
+
+    def _on_load_finished(self, ok: bool):
+        """The page is up. Send it everything that arrived while it wasn't.
+
+        A failed load leaves the queue alone: there is nothing to run the
+        statements in, and dropping them would turn a page that recovers
+        on a reload into one that comes back blank.
+        """
+        if not ok:
+            return
+        self._page_ready = True
+        held, self._pending_js = self._pending_js, []
+        for script in held:
+            self.page().runJavaScript(script)
+
     def update_position(self, lat: float, lon: float, heading: float = 0.0):
-        self.page().runJavaScript(f"updatePosition({lat}, {lon}, {heading});")
+        self._run_js(f"updatePosition({lat}, {lon}, {heading});")
 
     def set_ground_track(self, course_deg: float, groundspeed: float):
         """Course over ground and speed - the direction of travel, which is
         not the heading whenever there is any wind."""
-        self.page().runJavaScript(
+        self._run_js(
             f"setGroundTrack({float(course_deg)}, {float(groundspeed)});"
         )
 
     def set_nav_target(self, bearing_deg: float, distance_m: float):
         """Where the vehicle's navigation controller is steering."""
-        self.page().runJavaScript(
+        self._run_js(
             f"setNavTarget({float(bearing_deg)}, {float(distance_m)});"
         )
 
@@ -3640,7 +3695,7 @@ class MapView(QWebEngineView):
         another ground station changes it. `pending` says a write of ours
         is still outstanding.
         """
-        self.page().runJavaScript(
+        self._run_js(
             "setTerrainFollow(%s, %s);"
             % (json.dumps(bool(on)), json.dumps(bool(pending))))
 
@@ -3651,7 +3706,7 @@ class MapView(QWebEngineView):
         arrive separately. An empty label hides the box: no waypoint, or
         too slow for the arithmetic to mean anything.
         """
-        self.page().runJavaScript(
+        self._run_js(
             f"setEta({json.dumps(label)}, {json.dumps(value)});")
 
     def set_return_home(self, state: str, text: str, detail: str = "",
@@ -3665,7 +3720,7 @@ class MapView(QWebEngineView):
         Three rows: the verdict, the mAh behind it, and the autopilot's
         own remaining percent - which is shown, not used.
         """
-        self.page().runJavaScript(
+        self._run_js(
             "setReturnHome(%s, %s, %s, %s);"
             % (json.dumps(state), json.dumps(text), json.dumps(detail),
                json.dumps(battery_pct)))
@@ -3676,67 +3731,67 @@ class MapView(QWebEngineView):
         `deflection` runs -1 (fully forward) to +1 (fully aft) and only
         positions the marker; it is not a centre-of-gravity measurement.
         """
-        self.page().runJavaScript(
+        self._run_js(
             f"setCogStatus({json.dumps(state)}, {json.dumps(text)}, "
             f"{float(deflection)});")
 
     def show_cache_limits(self, map_mb: int, terrain_mb: int):
         """Point the cache dropdowns at what the app has actually applied."""
-        self.page().runJavaScript(
+        self._run_js(
             f"showCacheLimits({int(map_mb)}, {int(terrain_mb)});")
 
     def set_home(self, lat: float, lon: float):
         """Place (or move) the home marker."""
-        self.page().runJavaScript(f"setHome({float(lat)}, {float(lon)});")
+        self._run_js(f"setHome({float(lat)}, {float(lon)});")
 
     def clear_home(self):
-        self.page().runJavaScript("clearHome();")
+        self._run_js("clearHome();")
 
     def set_home_bearing(self, bearing_deg: float):
         """Which way home lies, for the compass arrow. Negative hides it."""
-        self.page().runJavaScript(f"setHomeBearing({float(bearing_deg)});")
+        self._run_js(f"setHomeBearing({float(bearing_deg)});")
 
     def set_wind(self, direction_from_deg: float, speed_mps: float):
         """Wind for the compass rose. Direction is where it blows FROM, the
         convention the WIND message and the HUD both use."""
-        self.page().runJavaScript(
+        self._run_js(
             f"setWind({float(direction_from_deg)}, {float(speed_mps)});"
         )
 
     def set_turn_rate(self, deg_per_s: float):
-        self.page().runJavaScript(f"setTurnRate({float(deg_per_s)});")
+        self._run_js(f"setTurnRate({float(deg_per_s)});")
 
     def set_follow(self, follow: bool):
-        self.page().runJavaScript(f"setFollow({'true' if follow else 'false'});")
+        self._run_js(f"setFollow({'true' if follow else 'false'});")
 
     def clear_trail(self):
-        self.page().runJavaScript("clearTrail();")
+        self._run_js("clearTrail();")
 
     def show_target(self, lat: float, lon: float):
         """Mark a typed fly-to coordinate, panning to it if it's off screen."""
-        self.page().runJavaScript(f"showTarget({float(lat)}, {float(lon)});")
+        self._run_js(f"showTarget({float(lat)}, {float(lon)});")
 
     def clear_target(self):
-        self.page().runJavaScript("clearTarget();")
+        self._run_js("clearTarget();")
 
     def set_waypoint_mode(self, enabled: bool):
-        self.page().runJavaScript(f"setWaypointMode({'true' if enabled else 'false'});")
+        self._run_js(f"setWaypointMode({'true' if enabled else 'false'});")
 
     def clear_waypoints(self):
-        self.page().runJavaScript("clearWaypoints();")
+        self._run_js("clearWaypoints();")
 
     def commit_waypoints(self):
-        self.page().runJavaScript("commitWaypoints();")
+        self._run_js("commitWaypoints();")
 
     def set_terrain_status(self, text):
         """What the terrain is doing, shown where "no data" used to be."""
-        self.page().runJavaScript(
+        self._run_js(
             "setTerrainStatus(%s);" % json.dumps(text or ""))
 
     def update_agl_profile(self, elevations: list, behind_m: float,
                            ahead_m: float):
         """The ground along the track. Rare: only when it has changed."""
-        self.page().runJavaScript(
+        self._run_js(
             "setAglProfile(%s, %.1f, %.1f);"
             % (json.dumps(elevations), behind_m, ahead_m))
 
@@ -3750,39 +3805,39 @@ class MapView(QWebEngineView):
         AMSL], ...] oldest first - the climb and descent actually flown,
         which is what the line behind is drawn through.
         """
-        self.page().runJavaScript(
+        self._run_js(
             "setAglAltitude(%.2f, %.6f, %s);"
             % (amsl, slope, json.dumps(history or [])))
 
     def clear_agl_profile(self):
-        self.page().runJavaScript("clearAglProfile();")
+        self._run_js("clearAglProfile();")
 
     def update_terrain_fan(self, elevations: list, range_m: float, ang_cells: int, rad_cells: int):
         """Push a freshly-sampled terrain fan (see TerrainRadarWorker) - rare,
         only called when position/heading/range moved enough to matter."""
         elev_json = json.dumps(elevations)
-        self.page().runJavaScript(
+        self._run_js(
             f"setTerrainFan({elev_json}, {range_m}, {ang_cells}, {rad_cells});"
         )
 
     def update_terrain_reference(self, alt_msl: float, ground_speed: float, climb_mps: float):
         """Push current altitude/speed/climb for the terrain radar's live
         (no new sampling) colour recompute - called on every telemetry tick."""
-        self.page().runJavaScript(f"setTerrainRef({alt_msl}, {ground_speed}, {climb_mps});")
+        self._run_js(f"setTerrainRef({alt_msl}, {ground_speed}, {climb_mps});")
 
     def mark_mission_sent(self):
         """The vehicle has accepted the mission: edited altitudes are live."""
-        self.page().runJavaScript("markMissionSent();")
+        self._run_js("markMissionSent();")
 
     def set_fence_accepted(self, points):
         """The aircraft has taken this fence: draw it as real, not drawn."""
-        self.page().runJavaScript(
+        self._run_js(
             "setFenceAccepted(%s);"
             % json.dumps([[float(a), float(b)] for a, b in points]))
 
     def revert_home(self):
         """Put the home marker back where the vehicle last said it was."""
-        self.page().runJavaScript("revertHome();")
+        self._run_js("revertHome();")
 
     # WebGL is the only thing that will name the adapter Chromium
     # actually got. The Windows preference records what was asked for,
@@ -3803,24 +3858,24 @@ class MapView(QWebEngineView):
 
     def dump_graphics_adapter(self, callback):
         """Which GPU the map is drawing on. Empty until the page is up."""
-        self.page().runJavaScript(self._ADAPTER_PROBE, callback)
+        self._run_js(self._ADAPTER_PROBE, callback)
 
     def dump_draw_state(self, callback):
         """Ask the page what it is currently drawing (watcher only)."""
-        self.page().runJavaScript("JSON.stringify(mavgcsDrawState());",
+        self._run_js("JSON.stringify(mavgcsDrawState());",
                                   callback)
 
     def set_fence_failed(self, reason):
         """The upload did not get there - say so on the shape itself."""
-        self.page().runJavaScript("setFenceFailed(%s);" % json.dumps(str(reason)))
+        self._run_js("setFenceFailed(%s);" % json.dumps(str(reason)))
 
     def set_active_waypoint(self, wp_id):
         """Mark the leg being flown. -1 clears it."""
-        self.page().runJavaScript("setActiveWaypoint(%d);" % int(wp_id))
+        self._run_js("setActiveWaypoint(%d);" % int(wp_id))
 
     def set_fence_armed(self, on):
         """Draw the fence as armed only once the aircraft has said so."""
-        self.page().runJavaScript("setFenceArmed(%s);"
+        self._run_js("setFenceArmed(%s);"
                                   % ("true" if on else "false"))
 
     def set_fence_violations(self, outside_ids, legs):
@@ -3830,7 +3885,7 @@ class MapView(QWebEngineView):
         no fence - so a warning never outlives the boundary that caused
         it.
         """
-        self.page().runJavaScript(
+        self._run_js(
             "setFenceViolations(%s, %s);"
             % (json.dumps([int(i) for i in outside_ids]),
                json.dumps([[int(a), int(b)] for a, b in legs])))
@@ -3843,7 +3898,7 @@ class MapView(QWebEngineView):
         arrives when nothing is known.
         """
         data = [[int(a), int(b), round(float(m), 1)] for a, b, m in legs]
-        self.page().runJavaScript("setLegClearances(%s);" % json.dumps(data))
+        self._run_js("setLegClearances(%s);" % json.dumps(data))
 
     def set_waypoint_clearances(self, pairs):
         """Ground clearance per waypoint, as [(id, metres)].
@@ -3853,12 +3908,12 @@ class MapView(QWebEngineView):
         a number nor a red marker outlives the reason for it.
         """
         data = [[int(i), round(float(m), 1)] for i, m in pairs]
-        self.page().runJavaScript(
+        self._run_js(
             "setWaypointClearances(%s);" % json.dumps(data))
 
     def set_waypoint_default_alt(self, alt: float):
         """So a waypoint with no altitude of its own shows what it will fly."""
-        self.page().runJavaScript(f"setWaypointDefaultAlt({float(alt)});")
+        self._run_js(f"setWaypointDefaultAlt({float(alt)});")
 
     def set_waypoint_frame(self, frame: str):
         """What the batch being sent measures its altitudes from.
@@ -3867,23 +3922,23 @@ class MapView(QWebEngineView):
         JavaScript source, and the one thing that must not be possible is
         a value that closes the string and continues as code.
         """
-        self.page().runJavaScript(
+        self._run_js(
             "setWaypointFrame(%s);" % json.dumps(str(frame)))
 
     def update_adsb_contacts(self, contacts: list):
         """Push a freshly-fetched ADS-B contact list (see AdsbWorker) for the
         map to render as markers - replaces whatever was shown before."""
-        self.page().runJavaScript(f"renderAdsbContacts({json.dumps(contacts)});")
+        self._run_js(f"renderAdsbContacts({json.dumps(contacts)});")
 
     def update_tile_cache_stats(self, tiles: int, used_bytes: int, limit_bytes: int):
         """Refresh the map-cache readout (bar and figures)."""
-        self.page().runJavaScript(
+        self._run_js(
             f"setTileCacheStats({tiles}, {used_bytes}, {limit_bytes});"
         )
 
     def update_terrain_cache_stats(self, tiles: int, used_bytes: int, limit_bytes: int):
         """Refresh the terrain-cache readout (bar and figures)."""
-        self.page().runJavaScript(
+        self._run_js(
             f"setTerrainCacheStats({tiles}, {used_bytes}, {limit_bytes});"
         )
 
