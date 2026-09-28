@@ -107,7 +107,19 @@ a = Analysis(
     # Trimming what this app never imports. matplotlib/tkinter in
     # particular get dragged in by scientific packages and add a lot of
     # weight to the download for no benefit.
+    # yaml, because numpy imports it and nothing here uses it. The
+    # import is inside numpy/__config__.py's _check_pyyaml(), which only
+    # makes numpy.show_config() print prettier - and falls back to a
+    # warning when yaml is absent. PyInstaller cannot tell an optional
+    # import inside a function from a required one, so it bundled
+    # whatever happened to be installed: V2.3.1 shipped without it,
+    # PyYAML arrived on 2026-09-20 as a dependency of esptool, and V2.3.2
+    # shipped with it - an extra .pyd and 93KB more exe, in a release
+    # whose code differed from the last by one line and a queue. The
+    # build must not depend on what the build machine happens to have
+    # installed for other projects.
     excludes=[
+        "yaml",
         "matplotlib", "tkinter", "scipy", "pandas", "PIL",
         "PySide6.QtQuick3D", "PySide6.Qt3DCore", "PySide6.Qt3DRender",
         "PySide6.QtCharts", "PySide6.QtDataVisualization",
