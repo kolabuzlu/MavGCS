@@ -254,8 +254,20 @@ if areas:
     viewport = [vp.width(), vp.height()]
     areas[0].grab().save(os.environ["PNG"])
 
+# The title bar is the one thing a release always changes and nothing
+# above could see: a QMainWindow has windowTitle() rather than any of the
+# text getters steady_text tries, so its own record carries no text at
+# all. Measured on this gate first - it reported "0 relabelled" across a
+# title that went from V2.3.1 to V2.3.2, because it had no way to look.
+#
+# The version is normalised out, so a release is not a failure every
+# time and anything ELSE in the title still is. The pattern is the
+# Windows gate's, character for character, so the two agree about what a
+# title change is.
+title = re.sub(r"V\d+\.\d+\.\d+", "V<version>", win.windowTitle())
 sys.stdout.write(json.dumps({"widgets": out, "unstable": unstable,
-                             "viewport": viewport}, sort_keys=True))
+                             "viewport": viewport, "title": title},
+                            sort_keys=True))
 sys.stdout.flush()
 # Leave before Python tears the process down. A MainWindow that was
 # never closed takes its background threads with it, and destroying a
@@ -383,6 +395,20 @@ try:
     # check would otherwise notice.
     note("not one widget has changed its text", not relabelled,
          "%d of %d relabelled" % (len(relabelled), len(shared)))
+
+    # Read at all, before compared. Two empty titles compare equal, and a
+    # check that reads nothing and reports a pass is precisely the fault
+    # this line was added to close - the title was invisible for a whole
+    # release and every count said "0". So an empty title on either side
+    # is a failure in its own right, not a match.
+    title_before = dump_before.get("title") or ""
+    title_after = dump_after.get("title") or ""
+    note("the window title was read on both sides",
+         bool(title_before) and bool(title_after),
+         "%r and %r" % (title_before, title_after))
+    note("the window title is unchanged apart from its version",
+         title_before == title_after,
+         "%r and %r" % (title_before, title_after))
 
     def show(rows, label):
         for key, was, now in rows[:15]:
