@@ -100,16 +100,30 @@ for _ in range(12):
 def own_paint(w):
     """A hash of what this widget draws, for widgets that draw themselves.
 
-    win.grab() does NOT reach the artificial horizon. Measured: painting
-    the HUD's every pixel differently changes 0 of the window grab's
-    1253376, while grabbing that same widget directly differs in 3660.
-    The window holds two QWebEngineViews - the map and the FPV view -
-    and an ancestor of a native window does not re-render its children
-    into a grab; it hands back what the compositor last put there.
+    The window grab below did not catch a change to the artificial
+    horizon. Measured, across the two subprocess renders this check
+    actually performs: the vertical speed indicator moved the altitude
+    box 23px and added a bar, and the two window grabs came back
+    identical - 0 of 1253376 pixels - while grabbing that same widget
+    directly in the same two processes differed in 3660.
 
     So the HUD, the one instrument on this screen, sat outside the
-    guarantee from the day this check was written until the day a
-    vertical speed indicator was added to it and the gate stayed green.
+    guarantee from the day this check was written until the day that
+    indicator was added to it and the gate stayed green.
+
+    WHY is not established, and the first explanation written here was
+    wrong. It said a window with native QWebEngineView children hands
+    back the compositor's last frame instead of re-rendering. That is
+    not it: measured live in one process, changing the HUD DOES change
+    win.grab()'s hash, on Windows and on macOS both. Nor is it settle
+    time - the region is byte-stable from 12 processEvents to 200.
+
+    What is established is the fact this guards against, which does not
+    depend on the explanation: a real feature-level change to that
+    widget produced no difference in the window comparison and a clear
+    one in the per-widget comparison. Grabbing each widget directly is
+    deterministic where the window grab was not, which is the only
+    property a gate needs.
 
     Only widgets whose class this project defines, and never a web view:
     grabbing one of those is what crashes the compositor.
