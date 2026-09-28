@@ -3637,12 +3637,22 @@ class MapView(QWebEngineView):
         land inside it on a normal launch, and before this they were lost
         with a ReferenceError into a console nobody reads.
 
-        Two of the four self-corrected, being telemetry-driven: the
-        return-home badge and the centre of gravity are pushed again on
-        the next packet. The other two did not. The cache readouts are
-        pushed once at startup and then only when a limit is changed or a
-        cache cleared, so losing that one call left both figures blank for
-        the whole session with nothing to say why.
+        All four self-correct, and the first version of this note said
+        otherwise. It claimed the cache readouts were pushed once at
+        startup and never again, so that losing that call left them blank
+        for the whole session. That is wrong: _tile_stats_timer in main.py
+        fires every 2000ms and pushes the cache figures and the centre of
+        gravity, and the return-home badge comes with telemetry. The
+        author had grepped for the wrong name and believed the answer.
+
+        So the real cost of this was four errors in a console nobody
+        reads and up to two seconds of blank readouts at startup.
+
+        It is still worth holding them. A statement that vanishes without
+        trace is a bad mechanism however harmless today's losses happen to
+        be, and the protection this gives is for the call somebody adds
+        next - one not backed by a timer, which would disappear for good
+        with nothing on screen to say so.
 
         Held in order and replayed in order rather than collapsed by
         function name. Collapsing would be a sound optimisation for the

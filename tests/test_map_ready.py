@@ -8,12 +8,21 @@ launch:
 
     setReturnHome   setCogStatus   setTileCacheStats   setTerrainCacheStats
 
-Two of them self-corrected, being telemetry-driven - the return-home
-badge and the centre of gravity are pushed again on the next packet. The
-other two did not. _push_tile_cache_stats runs at startup and then only
-when a cache limit is changed or a cache cleared, so losing that one call
-left both cache figures blank for the whole session with nothing on
-screen to say why.
+All four of them self-correct, and the first version of this file said
+otherwise. It claimed the cache readouts were pushed once at startup and
+never again, making a lost call permanent for the session. Wrong:
+_tile_stats_timer in main.py fires every 2000ms and pushes the cache
+figures and the centre of gravity, and the return-home badge arrives with
+telemetry. The claim came from grepping for a timer under the wrong name,
+finding none, and believing it.
+
+So the cost was four errors in a console nobody reads and up to two
+seconds of blank readouts at startup. Cosmetic.
+
+Which is the honest reason these checks exist: not that anything visible
+was broken, but that a statement sent to the page could vanish without
+trace. The next one somebody adds may not have a timer behind it, and
+then it is gone for good with nothing on screen to say so.
 
 It was intermittent because it is a race: whether the push beats the
 load varies run to run. That is also why nobody had found it by using
