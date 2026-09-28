@@ -175,7 +175,15 @@ def walk(w, path, out):
 out = {}
 walk(win, type(win).__name__, out)
 win.grab().save(os.environ["PNG"])
-sys.stdout.write(json.dumps(out, sort_keys=True))
+# The title bar is the one thing a release always changes and nothing
+# above could see: this renders offscreen, with no title bar in the grab,
+# and a QMainWindow has windowTitle() rather than any of the text getters.
+# Measured on macOS first - the gate there reported "0 relabelled" across
+# a title that went from V2.3.1 to V2.3.2, because it had no way to look.
+# The version is normalised out so that a release is not a failure every
+# time, and anything ELSE in the title still is.
+title = re.sub(r"V\d+\.\d+\.\d+", "V<version>", win.windowTitle())
+sys.stdout.write(json.dumps({"widgets": out, "title": title}, sort_keys=True))
 sys.stdout.flush()
 # Leave before Python tears the process down. A MainWindow that was
 # never closed takes its background threads with it, and destroying a
@@ -206,8 +214,9 @@ def geometry_of(tree, dumper, png):
     # Truncated output is a different matter: json.loads refuses it, and
     # then the exit code is worth having.
     try:
-        return json.loads(r.stdout.decode("utf-8"))
-    except ValueError:
+        record = json.loads(r.stdout.decode("utf-8"))
+        return record["widgets"], record["title"]
+    except (ValueError, KeyError, TypeError):
         raise RuntimeError(
             "render produced no usable geometry in %s\n"
             "  exit code: %d (0x%08X)\n  stdout: %d bytes\n  stderr: %s"
@@ -266,8 +275,8 @@ try:
              "" if os.path.exists(settings) else " (no saved settings)"))
     shot_before = os.path.join(work, "released.png")
     shot_after = os.path.join(work, "working.png")
-    before = geometry_of(released, dumper, shot_before)
-    after = geometry_of(ROOT, dumper, shot_after)
+    before, title_before = geometry_of(released, dumper, shot_before)
+    after, title_after = geometry_of(ROOT, dumper, shot_after)
 
     gone = sorted(set(before) - set(after))
     new = sorted(set(after) - set(before))
@@ -308,6 +317,13 @@ try:
     note("not one widget has repainted itself", not repainted,
          "%d of %d self-drawn widgets repainted"
          % (len(repainted), drawn))
+
+    # With the version taken out, the title should read the same across
+    # any two commits - that is what makes a version bump pass here while
+    # "MavGCS - V2.3.2" or a new word in the title does not.
+    note("the window title is unchanged apart from its version",
+         title_before == title_after,
+         "%r and %r" % (title_before, title_after))
 
     def show(rows, label):
         for key, was, now in rows[:15]:
