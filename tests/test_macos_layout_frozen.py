@@ -142,13 +142,25 @@ def steady_text(w):
             continue
         if isinstance(v, str) and v:
             v = re.sub(r"(127\.0\.0\.1|localhost):\d+", r"\1:<port>", v)
+            # The version too, as the title does and as the Windows gate
+            # does, character for character: a release is never a text
+            # failure, and any other change to a label still is.
+            v = re.sub(r"V\d+\.\d+\.\d+", "V<version>", v)
             return " ".join(v.split())[:200]
     return ""
 
 
 def own_paint(w):
-    """A hash of what this widget draws, for the widgets that draw
-    themselves.
+    """A hash of what this widget draws - every widget, not only the ones
+    this project draws itself.
+
+    It used to skip every PySide6 class and hash only the 19 widgets whose
+    class the project defines. The left column's pixel grab covered the
+    ordinary widgets there, but nothing covered ordinary widgets on the
+    map side of the window: a button greyed out or re-iconed there changed
+    no size, no stylesheet and no text, and passed. Widened to match the
+    Windows gate, after measuring first - three renders of one tree, 150
+    widgets hashed, 131 of them ordinary Qt, 0 grab errors and 0 unstable.
 
     Web views are excluded, and on this platform NOT for the reason the
     Windows check gives. Measured here: grabbing a QWebEngineView does
@@ -174,8 +186,6 @@ def own_paint(w):
     else.
     """
     cls = type(w)
-    if cls.__module__.startswith("PySide6"):
-        return ""
     if "WebEngine" in cls.__name__ or any(
             "WebEngine" in b.__name__ for b in cls.__mro__):
         return ""
@@ -387,8 +397,8 @@ try:
     drawn = sum(1 for k in shared
                 if len(before[k]) > 2 and before[k][2]
                 and not before[k][2].startswith("ungrabbable"))
-    note("not one widget has repainted itself", not repainted,
-         "%d of %d self-drawn widgets repainted"
+    note("not one widget has changed how it looks", not repainted,
+         "%d of %d widgets repainted"
          % (len(repainted), drawn))
     # And what the widgets SAY. A label whose wording changes is a
     # change to the app that moves nothing and repaints nothing this
