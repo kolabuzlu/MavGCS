@@ -67,3 +67,4 @@ one first tagged.
 | V2.3.0 | `1e7132096d` | 2026-09-19 | Vertical speed indicator, and a frozen check that can see the HUD |
 | V2.3.1 | `f554e636c6` | 2026-09-19 | Efficiency in the flight summary, in mAh per km |
 | V2.3.2 | `e0719e10a6` | 2026-09-28 | Nothing sent to the map can be lost, and both platforms have a layout gate (re-cut) |
+| V2.3.3 | `427d6ca068` | 2026-09-28 | The first launch moves onto the discrete graphics card again |
