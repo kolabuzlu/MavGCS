@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Derin Hakan Karakurt
+#
+# Portions derived from Kite Ground Control, Copyright (C) 2026 Marc Hoffmann
+# (b14ckyy), https://github.com/b14ckyy/Kite-GC - the sensor status row,
+# ported to Python and modified, 2026-08/09.
+
 """
 MavGCS - main entry point.
 

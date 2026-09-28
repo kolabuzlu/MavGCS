@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Derin Hakan Karakurt
+#
+# Portions derived from Kite Ground Control, Copyright (C) 2026 Marc Hoffmann
+# (b14ckyy), https://github.com/b14ckyy/Kite-GC - the terrain radar, ported
+# to Python and modified, 2026-08/09.
+
 """
 Forward-looking terrain radar - background elevation lookups against the
 free Copernicus GLO-30 DEM (public AWS Open Data bucket, no API key or

@@ -38,3 +38,10 @@ reports an unsigned app as "damaged", which it is not. See
 
 This is an Intel build: native on Intel Macs, and on Apple Silicon it
 runs through Rosetta, which macOS offers to install the first time.
+
+### Acknowledgements
+
+Parts of MavGCS (terrain radar, ADS-B overlay, compass rose, video settings,
+and smaller details such as the sensor row and cache size presets) are
+derived from [Kite Ground Control](https://github.com/b14ckyy/Kite-GC) by
+Marc Hoffmann, licensed GPL-3.0-or-later.

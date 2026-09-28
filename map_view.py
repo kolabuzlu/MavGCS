@@ -1,3 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Derin Hakan Karakurt
+#
+# Portions derived from Kite Ground Control, Copyright (C) 2026 Marc Hoffmann
+# (b14ckyy), https://github.com/b14ckyy/Kite-GC - the terrain radar, ADS-B
+# overlay, compass rose and cache size presets, ported to JavaScript and
+# modified, 2026-08/09.
+
 """
 Map display built on Leaflet.js, hosted inside a QWebEngineView, with a
 QWebChannel bridge so a map click can call back into Python (used for the

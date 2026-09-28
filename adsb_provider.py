@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Derin Hakan Karakurt
+#
+# Portions derived from Kite Ground Control, Copyright (C) 2026 Marc Hoffmann
+# (b14ckyy), https://github.com/b14ckyy/Kite-GC - the ADS-B traffic overlay,
+# ported to Python and modified, 2026-08/09.
+
 """
 ADS-B traffic overlay - background polling of free public ADS-B APIs (no
 API key or account needed) for nearby manned air traffic, the same kind of
