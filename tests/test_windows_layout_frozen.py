@@ -146,6 +146,48 @@ def own_paint(w):
         return "ungrabbable: %r" % (exc,)
 
 
+def steady_text(w):
+    """What this widget says, with what is not about the app taken out.
+
+    Written to match the macOS gate's function of the same name, so the
+    two gates agree about what a text change is.
+
+    Measured first rather than copied on trust: three renders of the
+    same Windows tree gave 93 labelled widgets each, identical in every
+    one, with no label carrying a port or a version. So none of the
+    normalising below is needed today on this platform. It is kept
+    because three clean runs do not rule out an intermittent case, and
+    the macOS side found one - a web view whose URL may or may not be set
+    by dump time - that did not fire on every run either.
+
+    Web views give "" rather than being read: their text depends on how
+    far the page has got. Ports are normalised because the tile proxy's
+    is ephemeral by nature and any label that ever shows it WILL vary.
+    The version is normalised because the title check does the same, so
+    a release is not a text failure every time.
+
+    None of it hides a real change. A label that says something
+    different still differs; only the port and the version inside it are
+    held still.
+    """
+    cls = type(w)
+    if "WebEngine" in cls.__name__ or any(
+            "WebEngine" in b.__name__ for b in cls.__mro__):
+        return ""
+    for getter in ("text", "title", "currentText"):
+        if not hasattr(w, getter):
+            continue
+        try:
+            v = getattr(w, getter)()
+        except Exception:
+            continue
+        if isinstance(v, str) and v:
+            v = re.sub(r"(127\.0\.0\.1|localhost):\d+", r"\1:<port>", v)
+            v = re.sub(r"V\d+\.\d+\.\d+", "V<version>", v)
+            return " ".join(v.split())[:200]
+    return ""
+
+
 def walk(w, path, out):
     g = w.geometry()
     try:
@@ -164,7 +206,8 @@ def walk(w, path, out):
     # changes are still caught, and anything whitespace could hide
     # would show in the pixel comparison anyway.
     ss = " ".join(ss.split())
-    out[path] = [[g.x(), g.y(), g.width(), g.height()], ss, own_paint(w)]
+    out[path] = [[g.x(), g.y(), g.width(), g.height()], ss, own_paint(w),
+                 steady_text(w)]
     seen = {}
     for c in w.children():
         if not (hasattr(c, "isWidgetType") and c.isWidgetType()):
@@ -293,6 +336,14 @@ try:
                  if len(before[k]) > 2 and len(after[k]) > 2
                  and before[k][2] and after[k][2]
                  and before[k][2] != after[k][2]]
+    # A label can change without moving, restyling or visibly repainting
+    # its neighbours, and until this existed a renamed button would have
+    # passed every other check here.
+    relabelled = [(k, before[k][3], after[k][3])
+                  for k in shared
+                  if len(before[k]) > 3 and len(after[k]) > 3
+                  and before[k][3] != after[k][3]]
+    labelled = sum(1 for k in shared if len(before[k]) > 3 and before[k][3])
 
     note("no widget has disappeared", not gone,
          "%d gone, first: %s" % (len(gone), gone[0] if gone else ""))
@@ -321,6 +372,10 @@ try:
     # With the version taken out, the title should read the same across
     # any two commits - that is what makes a version bump pass here while
     # "MavGCS - V2.3.2" or a new word in the title does not.
+    note("not one widget has changed its text", not relabelled,
+         "%d of %d labelled widgets relabelled"
+         % (len(relabelled), labelled))
+
     note("the window title is unchanged apart from its version",
          title_before == title_after,
          "%r and %r" % (title_before, title_after))
@@ -339,6 +394,7 @@ try:
     show(moved, "moved")
     show(restyled, "restyled")
     show(repainted, "repainted")
+    show(relabelled, "relabelled")
 
     # And the whole window, painted. The two records above are what the
     # widgets say about themselves; this is what the user would see. It
