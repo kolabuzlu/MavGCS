@@ -61,7 +61,7 @@ sys.path.insert(0, ROOT)
 # since a SHA does not exist until it is written. Make both, push both,
 # and the gate is green at the tip rather than staying red until the
 # next release.
-APPROVED_BASELINE = "f554e63"   # V2.3.1
+APPROVED_BASELINE = "ba35108e5a"   # the merge that landed this gate
 
 # The client area the window actually gets when maximised on the 16-inch
 # this rule is about: a 1792x1120 point screen, less the menu bar and
