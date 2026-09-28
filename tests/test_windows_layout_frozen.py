@@ -376,6 +376,16 @@ try:
          "%d of %d labelled widgets relabelled"
          % (len(relabelled), labelled))
 
+    # Two empty titles compare equal. So the comparison below, on its own,
+    # would pass a gate that had gone blind to the title again - which is
+    # exactly the fault this morning's work found, reappearing somewhere
+    # new. This check fails if either side read nothing. Raised by the
+    # macOS session, which proved it: blank titles on both sides passed
+    # the comparison and failed only this.
+    note("the window title was read on both sides",
+         bool(title_before) and bool(title_after),
+         "%r and %r" % (title_before, title_after))
+
     note("the window title is unchanged apart from its version",
          title_before == title_after,
          "%r and %r" % (title_before, title_after))
