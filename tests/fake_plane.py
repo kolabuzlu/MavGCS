@@ -5,13 +5,13 @@ uses it, and so can anything else that wants a plane on more than one link.
 
 Each port is its own MAVLink channel and numbers its own frames, as an
 autopilot's serial ports do - which is the whole point: the ground
-station must keep one count per link. A port can be told to fall silent
-or to drop every Nth frame; a TCP port is the server end, as MavLTE's TCP
-mode is, and can hang up on its client and take the next one.
+station must keep one count per link. A port can be told to fall silent,
+to drop every Nth frame or to keep only every Nth; a TCP port is the
+server end, as MavLTE's TCP mode is, and can hang up on its client and
+take the next one.
 """
 
 import os
-import random
 import socket
 import threading
 import time
@@ -51,7 +51,9 @@ class Channel:
         self.parser = M.MAVLink(None)
         self.silent = False
         self.drop_every = 0
-        self.drop_ratio = 0.0       # a share dropped at random, 0..1
+        # Most frames lost, but evenly: never a second's silence, which a
+        # share dropped at random gives now and then on a slow machine.
+        self.keep_every = 0
         self.sent = 0
         self.got = []           # (type, command) of what the GCS sent here
         self.plane = None
@@ -64,7 +66,7 @@ class Channel:
             return None
         if self.drop_every and self.sent % self.drop_every == 0:
             return None
-        if self.drop_ratio and random.random() < self.drop_ratio:
+        if self.keep_every and self.sent % self.keep_every:
             return None
         return self.out.buf
 

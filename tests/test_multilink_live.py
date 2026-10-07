@@ -209,11 +209,14 @@ print("6c. a really bad link is left, however long the wait")
 ch = link._chooser
 ch._wait, ch._last_voluntary, ch.last_move_at = 300.0, time.time(), time.time()
 t_b = time.time()
-A.drop_ratio = 0.75                         # the link in use loses 3 in 4
+# Lost evenly, 2 in 3: dropped at random, a run of drops on CI's slow Mac
+# runner once silenced the link for a second, so it was rightly left as
+# silent - and the really-bad rule went untested.
+A.keep_every = 3
 note("left within seconds, not minutes",
      wait_for(lambda: said("now using UDP %d - UDP %d was losing"
                            % (pb, pa), t_b), 12.0), said("Link", t_b))
-A.drop_ratio = 0.0
+A.keep_every = 0
 # Its loss figure covers the last few seconds; until those are clean the
 # link still reads as really bad, and taken back by hand any sooner it
 # would rightly be left again at once.
