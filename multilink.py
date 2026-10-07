@@ -339,13 +339,19 @@ class LinkChooser:
       trade places by a hair every second would otherwise have the
       ground station hopping between them all flight.
 
-    "Clearly better" is far fewer lost frames, or much less delay without
-    losing more. Two links that are both fine are left as they are: no
-    move is made for nothing.
+    "Clearly better" is fewer lost frames by five points, or a tenth of a
+    second less delay without losing more. Both directions are compared
+    all the time, not only after a failure: a link that comes back and is
+    better takes over again once it has proved itself for a few seconds.
+    The user asked for exactly that - "I want the compare strategy" -
+    after the first margins (half a second, ten points) left a returning
+    RFD a quarter of a second quicker than the LTE sitting unused.
+    Two links within these margins are left as they are: no move is made
+    for nothing.
     """
 
-    BETTER_LOSS_POINTS = 10.0
-    BETTER_LAG_S = 0.5
+    BETTER_LOSS_POINTS = 5.0
+    BETTER_LAG_S = 0.1
     HOLD_S = 3.0
     SETTLE_S = 3.0
     DWELL_S = 8.0

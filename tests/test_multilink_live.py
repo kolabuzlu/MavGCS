@@ -269,13 +269,18 @@ print("11. ONE link, on TCP, whose far end restarts")
 pt2 = free_port(socket.SOCK_STREAM)
 T2 = TcpChannel(pt2)
 plane.channels.append(T2)
-one_status, one_frames = [], []
+one_status, one_frames, one_said = [], [], []
 one = MavlinkLink("tcp:127.0.0.1:%d" % pt2)
 one.connection_status.connect(
     lambda c, m: one_status.append((time.time(), c, m)), direct)
 one.attitude_update.connect(lambda *a: one_frames.append(time.time()), direct)
+one.command_feedback.connect(lambda t: one_said.append((time.time(), t)),
+                             direct)
 one.start()
-wait_for(lambda: any(c for _, c, _ in one_status), 8.0)
+up = wait_for(lambda: any(c for _, c, _ in one_status), 15.0)
+flowing = wait_for(lambda: len(one_frames) >= 10, 10.0)
+note("(first, the one link is up and carrying frames)", up and flowing,
+     "connected %s, %d frames" % (up, len(one_frames)))
 time.sleep(1.0)
 t_one = time.time()
 cpu0 = time.process_time()
@@ -284,9 +289,15 @@ back = wait_for(lambda: any(c and w > t_one for w, c, _ in one_status), 10.0)
 time.sleep(2.0)
 cpu = time.process_time() - cpu0
 broke = [m for w, c, m in one_status if w > t_one and not c]
+# Everything heard after the hang-up, for a failure seen only elsewhere
+# (CI's Windows runner, once) to explain itself.
+heard = (["%+.2fs status %s %s" % (w - t_one, c, m)
+          for w, c, m in one_status if w > t_one - 0.5]
+         + ["%+.2fs said %s" % (w - t_one, t)
+            for w, t in one_said if w > t_one - 0.5])
 note("the break is shown, as a broken link always was",
      bool(broke) and broke[0].startswith("Link error: closed by the other end"),
-     broke[:1])
+     broke[:1] if broke else sorted(heard))
 note("and it reconnects by itself", back)
 note("frames flow again", any(t > t_one + 1.0 for t in one_frames),
      "%d frames after" % len([t for t in one_frames if t > t_one]))

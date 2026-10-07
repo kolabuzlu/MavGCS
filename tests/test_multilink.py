@@ -310,14 +310,35 @@ for step in range(0, 400):
 note("two links trading places every second: no hopping", flips == 0,
      "%d moves" % flips)
 
+# The compare strategy, as the user asked for it: a link that comes
+# back and is better takes over again - not only when the one in use
+# fails. The rehearsal's case: the RFD back, a quarter second quicker
+# than the LTE.
 c = LinkChooser()
-slow_move = [c.decide(600.0 + s * 0.25, views(a_lag=0.6, since=590.0), "a")
-             for s in range(0, 20)]
+back = [c.decide(600.0 + s * 0.25, views(a_lag=0.25, since=590.0), "a")
+        for s in range(0, 20)]
+note("a link that comes back a quarter second quicker takes over again",
+     any(k == "b" for k, _ in back))
 c2 = LinkChooser()
-near = [c2.decide(700.0 + s * 0.25, views(a_lag=0.3, since=690.0), "a")
+near = [c2.decide(700.0 + s * 0.25, views(a_lag=0.05, since=690.0), "a")
         for s in range(0, 40)]
-note("much less delay is worth a move", any(k == "b" for k, _ in slow_move))
-note("a little less delay is not", all(k is None for k, _ in near))
+note("50 ms quicker is not worth a move", all(k is None for k, _ in near))
+c3 = LinkChooser()
+lossy = [c3.decide(800.0 + s * 0.25, views(a_loss=7.0, b_loss=1.0,
+                                           since=790.0), "a")
+         for s in range(0, 20)]
+note("6 points less loss is worth a move", any(k == "b" for k, _ in lossy))
+c4 = LinkChooser()
+close = [c4.decide(900.0 + s * 0.25, views(a_loss=4.0, b_loss=1.0,
+                                           since=890.0), "a")
+         for s in range(0, 40)]
+note("3 points is not", all(k is None for k, _ in close))
+c5 = LinkChooser()
+mixed = [c5.decide(1000.0 + s * 0.25, views(a_lag=0.3, b_loss=15.0,
+                                            since=990.0), "a")
+         for s in range(0, 40)]
+note("quicker but losing far more is not better",
+     all(k is None for k, _ in mixed))
 
 # Both links failing together: the slower one is still "alive" for a
 # moment after the faster has gone. Found in the rehearsal against real
