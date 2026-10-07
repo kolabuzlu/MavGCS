@@ -285,10 +285,14 @@ time.sleep(1.0)
 t_one = time.time()
 cpu0 = time.process_time()
 T2.hang_up()
-back = wait_for(lambda: any(c and w > t_one for w, c, _ in one_status), 10.0)
+back = wait_for(lambda: any(c and w >= t_one for w, c, _ in one_status), 10.0)
 time.sleep(2.0)
 cpu = time.process_time() - cpu0
-broke = [m for w, c, m in one_status if w > t_one and not c]
+# From the hang-up onwards, not strictly after it: on Python 3.12's
+# Windows clock (about 15 ms a tick, CI's runner) MavGCS noticed the
+# hang-up inside the same tick, and a strict ">" threw the
+# disconnect away - a test failure with nothing wrong in MavGCS.
+broke = [m for w, c, m in one_status if w >= t_one and not c]
 # Everything heard after the hang-up, for a failure seen only elsewhere
 # (CI's Windows runner, once) to explain itself.
 heard = (["%+.2fs status %s %s" % (w - t_one, c, m)

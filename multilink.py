@@ -348,13 +348,32 @@ class LinkChooser:
     RFD a quarter of a second quicker than the LTE sitting unused.
     Two links within these margins are left as they are: no move is made
     for nothing.
+
+    And it is sticky, which the user asked for in the same breath: "I do
+    not want mavgcs to hop back and forth between connections all the
+    time." A voluntary move needs the other link better for HOLD_S, that
+    link up for SETTLE_S, and a wait since the last move: DWELL_S at
+    first, doubled by every voluntary move made within FLAP_WINDOW_S of
+    the one before, up to DWELL_MAX_S - 30 s, a minute, two, four, five.
+    Only FLAP_WINDOW_S with no voluntary move puts it back to DWELL_S.
+
+    Two cheaper versions were tried against an RFD at the edge of its
+    range - better for 25 s, worse for the next 25, for ten minutes -
+    and both let it hop in pairs: a count of moves in a sliding window
+    forgot old moves in the middle of the flip-flop, the wait shrank,
+    and the ground station went there and back within forty seconds
+    every couple of minutes. Doubling for as long as the moves keep
+    coming does not forget. None of it delays a forced move: a link that
+    goes quiet is left at once.
     """
 
     BETTER_LOSS_POINTS = 5.0
     BETTER_LAG_S = 0.1
-    HOLD_S = 3.0
-    SETTLE_S = 3.0
-    DWELL_S = 8.0
+    HOLD_S = 5.0
+    SETTLE_S = 5.0
+    DWELL_S = 30.0
+    FLAP_WINDOW_S = 300.0
+    DWELL_MAX_S = 300.0
     # Where a forced move may go: only to a link heard from in the last
     # second. "Alive" allows two seconds of quiet, and when both links
     # fail together the slower one is still "alive" for a moment after
@@ -366,6 +385,23 @@ class LinkChooser:
     def __init__(self):
         self.last_move_at = float("-inf")
         self._better_since = {}
+        self._last_voluntary = float("-inf")
+        self._wait = self.DWELL_S
+
+    def dwell(self, now):
+        """How long since the last move a voluntary one must wait now."""
+        if now - self._last_voluntary > self.FLAP_WINDOW_S:
+            self._wait = self.DWELL_S        # calm for long enough
+        return self._wait
+
+    def _voluntary_move(self, now):
+        """A voluntary move made: the next one waits twice as long, for as
+        long as they keep coming within FLAP_WINDOW_S of each other."""
+        if now - self._last_voluntary <= self.FLAP_WINDOW_S:
+            self._wait = min(self.DWELL_MAX_S, self._wait * 2)
+        else:
+            self._wait = self.DWELL_S
+        self._last_voluntary = now
 
     def clearly_better(self, a, b):
         if b.loss_pct - a.loss_pct >= self.BETTER_LOSS_POINTS:
@@ -411,11 +447,12 @@ class LinkChooser:
                     ready.append(link)
             else:
                 self._better_since.pop(link.key, None)
-        if not ready or busy or now - self.last_move_at < self.DWELL_S:
+        if not ready or busy or now - self.last_move_at < self.dwell(now):
             return None, None
         best = min(ready, key=rank)
         why = ("loss" if current.loss_pct - best.loss_pct
                >= self.BETTER_LOSS_POINTS else "delay")
         self._better_since.clear()
         self.last_move_at = now
+        self._voluntary_move(now)
         return best.key, why

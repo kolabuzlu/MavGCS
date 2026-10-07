@@ -262,9 +262,9 @@ for step in range(0, 80):
     if key is not None:
         moved_at = (now, key, why)
         break
-note("the other link clearly better: moves only after holding for 3 s",
+note("the other link clearly better: moves only after holding for 5 s",
      moved_at is not None and moved_at[1:] == ("b", "loss")
-     and abs(moved_at[0] - 103.0) < 0.3, moved_at)
+     and abs(moved_at[0] - 105.0) < 0.3, moved_at)
 
 c = LinkChooser()
 first = None
@@ -280,14 +280,14 @@ note("a link that has only just come up is not moved to (settling)",
 c = LinkChooser()
 c.decide(300.0, views(active_alive=False), "a")          # forced move to b
 back = None
-for step in range(0, 80):
+for step in range(0, 200):
     now = 300.0 + step * 0.25
     key, _ = c.decide(now, views(a_loss=0.0, b_loss=30.0, since=280.0), "b")
     if key is not None:
         back = now
         break
-note("no voluntary move within 8 s of the last one",
-     back is not None and back >= 308.0, back)
+note("no voluntary move within 30 s of the last one",
+     back is not None and back >= 330.0, back)
 
 c = LinkChooser()
 held = [c.decide(400.0 + s * 0.25, views(a_loss=40.0, since=390.0), "a",
@@ -316,7 +316,7 @@ note("two links trading places every second: no hopping", flips == 0,
 # than the LTE.
 c = LinkChooser()
 back = [c.decide(600.0 + s * 0.25, views(a_lag=0.25, since=590.0), "a")
-        for s in range(0, 20)]
+        for s in range(0, 40)]
 note("a link that comes back a quarter second quicker takes over again",
      any(k == "b" for k, _ in back))
 c2 = LinkChooser()
@@ -326,7 +326,7 @@ note("50 ms quicker is not worth a move", all(k is None for k, _ in near))
 c3 = LinkChooser()
 lossy = [c3.decide(800.0 + s * 0.25, views(a_loss=7.0, b_loss=1.0,
                                            since=790.0), "a")
-         for s in range(0, 20)]
+         for s in range(0, 40)]
 note("6 points less loss is worth a move", any(k == "b" for k, _ in lossy))
 c4 = LinkChooser()
 close = [c4.decide(900.0 + s * 0.25, views(a_loss=4.0, b_loss=1.0,
@@ -339,6 +339,33 @@ mixed = [c5.decide(1000.0 + s * 0.25, views(a_lag=0.3, b_loss=15.0,
          for s in range(0, 40)]
 note("quicker but losing far more is not better",
      all(k is None for k, _ in mixed))
+
+# Sticky, as the user asked: an RFD at the edge of range, better for
+# 25 s and worse for the next 25, over and over for ten minutes. With
+# only the fixed wait that is a move at nearly every flip; damping makes
+# each voluntary move double the wait for the next, so it settles.
+c = LinkChooser()
+active, moves = "a", []
+for step in range(0, 2400):                 # 600 s, four looks a second
+    now = 2000.0 + step * 0.25
+    a_better = int((now - 2000.0) // 25) % 2 == 0
+    v = [LinkView("a", True, 1990.0, 0.0 if a_better else 12.0, 0.0, 0),
+         LinkView("b", True, 1990.0, 12.0 if a_better else 0.0, 0.0, 1)]
+    key, _ = c.decide(now, v, active)
+    if key is not None:
+        moves.append(round(now - 2000.0))
+        active = key
+gaps = [b - a for a, b in zip(moves, moves[1:])]
+note("a link better and worse by turns: it settles instead of hopping",
+     2 <= len(moves) <= 5 and gaps == sorted(gaps),
+     "%d moves in 10 min, 24 flips; at %s s" % (len(moves), moves))
+calm = LinkChooser()
+for t in (0.0, 40.0, 100.0):                # three in quick succession
+    calm._voluntary_move(t)
+note("the wait doubles with each move while they keep coming",
+     calm.dwell(101.0) == 120.0, calm.dwell(101.0))
+note("and five calm minutes put it back", calm.dwell(401.0) == 30.0,
+     calm.dwell(401.0))
 
 # Both links failing together: the slower one is still "alive" for a
 # moment after the faster has gone. Found in the rehearsal against real
