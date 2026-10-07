@@ -377,6 +377,46 @@ note("the wait doubles with each move while they keep coming",
 note("and five calm minutes put it back", calm.dwell(401.0) == 30.0,
      calm.dwell(401.0))
 
+# Really bad is nearly silent: left after 5 s whatever the wait, for a
+# link that works well. The user agreed to it after asking whether a
+# better link could be kept waiting for minutes - with the wait built up
+# by a flip-flop, a link losing most of what the aircraft sends could.
+
+
+def long_wait():
+    ch = LinkChooser()
+    ch._wait, ch._last_voluntary, ch.last_move_at = 300.0, 1990.0, 1990.0
+    return ch
+
+
+def first_move(ch, start, seconds, **kw):
+    for step in range(0, int(seconds * 4)):
+        now = start + step * 0.25
+        key, why = ch.decide(now, views(since=start - 100.0, **kw), "a")
+        if key is not None:
+            return round(now - start, 2), key, why
+    return None
+
+
+c = long_wait()
+got = first_move(c, 2000.0, 20, a_loss=70.0, b_loss=1.0)
+note("a really bad link is left after 5 s, whatever the wait",
+     got == (5.0, "b", "lossy"), got)
+note("and that does not lengthen the wait for the next move",
+     c._last_voluntary == 1990.0 and c._wait == 300.0)
+got = first_move(long_wait(), 2000.0, 20, a_lag=1.4)
+note("so is one more than a second behind", got == (5.0, "b", "late"), got)
+got = first_move(long_wait(), 2000.0, 20, a_loss=70.0, b_loss=60.0)
+note("but never for a link that is bad too", got is None, got)
+got = first_move(long_wait(), 2000.0, 60, a_loss=30.0, b_loss=1.0)
+note("a link only somewhat worse still waits its turn", got is None, got)
+c = long_wait()
+blip = [c.decide(2000.0 + s * 0.25,
+                 views(a_loss=70.0 if s < 12 else 3.0, since=1900.0), "a")
+        for s in range(0, 40)]
+note("a bad patch shorter than 5 s is not left",
+     all(k is None for k, _ in blip))
+
 # Both links failing together: the slower one is still "alive" for a
 # moment after the faster has gone. Found in the rehearsal against real
 # ArduPlane firmware, which moved onto it a quarter second before it was

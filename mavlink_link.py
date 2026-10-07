@@ -1917,16 +1917,18 @@ class MavlinkLink(QThread):
         old = self._active_link
         if why == "silent":
             reason = "%s went quiet" % old.label
-        elif why == "loss":
+        elif why in ("loss", "lossy"):
             reason = "%s was losing %.0f%% of what the aircraft sent" % (
                 old.label, old.health.loss_pct)
+        elif why == "late":
+            reason = "%s was %.1f s behind" % (old.label, lag.get(id(old), 0.0))
         else:
             # "now using A - A is 0.9 s quicker" named the same link twice
             # and left out the one it was quicker than.
             reason = "%.1f s quicker than %s" % (
                 lag.get(id(old), 0.0) - lag.get(id(new), 0.0), old.label)
         self._use_link(new, "Link: now using %s - %s" % (new.label, reason),
-                       4 if why == "silent" else 6)
+                       4 if why in ("silent", "lossy", "late") else 6)
 
     def _use_link(self, new, text, severity):
         """Make this link the one in use, and say so."""

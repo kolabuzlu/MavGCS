@@ -40,6 +40,7 @@ multilink.LinkHealth.LOSS_WINDOW_S = 2.0
 multilink.LinkChooser.HOLD_S = 1.0
 multilink.LinkChooser.SETTLE_S = 1.0
 multilink.LinkChooser.DWELL_S = 2.0
+multilink.LinkChooser.BAD_HOLD_S = 1.0
 MavlinkLink.LINK_REOPEN_S = 0.5
 MavlinkLink.CHOSEN_SETTLE_S = 1.0
 
@@ -199,6 +200,29 @@ note("automatic again when asked",
      said("Link", t_a))
 note("and the line knows which it is",
      wait_for(lambda: not any(d.get("manual") for d in stats[-2:]), 3.0))
+
+print("")
+print("6c. a really bad link is left, however long the wait")
+# After a flip-flop the wait before a voluntary move can grow to five
+# minutes. A link that is really bad - most of what the aircraft sends
+# lost - is left anyway, like a silent one.
+ch = link._chooser
+ch._wait, ch._last_voluntary, ch.last_move_at = 300.0, time.time(), time.time()
+t_b = time.time()
+A.drop_ratio = 0.75                         # the link in use loses 3 in 4
+note("left within seconds, not minutes",
+     wait_for(lambda: said("now using UDP %d - UDP %d was losing"
+                           % (pb, pa), t_b), 12.0), said("Link", t_b))
+A.drop_ratio = 0.0
+# Its loss figure covers the last few seconds; until those are clean the
+# link still reads as really bad, and taken back by hand any sooner it
+# would rightly be left again at once.
+time.sleep(multilink.LinkHealth.LOSS_WINDOW_S + 1.0)
+t_r = time.time()
+link.choose_link("udpin:0.0.0.0:%d" % pa)     # back as before, for the rest
+wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_r), 3.0)
+link.choose_link("")
+wait_for(lambda: said("choosing automatically again", t_r), 3.0)
 
 print("")
 print("7. a link carrying a different aircraft")

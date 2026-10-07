@@ -11,6 +11,7 @@ mode is, and can hang up on its client and take the next one.
 """
 
 import os
+import random
 import socket
 import threading
 import time
@@ -50,6 +51,7 @@ class Channel:
         self.parser = M.MAVLink(None)
         self.silent = False
         self.drop_every = 0
+        self.drop_ratio = 0.0       # a share dropped at random, 0..1
         self.sent = 0
         self.got = []           # (type, command) of what the GCS sent here
         self.plane = None
@@ -61,6 +63,8 @@ class Channel:
         if self.silent:
             return None
         if self.drop_every and self.sent % self.drop_every == 0:
+            return None
+        if self.drop_ratio and random.random() < self.drop_ratio:
             return None
         return self.out.buf
 

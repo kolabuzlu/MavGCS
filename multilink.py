@@ -395,6 +395,15 @@ class LinkChooser:
     DWELL_S = 30.0
     FLAP_WINDOW_S = 300.0
     DWELL_MAX_S = 300.0
+    # Really bad is nearly silent. A link losing most of what the aircraft
+    # sends still gets something through, so it never counts as quiet -
+    # and with the wait built up by a flip-flop it could have been kept
+    # for minutes beside a link that works. The user agreed: really bad
+    # for BAD_HOLD_S, with a good link to go to, is left like a silent
+    # one - the wait and any transfer in progress notwithstanding.
+    BAD_LOSS_PCT = 50.0
+    BAD_LAG_S = 1.0
+    BAD_HOLD_S = 5.0
     # Where a forced move may go: only to a link heard from in the last
     # second. "Alive" allows two seconds of quiet, and when both links
     # fail together the slower one is still "alive" for a moment after
@@ -406,8 +415,12 @@ class LinkChooser:
     def __init__(self):
         self.last_move_at = float("-inf")
         self._better_since = {}
+        self._bad = None                # (link in use, really bad since)
         self._last_voluntary = float("-inf")
         self._wait = self.DWELL_S
+
+    def really_bad(self, link):
+        return link.loss_pct > self.BAD_LOSS_PCT or link.lag_s > self.BAD_LAG_S
 
     def dwell(self, now):
         """How long since the last move a voluntary one must wait now."""
@@ -453,8 +466,34 @@ class LinkChooser:
                 return None, None       # fading too: wait for one that works
             best = min(fresh, key=rank)
             self._better_since.clear()
+            self._bad = None
             self.last_move_at = now
             return best.key, "silent"
+
+        # Working, but really bad: left like a silent link once it has
+        # been so for BAD_HOLD_S - for a link that is working well, never
+        # for one that is bad too. Not a voluntary move, so it does not
+        # lengthen the wait for the next one.
+        if self.really_bad(current):
+            # Timed for the link in use only: a reading left over from a
+            # link used earlier must not count against it now.
+            if self._bad is None or self._bad[0] != current.key:
+                self._bad = (current.key, now)
+            if now - self._bad[1] >= self.BAD_HOLD_S:
+                good = [l for l in alive if l.key != active
+                        and not self.really_bad(l)
+                        and (l.age is None or l.age <= self.FRESH_S)
+                        and self.clearly_better(l, current)]
+                if good:
+                    best = min(good, key=rank)
+                    self._better_since.clear()
+                    self._bad = None
+                    self.last_move_at = now
+                    return best.key, ("lossy"
+                                      if current.loss_pct > self.BAD_LOSS_PCT
+                                      else "late")
+        else:
+            self._bad = None
 
         ready = []
         for link in alive:
@@ -474,6 +513,7 @@ class LinkChooser:
         why = ("loss" if current.loss_pct - best.loss_pct
                >= self.BETTER_LOSS_POINTS else "delay")
         self._better_since.clear()
+        self._bad = None
         self.last_move_at = now
         self._voluntary_move(now)
         return best.key, why
