@@ -328,6 +328,53 @@ def lags(now, healths):
             for k, o in offsets.items()}
 
 
+class DropOuts:
+    """Whether a link keeps dropping out - so that is said once, rather
+    than at every drop and every return.
+
+    An RFD at the edge of its range comes and goes every few seconds, and
+    each time it said "lost" and then "is back": a stream of lines in the
+    Messages panel, each one also written over whatever the line under
+    the buttons held - a mission's upload, a parameter read. The user
+    agreed to this: a drop is said at once, as before, but the
+    UNSTEADY_DROPS-th within UNSTEADY_WINDOW_S is said once, as dropping
+    out, and nothing more about that link until it has worked for
+    STEADY_S without a break. Its state stays on the link line throughout.
+
+    The time is passed in, as for LinkHealth.
+    """
+
+    UNSTEADY_DROPS = 3
+    UNSTEADY_WINDOW_S = 60.0
+    STEADY_S = 30.0
+
+    def __init__(self):
+        self.unsteady = False
+        self._drops = deque()
+
+    def dropped(self, now):
+        """The link stopped working. True if this is the drop that makes it
+        unsteady - the moment to say so, once."""
+        self._drops.append(now)
+        while now - self._drops[0] > self.UNSTEADY_WINDOW_S:
+            self._drops.popleft()
+        if self.unsteady or len(self._drops) < self.UNSTEADY_DROPS:
+            return False
+        self.unsteady = True
+        return True
+
+    def steady(self, now, up_since):
+        """The link is working, and has been since up_since. True once:
+        when an unsteady link has worked long enough to be steady again."""
+        if (not self.unsteady or up_since is None
+                or now - up_since < self.STEADY_S):
+            return False
+        self.unsteady = False
+        # Its old drops are history: one more is a single drop again.
+        self._drops.clear()
+        return True
+
+
 # ----------------------------------------------------------------------
 # Choosing: which link carries the commands, and when to move.
 

@@ -41,6 +41,7 @@ multilink.LinkChooser.HOLD_S = 1.0
 multilink.LinkChooser.SETTLE_S = 1.0
 multilink.LinkChooser.DWELL_S = 2.0
 multilink.LinkChooser.BAD_HOLD_S = 1.0
+multilink.DropOuts.STEADY_S = 4.0
 MavlinkLink.LINK_REOPEN_S = 0.5
 MavlinkLink.CHOSEN_SETTLE_S = 1.0
 
@@ -226,6 +227,66 @@ link.choose_link("udpin:0.0.0.0:%d" % pa)     # back as before, for the rest
 wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_r), 3.0)
 link.choose_link("")
 wait_for(lambda: said("choosing automatically again", t_r), 3.0)
+
+print("")
+print("6d. a link that keeps dropping out")
+# An RFD at the edge of its range: up a moment, gone a moment, over and
+# over. Every drop and every return was a line of its own, and a link
+# chosen by hand dragged the ground station back each time it worked for
+# a moment. The user agreed: the third drop in a minute is said once, and
+# nothing more until the link has worked for a while without a break.
+pd = free_port()
+D = UdpChannel(pd)
+plane.channels.append(D)
+t_d = time.time()
+link.add_link("udpin:0.0.0.0:%d" % pd)
+wait_for(lambda: said("UDP %d is up" % pd, t_d), 6.0)
+time.sleep(1.0)
+link.choose_link("udpin:0.0.0.0:%d" % pd)
+wait_for(lambda: said("now using UDP %d - chosen by hand" % pd, t_d), 3.0)
+t_f = time.time()
+for _ in range(4):
+    # Up for less than STEADY_S each time, and for longer than it takes
+    # a link chosen by hand to be taken back.
+    D.silent = True
+    time.sleep(2.0)
+    D.silent = False
+    time.sleep(1.8)
+steady = wait_for(lambda: said("UDP %d is steady again" % pd, t_f),
+                  multilink.DropOuts.STEADY_S + 3.0)
+wait_for(lambda: len(said("back on UDP %d" % pd, t_f)) >= 3, 3.0)
+# In the order said, not by time: Windows' clock can give two lines said
+# together the same time.
+about = [t for w, t in events if w >= t_f and "UDP %d" % pd in t]
+k = next((i for i, t in enumerate(about) if "keeps dropping out" in t),
+         len(about))
+s = next((i for i, t in enumerate(about) if "steady again" in t), len(about))
+before, during, after = about[:k], about[k + 1:s], about[s + 1:]
+note("the first two drops are said as they happen",
+     sum("went quiet; back to it when it returns" in t for t in before) == 2
+     and sum("UDP %d is back" % pd in t for t in before) == 2,
+     before)
+note("the third is said once, as dropping out",
+     sum("keeps dropping out" in t for t in about) == 1,
+     [t for t in about if "keeps" in t])
+note("the move it forces says when it will come back",
+     any("back to it once it has worked for 4 s" in t for t in during),
+     during)
+note("then nothing more: no lost, no back, no taking it back",
+     not any(" lost" in t or "is back" in t or "back on" in t
+             for t in during), during)
+note("until it has worked for a while: steady again", steady, about[-3:])
+note("and only then is it taken back",
+     any("back on UDP %d - chosen by hand" % pd in t for t in after), after)
+t_c = time.time()
+link.choose_link("udpin:0.0.0.0:%d" % pa)       # back as before, for the rest
+wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_c), 3.0)
+link.choose_link("")
+wait_for(lambda: said("choosing automatically again", t_c), 3.0)
+link.remove_link("udpin:0.0.0.0:%d" % pd)
+wait_for(lambda: said("UDP %d removed" % pd, t_c), 3.0)
+plane.channels.remove(D)
+D.close()
 
 print("")
 print("7. a link carrying a different aircraft")

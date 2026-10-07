@@ -174,6 +174,11 @@ class _Link:
         self.error = None               # why it last failed, for the tooltip
         self.ever_up = False            # has heard the aircraft at least once
         self.was_alive = False          # so each change is reported once
+        self.up_since = None            # working without a break since
+        self.drop_outs = multilink.DropOuts()
+        # This break already counted: a link that goes quiet and then
+        # fails is one drop, not two.
+        self.down_counted = False
         self.foreign = None             # another aircraft's id, if that is all
         self.foreign_reported = False
         self.rates_at = float("-inf")   # when its stream rates were last set
@@ -1621,6 +1626,7 @@ class MavlinkLink(QThread):
         first = _Link(self.connection_string, 0)
         first.conn = self.master
         first.ever_up = first.was_alive = True
+        first.up_since = now
         first.rates_at = now
         first.health.last_vehicle_at = first.health.alive_since = now
         self._vehicle = (self.master.target_system,
@@ -1735,7 +1741,7 @@ class MavlinkLink(QThread):
             link.error = _describe_link_error(error)
             link.next_open_at = now + min(
                 self.LINK_REOPEN_MAX_S, self.LINK_REOPEN_S * link.open_failures)
-            if link.open_failures == 1:
+            if link.open_failures == 1 and not link.drop_outs.unsteady:
                 # Once: a link that will not open is retried quietly, and
                 # its state stays on the link line for as long as it fails.
                 self._link_event("Link: could not open %s - %s Still trying."
@@ -1743,6 +1749,8 @@ class MavlinkLink(QThread):
             return
         link.open_failures = 0
         link.error = None
+        # A new connection: if it fails too, that is a drop of its own.
+        link.down_counted = False
         conn.target_system, conn.target_component = self._vehicle
         self._fail_on_eof(conn)
         link.conn = conn
@@ -1843,8 +1851,14 @@ class MavlinkLink(QThread):
                 conn.close()
             except Exception:
                 pass
-        self._link_event("Link: %s failed - %s Reopening."
-                         % (link.label, _sentence(link.error)), 4)
+        if self._count_drop(link, now):
+            self._link_event(
+                "Link: %s keeps dropping out (%s) - not reported again until "
+                "it has worked for %.0f s" % (link.label, link.error,
+                                              multilink.DropOuts.STEADY_S), 4)
+        elif not link.drop_outs.unsteady:
+            self._link_event("Link: %s failed - %s Reopening."
+                             % (link.label, _sentence(link.error)), 4)
         if len(self._links) == 1:
             # The only link: nothing carries the aircraft now, and the big
             # indicator says so, as it always has for a broken link.
@@ -1859,12 +1873,15 @@ class MavlinkLink(QThread):
         for link in self._links:
             alive = link.conn is not None and link.health.alive(now)
             if alive and not link.was_alive:
+                link.up_since = now
+                link.down_counted = False
                 if not link.ever_up:
                     link.ever_up = True
                     self._link_event("Link: %s is up - same aircraft, ready"
                                      % link.label, 6)
                 else:
-                    self._link_event("Link: %s is back" % link.label, 6)
+                    if not link.drop_outs.unsteady:
+                        self._link_event("Link: %s is back" % link.label, 6)
                     if len(self._links) == 1:
                         # The only link, broken and now reopened: the
                         # indicator goes back to CONNECTED by itself.
@@ -1890,8 +1907,17 @@ class MavlinkLink(QThread):
                     and other.health.alive(now)
                     and now - other.health.last_vehicle_at <= fresh
                     for other in self._links)
-                if not moving:
+                if self._count_drop(link, now):
+                    # Said even with a move to say: it is why nothing more
+                    # is heard about this link for a while.
+                    self._link_event(
+                        "Link: %s keeps dropping out - not reported again "
+                        "until it has worked for %.0f s"
+                        % (link.label, multilink.DropOuts.STEADY_S), 4)
+                elif not moving and not link.drop_outs.unsteady:
                     self._link_event("Link: %s lost" % link.label, 4)
+            elif alive and link.drop_outs.steady(now, link.up_since):
+                self._link_event("Link: %s is steady again" % link.label, 6)
             link.was_alive = alive
             if (link.foreign is not None and not link.ever_up
                     and not link.foreign_reported):
@@ -1899,6 +1925,15 @@ class MavlinkLink(QThread):
                 self._link_event(
                     "Link: %s carries a different aircraft (system %d) - "
                     "not used" % (link.label, link.foreign), 3)
+
+    @staticmethod
+    def _count_drop(link, now):
+        """This link has stopped working: one drop, however it was noticed.
+        True if it is the drop that makes it unsteady, to be said once."""
+        if link.down_counted:
+            return False
+        link.down_counted = True
+        return link.drop_outs.dropped(now)
 
     def _link_busy(self):
         """Half-way through a conversation with the aircraft on one link."""
@@ -1990,8 +2025,10 @@ class MavlinkLink(QThread):
         """Manual: the link chosen by hand - never left for being slower or
         lossier, which is the point of choosing. Left only while it is
         silent, for a link that works, and returned to once it has worked
-        again for CHOSEN_SETTLE_S: a ground station that stuck to a dead
-        link because it was told to would leave the pilot with nothing.
+        again for CHOSEN_SETTLE_S - or, if it keeps dropping out, once it
+        is steady again (multilink.DropOuts): a ground station that stuck
+        to a dead link because it was told to would leave the pilot with
+        nothing.
         """
         chosen = self._chosen_link()
         if chosen is None:
@@ -1999,8 +2036,13 @@ class MavlinkLink(QThread):
             return
         h = chosen.health
         if chosen.conn is not None and h.alive(now):
+            # One that keeps dropping out is taken back only once it is
+            # steady again: otherwise every few seconds of it working
+            # dragged the ground station back, for the next drop to
+            # drag it away.
             if (self._active_link is not chosen
-                    and now - h.alive_since >= self.CHOSEN_SETTLE_S):
+                    and now - h.alive_since >= self.CHOSEN_SETTLE_S
+                    and not chosen.drop_outs.unsteady):
                 self._use_link(chosen, "Link: back on %s - chosen by hand"
                                % chosen.label, 6)
             return
@@ -2015,9 +2057,11 @@ class MavlinkLink(QThread):
         if not fresh:
             return
         stand_in = min(fresh, key=lambda l: (l.health.loss_pct, l.order))
+        when = ("once it has worked for %.0f s" % multilink.DropOuts.STEADY_S
+                if chosen.drop_outs.unsteady else "when it returns")
         self._use_link(stand_in, "Link: now using %s - %s, chosen by hand, "
-                       "went quiet; back to it when it returns"
-                       % (stand_in.label, chosen.label), 4)
+                       "went quiet; back to it %s"
+                       % (stand_in.label, chosen.label, when), 4)
 
     def _on_link(self, link, fn):
         """Run fn with every send going out on this link, then put it back.

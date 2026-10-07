@@ -241,6 +241,26 @@ note("a link with nothing to judge by is not called slow",
      multilink.lags(1002.5, {"x": LinkHealth()})["x"] == 0.0)
 
 print("")
+print("4b. a link that keeps dropping out")
+d = multilink.DropOuts()
+first, second = d.dropped(100.0), d.dropped(110.0)
+note("a drop, and a second: each one said as it happens",
+     not first and not second and not d.unsteady)
+note("the third within a minute: said once, as dropping out",
+     d.dropped(120.0) and d.unsteady)
+note("and the fourth not said again", not d.dropped(130.0) and d.unsteady)
+note("not steady after a few seconds working", not d.steady(140.0, 131.0))
+note("steady once it has worked 30 s without a break",
+     d.steady(161.0, 131.0) and not d.unsteady)
+note("and said so only once", not d.steady(170.0, 131.0))
+note("after that, a drop is a single drop again",
+     not d.dropped(175.0) and not d.unsteady)
+d = multilink.DropOuts()
+spread = [d.dropped(t) for t in (0.0, 35.0, 70.0, 105.0, 140.0)]
+note("drops more than half a minute apart never add up to dropping out",
+     not any(spread) and not d.unsteady, spread)
+
+print("")
 print("5. when to move")
 
 
