@@ -325,6 +325,7 @@ from PySide6.QtGui import (QIcon, QImage, QPainter, QPixmap, QPen, QColor,
 from PySide6.QtCore import (QBuffer, QByteArray, QIODevice, QPoint, QPointF,
                             QSize, QUrl, QStandardPaths)
 from PySide6.QtGui import QRegion
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QGridLayout, QFrame, QInputDialog,
@@ -338,6 +339,7 @@ from PySide6.QtWidgets import (
 
 from pymavlink import mavutil     # for the SYS_STATUS sensor bit names
 from mavlink_link import MavlinkLink, PLANE_MODES
+import multilink
 from artificial_horizon import ArtificialHorizon
 from map_view import MapView
 import terrain_provider
@@ -3633,6 +3635,14 @@ class ConnectionPanel(QGroupBox):
                   "230400", "460800"]
 
     connect_requested = Signal(str)
+    # The same fields, read while a link is already open: one more link to
+    # the same aircraft rather than a replacement for the first.
+    add_link_requested = Signal(str)
+    # One of several links, closed for good - from the right-click menu.
+    remove_link_requested = Signal(str)
+    # A link to use by hand, or "" to choose automatically again - also
+    # from the right-click menu.
+    choose_link_requested = Signal(str)
     disconnect_requested = Signal()
     update_requested = Signal()
     telemetry_settings_requested = Signal()
@@ -3741,6 +3751,13 @@ class ConnectionPanel(QGroupBox):
         self.connect_btn.setFixedHeight(self.FIELD_HEIGHT)
         self.connect_btn.setStyleSheet("color: #2af; font-weight: bold; font-size: 9px; padding: 2px 3px;")
         self.connect_btn.clicked.connect(self._on_connect_clicked)
+        # While a link is open this button adds another one; see
+        # set_connected. Nothing about it changes until then.
+        self._connected = False
+        # Every link while there are two or more, and whether one was
+        # chosen by hand - for the right-click menu. See set_links.
+        self._links = []
+        self._manual = False
 
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setFixedHeight(self.FIELD_HEIGHT)
@@ -3767,6 +3784,14 @@ class ConnectionPanel(QGroupBox):
             "in and out, and the share of the vehicle's frames that did not "
             "arrive. A link near its limit shows a high rate with loss "
             "climbing; a quiet one shows neither.")
+        # Never asks the column for width. A label's size hint is its
+        # text, and in the left column any width it wins comes out of the
+        # map - several links on this line made the whole column wider. It
+        # already gets the panel's full width from the layout, so this
+        # changes nothing until a line is too long, and then the line is
+        # cut instead of the map.
+        self.link_stats_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                            QSizePolicy.Policy.Preferred)
         refresh_row.addStretch(1)
         # Shares the button row rather than taking one of its own: a row to
         # itself cost the map 27px of height for a control used once in a
@@ -3864,11 +3889,48 @@ class ConnectionPanel(QGroupBox):
 
     def contextMenuEvent(self, event):
         """Right-click reaches the same settings as the button, for anyone
-        who looks for a context menu first."""
+        who looks for a context menu first - and, with several links open,
+        is where a link is chosen by hand, handed back to the automatic
+        choice, or closed."""
+        self.build_context_menu().exec(event.globalPos())
+
+    def build_context_menu(self):
+        """The right-click menu, as it stands now."""
         menu = QMenu(self)
         menu.addAction("Settings...",
                        self.telemetry_settings_requested.emit)
-        menu.exec(event.globalPos())
+        if len(self._links) >= 2:
+            menu.addSeparator()
+            # One tick between them: automatic, or exactly one link.
+            group = QActionGroup(menu)
+            group.setExclusive(True)
+            auto = menu.addAction("Choose the link automatically")
+            auto.setCheckable(True)
+            auto.setChecked(not self._manual)
+            group.addAction(auto)
+            auto.triggered.connect(
+                lambda checked=False: self.choose_link_requested.emit(""))
+            for link in self._links:
+                use = menu.addAction("Use %s" % link.get("label", "link"))
+                use.setCheckable(True)
+                use.setChecked(bool(self._manual and link.get("chosen")))
+                group.addAction(use)
+                use.triggered.connect(
+                    lambda checked=False, c=link.get("connection", ""):
+                    self.choose_link_requested.emit(c))
+            menu.addSeparator()
+            for link in self._links:
+                menu.addAction(
+                    "Remove link %s" % link.get("label", "link"),
+                    lambda c=link.get("connection", ""):
+                    self.remove_link_requested.emit(c))
+        return menu
+
+    def set_links(self, links, manual=False):
+        """The links now open, and whether one was chosen by hand - kept
+        only for the right-click menu."""
+        self._links = list(links)
+        self._manual = bool(manual)
 
     def set_update_state(self, text: str, found: bool = False, enabled: bool = True):
         """Reflect a check in the button itself, so a waiting or successful
@@ -3878,13 +3940,30 @@ class ConnectionPanel(QGroupBox):
         self.update_btn.setStyleSheet(
             self.UPDATE_FOUND_STYLE if found else self.UPDATE_STYLE)
 
+    def set_connected(self, connected: bool):
+        """A link is open, or none is: Connect becomes Add Link and back.
+
+        Pressing Connect with a link already open used to throw that link
+        away and open the new one. With several links to one aircraft the
+        same button adds instead, and replacing a link is Disconnect then
+        Connect. The label says which of the two a press will do.
+        """
+        self._connected = bool(connected)
+        self.connect_btn.setText("Add Link" if self._connected else "Connect")
+        self.connect_btn.setToolTip(
+            "Add another link to the same aircraft - an RFD on a serial "
+            "port alongside an LTE bridge, say. All of them stay open and "
+            "the best one is used." if self._connected else "")
+
     def _on_connect_clicked(self):
         protocol = self.protocol_combo.currentText()
+        emit = (self.add_link_requested.emit if self._connected
+                else self.connect_requested.emit)
 
         if protocol == "Serial":
             device = self.serial_port_combo.currentData()
             if not device:
-                self.connect_requested.emit("")
+                emit("")
                 return
             baud = self.baud_combo.currentText()
             connection_string = f"{device}:{baud}"
@@ -3892,7 +3971,7 @@ class ConnectionPanel(QGroupBox):
             host = self.host_edit.text().strip()
             port = self.port_edit.text().strip()
             if not host or not port:
-                self.connect_requested.emit("")
+                emit("")
                 return
             connection_string = f"tcp:{host}:{port}"
         elif protocol == "UDP (listen)":
@@ -3902,7 +3981,7 @@ class ConnectionPanel(QGroupBox):
             # to receive anything.
             port = self.port_edit.text().strip()
             if not port:
-                self.connect_requested.emit("")
+                emit("")
                 return
             connection_string = f"udpin:0.0.0.0:{port}"
         elif protocol == "UDP (connect to)":
@@ -3911,13 +3990,13 @@ class ConnectionPanel(QGroupBox):
             host = self.host_edit.text().strip()
             port = self.port_edit.text().strip()
             if not host or not port:
-                self.connect_requested.emit("")
+                emit("")
                 return
             connection_string = f"udpout:{host}:{port}"
         else:
             connection_string = ""
 
-        self.connect_requested.emit(connection_string)
+        emit(connection_string)
 
 
 class MessagesPanel(QGroupBox):
@@ -4417,6 +4496,9 @@ class MainWindow(QMainWindow):
         # The meter lives on the connection panel, beside the buttons
         # it belongs with; this is how the handler reaches it.
         self.link_stats_label = self.connection_panel.link_stats_label
+        # Its own explanation, kept to put back when several links - which
+        # carry a tooltip listing each one - go back down to one.
+        self._link_stats_tip = self.link_stats_label.toolTip()
         self.status_label = QLabel()
         # True while the feedback line is showing a connection problem that
         # we put there, and may therefore remove again.
@@ -4780,6 +4862,11 @@ class MainWindow(QMainWindow):
         self.link = None
         self._set_link_status(False, "Not connected")
         self.connection_panel.connect_requested.connect(self.on_connect_requested)
+        self.connection_panel.add_link_requested.connect(self.on_add_link_requested)
+        self.connection_panel.remove_link_requested.connect(
+            self.on_remove_link_requested)
+        self.connection_panel.choose_link_requested.connect(
+            self.on_choose_link_requested)
         self.connection_panel.disconnect_requested.connect(self.on_disconnect_requested)
         self.connection_panel.update_requested.connect(self.on_check_updates)
         self.connection_panel.telemetry_settings_requested.connect(
@@ -5978,6 +6065,14 @@ class MainWindow(QMainWindow):
             self._forget_parameters()
         self._was_connected = connected
         self._set_link_status(connected, message)
+        # Once the aircraft has been heard, Connect becomes Add Link - and
+        # stays so through a dropout, so a link added to recover from one
+        # joins the others instead of replacing them. A first connection
+        # that never came up has nothing to add to.
+        if connected:
+            self.connection_panel.set_connected(True)
+        elif message.lower().startswith("connection failed"):
+            self.connection_panel.set_connected(False)
         # A failure reason is worth more than a tooltip - it is the thing
         # you need when nothing will connect, so put it on the line below,
         # where command feedback already appears.
@@ -6329,8 +6424,50 @@ class MainWindow(QMainWindow):
                 and time.time() - self._vehicle_terrain_at
                 <= self.VEHICLE_TERRAIN_GOOD_S)
 
+    def _clear_link_line(self):
+        """No link, no figures - as at startup.
+
+        Left alone, the line went on showing the last link's numbers
+        after Disconnect, which reads as a live link; with several links
+        it even marked one of them as in use.
+        """
+        self.link_stats_label.setTextFormat(Qt.TextFormat.AutoText)
+        self.link_stats_label.setText("")
+        self.link_stats_label.setToolTip(self._link_stats_tip)
+        self.connection_panel.set_links([])
+
     def on_link_stats(self, stats):
         """The radio meter, once a second."""
+        if self.link is None:
+            # Sent just before the link stopped, delivered just after:
+            # it would put back the figures Disconnect has just cleared.
+            return
+        links = stats.get("links") or []
+        if len(links) >= 2:
+            # Several links to the aircraft: every one of them on the same
+            # line, the one in use marked. One link keeps the line below,
+            # unchanged, so a single radio looks as it always has.
+            # Monospaced, so the room is a count of characters. Two short
+            # of it, for marks that the font may draw from a wider one.
+            label = self.link_stats_label
+            room = None
+            if label.width() > 50:
+                room = max(10, label.width()
+                           // max(1, label.fontMetrics().horizontalAdvance("0"))
+                           - 2)
+            manual = bool(stats.get("manual"))
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setText(multilink.link_line_html(links, room, manual))
+            self.link_stats_label.setToolTip(
+                multilink.link_tooltip(links, manual))
+            self.link_stats_label.setStyleSheet(
+                "color: #9aa4ad; font-size: 10px; font-family: %s;"
+                % MONO_FAMILY)
+            self.connection_panel.set_links(links, manual)
+            return
+        self.connection_panel.set_links([])
+        self.link_stats_label.setTextFormat(Qt.TextFormat.AutoText)
+        self.link_stats_label.setToolTip(self._link_stats_tip)
         rx = stats.get("rx_bps", 0.0)
         tx = stats.get("tx_bps", 0.0)
         loss = stats.get("loss_pct", 0.0)
@@ -6781,6 +6918,33 @@ class MainWindow(QMainWindow):
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
 
+    def on_add_link_requested(self, connection_string):
+        """One more link to the aircraft already connected.
+
+        See MavlinkLink.add_link. The panel only offers this while a link
+        is open; with none, it is an ordinary Connect.
+        """
+        if not connection_string:
+            self._show_link_message(
+                "Can't add a link: missing or invalid connection details")
+            return
+        if self.link is None:
+            self.on_connect_requested(connection_string)
+            return
+        self._clear_link_message()
+        self.link.add_link(connection_string)
+
+    def on_remove_link_requested(self, connection_string):
+        """One of several links closed, from the right-click menu."""
+        if self.link is not None:
+            self.link.remove_link(connection_string)
+
+    def on_choose_link_requested(self, connection_string):
+        """A link chosen by hand - or "" for automatic - from the
+        right-click menu. See MavlinkLink.choose_link."""
+        if self.link is not None:
+            self.link.choose_link(connection_string)
+
     def on_connect_requested(self, connection_string):
         if not connection_string:
             self._show_link_message(
@@ -6790,6 +6954,10 @@ class MainWindow(QMainWindow):
         old_link = getattr(self, "link", None)
         if old_link is not None:
             old_link.stop()
+        # Connect again until this one is up: Add Link means "to the
+        # aircraft already connected", and there is none yet.
+        self.connection_panel.set_connected(False)
+        self._clear_link_line()
         self._set_link_status(False, "Connecting...")
         # Clear the previous attempt's complaint as soon as a new one
         # starts, rather than leaving it up through "Connecting...".
@@ -6800,6 +6968,8 @@ class MainWindow(QMainWindow):
         if self.link is not None:
             self.link.stop()
             self.link = None
+        self.connection_panel.set_connected(False)
+        self._clear_link_line()
         self._set_link_status(False, "Disconnected by the user")
         self._was_connected = False
         self.command_label.setText("")
