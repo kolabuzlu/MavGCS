@@ -17,8 +17,9 @@
 #
 #    * The camera will not work. macOS credits a camera request to the
 #      responsible process, which here is Terminal rather than MavGCS,
-#      so it is refused without ever asking. The camera needs the
-#      bundle: open dist/MavGCS.app.
+#      so it is refused without ever asking. The camera needs the app
+#      itself: the installed /Applications/MavGCS.app, or dist/MavGCS.app
+#      freshly built from this source with build_release.py.
 #    * Only one copy can run at a time. The second cannot bind the tile
 #      proxy's port and its map comes up blank.
 # ---------------------------------------------------------------------
