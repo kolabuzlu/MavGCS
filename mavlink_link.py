@@ -57,10 +57,68 @@ def _open_mavlink_connection(connection_string):
     if ":" in connection_string:
         device, baud_str = connection_string.rsplit(":", 1)
         try:
-            return mavutil.mavlink_connection(device, baud=int(baud_str))
+            return _read_serial_promptly(
+                mavutil.mavlink_connection(device, baud=int(baud_str)))
         except ValueError:
             pass
-    return mavutil.mavlink_connection(connection_string)
+    return _read_serial_promptly(mavutil.mavlink_connection(connection_string))
+
+
+def _log(kind, text):
+    """One line for the log of a watched run (tools/watch_run.py keeps
+    everything printed), with the time of day. Nothing reads it in an
+    ordinary run, and nothing about it may ever stop the link."""
+    try:
+        print("%s %s %s" % (kind, time.strftime("%H:%M:%S"), text),
+              flush=True)
+    except Exception:
+        pass
+
+
+# How often a serial port with no file handle is looked at for new bytes.
+SERIAL_POLL_S = 0.005
+
+
+def _read_serial_promptly(conn, waiting=None):
+    """Make a serial port on Windows hand over frames as they arrive.
+
+    Waiting for more data, pymavlink uses select() on the port's file
+    handle - and on Windows a serial port has none, so it sleeps instead:
+    half the read's timeout, up to half a second, each time it has caught
+    up. Measured with the timeouts MavGCS reads with, against a link that
+    is read the same way: every frame 0.25 s late on average and up to
+    0.5 s with one link, the HUD moving in half-second jumps, as it has
+    since the first version; 0.13 s and up to 0.25 s on each of several,
+    which made an RFD look slower than a modem on 2G. Looking at the port
+    for bytes every few milliseconds instead: 4 ms on average, 7 at worst.
+
+    A port with a handle - every serial port on macOS and Linux, and
+    every network link - waits properly already and is left alone.
+    waiting: what says how many bytes are waiting; the port's own count
+    unless a test stands something else in for it.
+    """
+    if getattr(conn, "fd", 0) is not None:
+        return conn
+    if waiting is None:
+        port = getattr(conn, "port", None)
+        if not hasattr(port, "in_waiting"):
+            return conn
+        waiting = lambda: port.in_waiting
+
+    def select(timeout):
+        end = time.time() + timeout
+        while True:
+            try:
+                if waiting():
+                    return True
+            except Exception:
+                return True         # the read that follows says what is wrong
+            if time.time() >= end:
+                return False
+            time.sleep(SERIAL_POLL_S)
+
+    conn.select = select
+    return conn
 
 # ArduPlane flight modes this app exposes as buttons, with their
 # custom_mode numbers confirmed against pymavlink's mode_mapping_apm.
@@ -465,7 +523,8 @@ class MavlinkLink(QThread):
         self._links = []                # _Link, in the order added
         self._active_link = None
         self._vehicle = (0, 0)          # the aircraft's system and component
-        self._rx = queue.Queue()        # (link, connection, frame, error)
+        # (link, connection, frame, error, when it arrived)
+        self._rx = queue.Queue()
         self._link_lock = threading.Lock()
         self._add_requests = []         # from the GUI thread
         self._remove_requests = []      # likewise
@@ -477,6 +536,7 @@ class MavlinkLink(QThread):
         self._chooser = multilink.LinkChooser()
         self._links_eval_at = 0.0
         self._links_hb_at = 0.0
+        self._links_log_at = 0.0
         self._link_bytes_last = None    # (connection, time, rx, tx)
         # State for values MAVLink doesn't hand us directly - we compute
         # these ourselves from other messages (see run()).
@@ -1798,13 +1858,15 @@ class MavlinkLink(QThread):
                     if (getattr(e, "winerror", None) == 10054
                             and isinstance(conn, mavutil.mavudp)):
                         continue
-                    self._rx.put((link, conn, None, e))
+                    self._rx.put((link, conn, None, e, time.time()))
                     return
                 except Exception as e:
-                    self._rx.put((link, conn, None, e))
+                    self._rx.put((link, conn, None, e, time.time()))
                     return
                 if msg is not None:
-                    self._rx.put((link, conn, msg, None))
+                    # Timed here, as it arrives: a frame that then waits
+                    # its turn in the queue has not taken the link longer.
+                    self._rx.put((link, conn, msg, None, time.time()))
 
         threading.Thread(target=read, daemon=True,
                          name="MavGCS link read").start()
@@ -1812,12 +1874,11 @@ class MavlinkLink(QThread):
     def _receive_multi(self):
         """The next frame to act on: from the link in use, or None."""
         try:
-            link, conn, msg, error = self._rx.get(timeout=0.25)
+            link, conn, msg, error, now = self._rx.get(timeout=0.25)
         except queue.Empty:
             return None
         if conn is not link.conn:
             return None                 # from a connection since replaced
-        now = time.time()
         if error is not None:
             self._link_broke(link, error, now)
             return None
@@ -2091,6 +2152,37 @@ class MavlinkLink(QThread):
         self.command_feedback.emit(text)
         self.status_text_update.emit(text, severity)
         self._stats_at = None
+        _log("LINK", text[len("Link: "):] if text.startswith("Link: ")
+             else text)
+
+    # How often the log of a watched run gets every link's figures.
+    LINKS_LOG_EVERY_S = 10.0
+
+    def _log_links(self, now, out):
+        """What each link measures, for the log a watched run keeps.
+
+        The link line shows messages a second and loss; the delay is only
+        in its tooltip, and the wait before a move by choice nowhere. So
+        when the user's 2G test stayed on the slow link, the log could not
+        say why. With these lines it can.
+        """
+        if len(out) < 2 or now < self._links_log_at:
+            return
+        self._links_log_at = now + self.LINKS_LOG_EVERY_S
+        chosen = self._chosen_link()
+        if chosen is not None:
+            how = "chosen by hand: %s" % chosen.label
+        else:
+            left = (self._chooser.last_move_at + self._chooser.dwell(now)
+                    - now)
+            how = "automatic, a move by choice allowed %s" % (
+                "now" if left <= 0 else "in %.0f s" % left)
+            if self._link_busy():
+                how += " once the transfer in progress is done"
+        _log("LINKS", "%s | %s" % (how, " | ".join(
+            "%s %s %.0f/s %.1f%% lost %.2f s behind"
+            % (l["label"], l["state"], l["rx_mps"], l["loss_pct"],
+               l["lag_s"]) for l in out)))
 
     def _emit_links_stats(self, now):
         """The link line's figures, one entry per link."""
@@ -2119,6 +2211,7 @@ class MavlinkLink(QThread):
                         "loss_pct": link.health.loss_pct,
                         "lag_s": lag.get(id(link), 0.0),
                         "error": link.error})
+        self._log_links(now, out)
         # Bytes each way on the link in use, for the line as one link
         # draws it - which is how a single link reopened by this
         # machinery is still shown. pymavlink counts them per connection,

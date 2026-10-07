@@ -240,6 +240,31 @@ note("the slower link is 0.4 s behind, the faster one not at all",
 note("a link with nothing to judge by is not called slow",
      multilink.lags(1002.5, {"x": LinkHealth()})["x"] == 0.0)
 
+
+def feed(health, extra):
+    """40 frames sent 50 ms apart, each taking 0.05 s plus extra(i) to
+    arrive - handed over in the order they arrive, as a link does."""
+    frames = sorted((1000.0 + i * 0.05 + 0.05 + extra(i), i) for i in range(40))
+    for arrived, i in frames:
+        health.on_frame(arrived, (1, 1), i, True, 10_000 + i * 50)
+
+
+# The user's test of 2026-10-07: an LTE modem forced onto 2G beside an
+# RFD. Now and then a frame comes over 2G as quickly as over the radio;
+# most take a quarter of a second longer. Judged by its best moments the
+# 2G link was as quick as the radio, and it was kept in use.
+radio, modem = LinkHealth(), LinkHealth()
+feed(radio, lambda i: 0.0)
+feed(modem, lambda i: 0.0 if i % 5 == 0 else 0.25)
+lag = multilink.lags(1002.5, {"rfd": radio, "2g": modem})
+note("a link is judged by what it usually takes, not by its best moments",
+     abs(lag["2g"] - 0.25) < 0.01 and abs(lag["rfd"]) < 1e-9, lag)
+spiky = LinkHealth()
+feed(spiky, lambda i: 1.5 if i == 10 else 0.0)
+lag = multilink.lags(1002.5, {"rfd": radio, "spiky": spiky})
+note("one frame held up for a moment does not make a link slow",
+     abs(lag["spiky"]) < 0.01, lag)
+
 print("")
 print("4b. a link that keeps dropping out")
 d = multilink.DropOuts()

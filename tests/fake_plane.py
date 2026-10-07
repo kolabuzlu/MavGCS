@@ -6,15 +6,16 @@ uses it, and so can anything else that wants a plane on more than one link.
 Each port is its own MAVLink channel and numbers its own frames, as an
 autopilot's serial ports do - which is the whole point: the ground
 station must keep one count per link. A port can be told to fall silent,
-to drop every Nth frame or to keep only every Nth; a TCP port is the
-server end, as MavLTE's TCP mode is, and can hang up on its client and
-take the next one.
+to drop every Nth frame or to keep only every Nth, or to deliver late; a
+TCP port is the server end, as MavLTE's TCP mode is, and can hang up on
+its client and take the next one.
 """
 
 import os
 import socket
 import threading
 import time
+from collections import deque
 
 os.environ.setdefault("MAVLINK20", "1")
 
@@ -54,6 +55,8 @@ class Channel:
         # Most frames lost, but evenly: never a second's silence, which a
         # share dropped at random gives now and then on a slow machine.
         self.keep_every = 0
+        self.delay = 0.0            # how long each frame takes to get there
+        self._held = deque()        # (when it is due, bytes), in order
         self.sent = 0
         self.got = []           # (type, command) of what the GCS sent here
         self.plane = None
@@ -69,6 +72,20 @@ class Channel:
         if self.keep_every and self.sent % self.keep_every:
             return None
         return self.out.buf
+
+    def later(self, data, now):
+        """Send it once its delay has passed - in order, as a link
+        delivers: a frame never overtakes one sent before it."""
+        due = max(now + self.delay, self._held[-1][0] if self._held else now)
+        if due <= now:
+            self.send(data)
+        else:
+            self._held.append((due, data))
+
+    def release(self, now):
+        """Send whatever has been held for long enough."""
+        while self._held and self._held[0][0] <= now:
+            self.send(self._held.popleft()[1])
 
     def heard(self, data):
         try:
@@ -183,6 +200,7 @@ class FakePlane(threading.Thread):
             for ch in list(self.channels):
                 ch.plane = self
                 ch.poll()
+                ch.release(now)
                 frames = [M.MAVLink_attitude_message(boot_ms, 0.1, 0.0, 1.0,
                                                      0.0, 0.0, 0.0)]
                 if now - last_hb >= 1.0:
@@ -193,7 +211,7 @@ class FakePlane(threading.Thread):
                 for f in frames:
                     data = ch.frame(f)
                     if data is not None:
-                        ch.send(data)
+                        ch.later(data, now)
             if now - last_hb >= 1.0:
                 last_hb = now
             time.sleep(0.05)

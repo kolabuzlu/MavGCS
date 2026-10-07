@@ -257,8 +257,14 @@ class LinkHealth:
     # slow one.
     DEAD_AFTER_S = 2.0
     LOSS_WINDOW_S = 5.0
-    # Delay is judged on the best a link has managed lately: queues on a
-    # busy link add jitter, and the minimum is what the link itself costs.
+    # Delay is judged on what a link usually takes lately - the middle of
+    # its recent delays, which one stray frame does not move. It was the
+    # best a link had managed, at first, and that is not what the pilot
+    # sees: in the user's test of 2026-10-07 the LTE modem, forced onto
+    # 2G, was kept in use beside an RFD that was plainly quicker. A slow
+    # link's best moments can come close to a quick one's while it is
+    # usually a good deal slower. Arrival is timed as each frame is read,
+    # so time spent waiting inside MavGCS is not put down to the link.
     LAG_WINDOW_S = 3.0
 
     def __init__(self):
@@ -295,9 +301,10 @@ class LinkHealth:
                 and now - self.last_vehicle_at <= self.DEAD_AFTER_S)
 
     def offset(self, now):
-        """This link's best recent arrival-minus-send time, or None."""
-        recent = [o for t, o in self._offsets if now - t <= self.LAG_WINDOW_S]
-        return min(recent) if recent else None
+        """This link's usual recent arrival-minus-send time, or None."""
+        recent = sorted(o for t, o in self._offsets
+                        if now - t <= self.LAG_WINDOW_S)
+        return recent[len(recent) // 2] if recent else None
 
     def tick(self, now):
         """Once a second: loss and rate over the last few seconds."""

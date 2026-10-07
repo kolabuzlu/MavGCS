@@ -289,6 +289,31 @@ plane.channels.remove(D)
 D.close()
 
 print("")
+print("6e. the link in use gets slow: the quicker one takes over")
+# The user's test of 2026-10-07: the LTE modem forced onto 2G, the RFD
+# beside it, and MavGCS stayed on 2G. Here the link in use starts taking
+# 0.4 s longer than the other, with nothing lost on either.
+ch._wait, ch._last_voluntary = (multilink.LinkChooser.DWELL_S,
+                                float("-inf"))      # 6c's long wait, undone
+t_s = time.time()
+A.delay = 0.4
+note("moves to the quicker link",
+     wait_for(lambda: said("now using UDP %d" % pb, t_s), 10.0),
+     said("Link", t_s))
+note("and says by how much",
+     bool(said("quicker than UDP %d" % pa, t_s)), said("now using", t_s))
+A.delay = 0.0
+t_e = time.time()
+time.sleep(4.0)
+note("both as quick again: it stays where it is",
+     not said("now using", t_e), said("now using", t_e))
+t_c = time.time()
+link.choose_link("udpin:0.0.0.0:%d" % pa)       # back as before, for the rest
+wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_c), 3.0)
+link.choose_link("")
+wait_for(lambda: said("choosing automatically again", t_c), 3.0)
+
+print("")
 print("7. a link carrying a different aircraft")
 C = UdpChannel(pc, sysid=2)
 plane.channels.append(C)
