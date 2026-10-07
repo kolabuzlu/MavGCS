@@ -111,6 +111,15 @@ def _is_vehicle_heartbeat(msg):
             and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID)
 
 
+def _sentence(text):
+    """A reason ending in its own stop - so "unplugged?" is not followed
+    by a second one, as it was on the user's first real two-link test:
+    "the device went away - unplugged?. Reopening."
+    """
+    text = str(text).rstrip()
+    return text if text[-1:] in ".?!" else text + "."
+
+
 def _describe_link_error(error):
     """Why a link failed, in words rather than an error number.
 
@@ -1729,8 +1738,8 @@ class MavlinkLink(QThread):
             if link.open_failures == 1:
                 # Once: a link that will not open is retried quietly, and
                 # its state stays on the link line for as long as it fails.
-                self._link_event("Link: could not open %s - %s. Still trying."
-                                 % (link.label, link.error), 4)
+                self._link_event("Link: could not open %s - %s Still trying."
+                                 % (link.label, _sentence(link.error)), 4)
             return
         link.open_failures = 0
         link.error = None
@@ -1834,13 +1843,13 @@ class MavlinkLink(QThread):
                 conn.close()
             except Exception:
                 pass
-        self._link_event("Link: %s failed - %s. Reopening."
-                         % (link.label, link.error), 4)
+        self._link_event("Link: %s failed - %s Reopening."
+                         % (link.label, _sentence(link.error)), 4)
         if len(self._links) == 1:
             # The only link: nothing carries the aircraft now, and the big
             # indicator says so, as it always has for a broken link.
             self.connection_status.emit(
-                False, "Link error: %s. Reopening." % link.error)
+                False, "Link error: %s Reopening." % _sentence(link.error))
         if link is self._active_link:
             # Off it at once, if anything else is carrying the aircraft.
             self._choose_link(now)

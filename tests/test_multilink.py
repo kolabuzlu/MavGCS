@@ -516,6 +516,14 @@ for error, want in (
         " %d" % code if isinstance(code, int) else ""), want),
          got == want, got)
 
+from mavlink_link import _sentence
+note("a reason ending in a question is not given a second stop",
+     _sentence("the device went away - unplugged?")
+     == "the device went away - unplugged?"
+     and _sentence("nothing is listening there")
+     == "nothing is listening there.",
+     _sentence("the device went away - unplugged?"))
+
 print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")
 sys.exit(1 if fails else 0)
