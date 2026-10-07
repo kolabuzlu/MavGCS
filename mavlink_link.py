@@ -22,10 +22,13 @@ os.environ.setdefault("MAVLINK20", "1")
 
 import time
 import math
+import queue
 import re
 import threading
 from PySide6.QtCore import QThread, Signal
 from pymavlink import mavutil
+
+import multilink
 
 # Recent pymavlink versions dropped the "device:baud with no known prefix
 # means serial" fallback - mavlink_connection() now treats ANY string
@@ -106,6 +109,65 @@ def _is_vehicle_heartbeat(msg):
     """
     return (msg.type != mavutil.mavlink.MAV_TYPE_GCS
             and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID)
+
+
+def _describe_link_error(error):
+    """Why a link failed, in words rather than an error number.
+
+    The operating system's own text is in the operating system's own
+    language - Turkish, on the machine this was written for - and names
+    the socket call rather than what happened to the link. The common
+    cases get a plain phrase; anything else keeps its original text.
+    """
+    winerror = getattr(error, "winerror", None)
+    text = str(error)
+    if isinstance(error, ConnectionRefusedError) or winerror == 10061:
+        return "nothing is listening there"
+    if (isinstance(error, (ConnectionResetError, ConnectionAbortedError,
+                           BrokenPipeError))
+            or winerror in (10053, 10054) or text == "closed by the other end"):
+        return "closed by the other end"
+    if isinstance(error, TimeoutError) or winerror == 10060:
+        return "no answer"
+    if winerror == 10048 or "address already in use" in text.lower():
+        return "that port is already in use by another program"
+    lowered = text.lower()
+    # pyserial's messages, matched on the Python class names inside them,
+    # which are the same in every language. First: a radio pulled out
+    # mid-read reports ClearCommError wrapping a PermissionError, and must
+    # not be taken for a port another program holds.
+    if "clearcommerror" in lowered:
+        return "the device went away - unplugged?"
+    if "filenotfounderror" in lowered:
+        return "no such port - is the radio plugged in?"
+    if "permissionerror" in lowered:
+        return "the port is in use by another program"
+    return text
+
+
+class _Link:
+    """One of several connections to the same aircraft. See add_link.
+
+    Owned by the link thread: created, opened, read and judged there, so
+    nothing about it needs a lock beyond the hand-overs in add_link and
+    the opening thread.
+    """
+
+    def __init__(self, connection_string, order):
+        self.connection_string = connection_string
+        self.label = multilink.link_label(connection_string)
+        self.order = order
+        self.conn = None                # the pymavlink connection, once open
+        self.health = multilink.LinkHealth()
+        self.opening = False
+        self.next_open_at = 0.0
+        self.open_failures = 0
+        self.error = None               # why it last failed, for the tooltip
+        self.ever_up = False            # has heard the aircraft at least once
+        self.was_alive = False          # so each change is reported once
+        self.foreign = None             # another aircraft's id, if that is all
+        self.foreign_reported = False
+        self.rates_at = float("-inf")   # when its stream rates were last set
 
 
 # How long a mission upload may go without progress before it is abandoned.
@@ -377,7 +439,27 @@ class MavlinkLink(QThread):
         # mav.xxx_send() ends up doing a single socket write, but it's
         # called both from this thread's heartbeat loop and from the GUI
         # thread (fly_to, send_arm) - a lock keeps those from interleaving.
-        self._send_lock = threading.Lock()
+        # Re-entrant because of _on_link: with several links, sending down
+        # one in particular means pointing self.master at it for the length
+        # of a call that takes this lock itself, and nothing else may send
+        # while it is pointed there.
+        self._send_lock = threading.RLock()
+        # Several links to the one aircraft - see add_link. Nothing here is
+        # used until a second link is asked for: with one link the thread
+        # reads self.master directly, exactly as it always has.
+        self._multi = False
+        self._links = []                # _Link, in the order added
+        self._active_link = None
+        self._vehicle = (0, 0)          # the aircraft's system and component
+        self._rx = queue.Queue()        # (link, connection, frame, error)
+        self._link_lock = threading.Lock()
+        self._add_requests = []         # from the GUI thread
+        self._remove_requests = []      # likewise
+        self._opened = []               # from the opening threads
+        self._chooser = multilink.LinkChooser()
+        self._links_eval_at = 0.0
+        self._links_hb_at = 0.0
+        self._link_bytes_last = None    # (connection, time, rx, tx)
         # State for values MAVLink doesn't hand us directly - we compute
         # these ourselves from other messages (see run()).
         self._attitude_hz = attitude_hz
@@ -416,8 +498,7 @@ class MavlinkLink(QThread):
         # not come back is asked for again - see _retry_missing_params.
         # Our own sequence accounting; see _count_sequence for why
         # pymavlink's cannot be used over UDP.
-        self._seq_last = {}
-        self._seq_lost = 0
+        self._seq = multilink.SequenceCounter()
         self._param_retry_next = 0.0
         self._param_retries = 0
         self._param_progress = None
@@ -497,9 +578,15 @@ class MavlinkLink(QThread):
             # pulled out from under this thread while it was still reading,
             # since stop() only waited a couple of seconds before giving up.
             master, self.master = self.master, None
-            if master is not None:
+            # Every link this thread opened, not only the one in use - and
+            # each just once, since the one in use is in the list as well.
+            closed = set()
+            for conn in [master] + [link.conn for link in self._links]:
+                if conn is None or id(conn) in closed:
+                    continue
+                closed.add(id(conn))
                 try:
-                    master.close()
+                    conn.close()
                 except Exception:
                     pass
 
@@ -523,6 +610,9 @@ class MavlinkLink(QThread):
                 self.master = _open_mavlink_connection(self.connection_string)
             finally:
                 self._connecting = False
+            # A TCP link closed from the far end must fail rather than go
+            # quiet - see _fail_on_eof. Nothing changes for any other kind.
+            self._fail_on_eof(self.master)
 
             # Announce ourselves BEFORE the first read. On an outgoing UDP
             # connection ("udpout:") pymavlink never binds the socket, and
@@ -628,6 +718,11 @@ class MavlinkLink(QThread):
                 except Exception:
                     pass
                 last_heartbeat_sent = now
+
+            # Several links: links asked for, links opened, heartbeats on
+            # the ones not in use, and which one should be. Returns at once
+            # while there is only the one link.
+            self._links_tick(now)
 
             # Chase up the parameter reads the balance check depends on.
             # Only while it is switched on, only until they arrive, and
@@ -757,27 +852,38 @@ class MavlinkLink(QThread):
                 except Exception as e:
                     self.command_feedback.emit(f"Failed to clear mission: {e}")
 
-            try:
-                msg = self.master.recv_match(blocking=True, timeout=1)
-            except OSError as e:
-                # WSAECONNRESET (10054) is routine on Windows UDP, not a
-                # broken link: sending to a peer that isn't listening yet
-                # bounces an ICMP "port unreachable" back, and the next read
-                # reports it. With "UDP (connect to)" against a bridge that
-                # hasn't booted, surfacing it would flood the status line
-                # with alarming errors while we wait perfectly normally.
-                if getattr(e, "winerror", None) == 10054:
+            if self._multi:
+                # Every link is read by its own thread into one queue;
+                # this hands back only what the link in use carried.
+                msg = self._receive_multi()
+            else:
+                try:
+                    msg = self.master.recv_match(blocking=True, timeout=1)
+                except OSError as e:
+                    # WSAECONNRESET (10054) is routine on Windows UDP, not a
+                    # broken link: sending to a peer that isn't listening yet
+                    # bounces an ICMP "port unreachable" back, and the next read
+                    # reports it. With "UDP (connect to)" against a bridge that
+                    # hasn't booted, surfacing it would flood the status line
+                    # with alarming errors while we wait perfectly normally.
+                    # UDP only: on TCP the same number is a real reset, and
+                    # skipping it re-read the dead socket in a tight loop.
+                    if (getattr(e, "winerror", None) == 10054
+                            and isinstance(self.master, mavutil.mavudp)):
+                        continue
+                    self._single_link_failed(e)
                     continue
-                self.connection_status.emit(False, f"Link error: {e}")
-                continue
-            except Exception as e:
-                self.connection_status.emit(False, f"Link error: {e}")
-                continue
+                except Exception as e:
+                    self._single_link_failed(e)
+                    continue
 
             if msg is None:
                 continue
 
-            self._count_sequence(msg)
+            # With several links each one keeps its own count; this one
+            # would see every switch as a gap the size of a sequence.
+            if not self._multi:
+                self._count_sequence(msg)
             mtype = msg.get_type()
 
             if mtype == "FILE_TRANSFER_PROTOCOL":
@@ -1388,6 +1494,511 @@ class MavlinkLink(QThread):
         self._full_telemetry = full_telemetry
         self.apply_stream_rates()
 
+    # ------------------------------------------------------------------
+    # Several links to the one aircraft.
+    #
+    # MAVProxy's "link add": an RFD on a serial port and an LTE bridge on
+    # a socket, say, both open at once, and the ground station using
+    # whichever is working. The first link is opened by Connect as it
+    # always was; add_link opens more. Every link is read, but only the
+    # one in use is acted on - the others are watched, for whether they
+    # carry the aircraft, how much they lose and how late they run - and
+    # every command goes out on the one in use, because that is what
+    # self.master is. MAVProxy instead takes frames from all of them and
+    # drops the duplicates; here a message from the aircraft is seen
+    # once, and a mission, a fence or a parameter transfer is one
+    # conversation on one link, never two half-conversations.
+
+    LINK_REOPEN_S = 2.0
+    LINK_REOPEN_MAX_S = 10.0
+    LINK_EVAL_EVERY_S = 0.25
+    LINK_RATES_AGAIN_S = 30.0
+
+    def add_link(self, connection_string):
+        """Open one more link to the aircraft already connected. GUI thread.
+
+        Only queued here. Opening can block for many seconds - a TCP
+        connect to an address that does not answer - and everything else
+        about links is decided on the link thread, so the only things
+        shared with this thread are these lists and the opened list.
+        """
+        with self._link_lock:
+            self._add_requests.append(connection_string)
+
+    def remove_link(self, connection_string):
+        """Close one of several links for good. GUI thread; queued, as
+        add_link is. See _end_link for what is refused."""
+        with self._link_lock:
+            self._remove_requests.append(connection_string)
+
+    def _links_tick(self, now):
+        """Everything about several links except a frame arriving."""
+        if not (self._multi or self._add_requests or self._opened
+                or self._remove_requests):
+            return
+        with self._link_lock:
+            requests, self._add_requests = self._add_requests, []
+            removals, self._remove_requests = self._remove_requests, []
+            opened, self._opened = self._opened, []
+        for connection_string in requests:
+            self._begin_link(connection_string, now)
+        for link, conn, error in opened:
+            self._link_opened(link, conn, error, now)
+        for connection_string in removals:
+            self._end_link(connection_string, now)
+        if not self._multi:
+            return
+        if now - self._links_hb_at >= 1.0:
+            # The loop's own heartbeat goes out on the link in use; the
+            # rest need theirs too. The aircraft's GCS failsafe hears a
+            # ground station on ANY link, so the link in use dying does
+            # not trip it while another is alive - and a WiFi or LTE
+            # bridge sends nothing until it has heard from us.
+            self._links_hb_at = now
+            for link in self._links:
+                if link is self._active_link or link.conn is None:
+                    continue
+                try:
+                    with self._send_lock:
+                        link.conn.mav.heartbeat_send(
+                            mavutil.mavlink.MAV_TYPE_GCS,
+                            mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+                except Exception:
+                    pass
+        for link in self._links:
+            if (link.conn is None and not link.opening
+                    and now >= link.next_open_at):
+                self._open_link(link)
+        if now >= self._links_eval_at:
+            self._links_eval_at = now + self.LINK_EVAL_EVERY_S
+            self._note_link_changes(now)
+            self._choose_link(now)
+
+    def _begin_link(self, connection_string, now):
+        """A link asked for: refuse a duplicate, else start opening it."""
+        wanted = connection_string.strip().lower()
+        have = ([l.connection_string for l in self._links]
+                or [self.connection_string])
+        label = multilink.link_label(connection_string)
+        if wanted in (c.strip().lower() for c in have):
+            self._link_event("Link: %s is already connected" % label, 6)
+            return
+        if not self._multi:
+            self._start_multi(now)
+        link = _Link(connection_string, len(self._links))
+        self._links.append(link)
+        self._link_event("Link: adding %s" % link.label, 6)
+        self._open_link(link)
+
+    def _start_multi(self, now, read=True):
+        """The one link becomes one of several - or, broken, one that is
+        reopened (see _single_link_failed), for which read is False."""
+        first = _Link(self.connection_string, 0)
+        first.conn = self.master
+        first.ever_up = first.was_alive = True
+        first.rates_at = now
+        first.health.last_vehicle_at = first.health.alive_since = now
+        self._vehicle = (self.master.target_system,
+                         self.master.target_component)
+        self._links = [first]
+        self._active_link = first
+        self._fail_on_eof(first.conn)
+        if read:
+            self._read_link(first)
+        self._multi = True
+
+    def _single_link_failed(self, error):
+        """The one link broke: close it and open it again.
+
+        It used to be read again at once, broken, in a tight loop for as
+        long as the program ran - a TCP link whose far end had restarted
+        pinned a processor core, printed pymavlink's complaint over a
+        million times in ten seconds, and never carried another frame
+        though the far end was listening again. Measured on V2.3.3.
+
+        The machinery for several links already closes, reports and
+        reopens a broken link, so the one link is handed to it. With one
+        link it keeps the single link's own way of saying so: DISCONNECTED
+        when it breaks, as before, and CONNECTED when it is back.
+        """
+        now = time.time()
+        self._start_multi(now, read=False)
+        self._link_broke(self._links[0], error, now)
+
+    def _open_link(self, link):
+        """Open a link on a thread of its own, and hand it back when done."""
+        link.opening = True
+
+        def work():
+            conn, error = None, None
+            try:
+                conn = _open_mavlink_connection(link.connection_string)
+                # Before anything is read, as on the first link: an
+                # outgoing UDP socket is unbound until it sends, and a
+                # bridge streams nothing until it hears from us.
+                try:
+                    conn.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+                except Exception:
+                    pass
+            except Exception as e:
+                error = e
+            if not self._running:
+                # Closed while this was opening: nobody will adopt it.
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                return
+            with self._link_lock:
+                self._opened.append((link, conn, error))
+
+        threading.Thread(target=work, daemon=True,
+                         name="MavGCS link open").start()
+
+    def _end_link(self, connection_string, now):
+        """Close one link and forget it - refused if nothing else would be
+        left carrying the aircraft, which is what Disconnect is for."""
+        wanted = connection_string.strip().lower()
+        link = next((l for l in self._links
+                     if l.connection_string.strip().lower() == wanted), None)
+        if link is None:
+            return
+        if len(self._links) == 1:
+            self._link_event("Link: %s is the only link - Disconnect closes it"
+                             % link.label, 6)
+            return
+        if link is self._active_link:
+            others = [l for l in self._links if l is not link
+                      and l.conn is not None and l.health.alive(now)]
+            if not others:
+                self._link_event(
+                    "Link: %s is the only one carrying the aircraft - "
+                    "not removed" % link.label, 4)
+                return
+            new = min(others, key=lambda l: (l.health.loss_pct, l.order))
+            with self._send_lock:
+                self._active_link = new
+                self.master = new.conn
+            self._link_event("Link: now using %s - %s removed"
+                             % (new.label, link.label), 6)
+        self._links.remove(link)
+        conn, link.conn = link.conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._link_event("Link: %s removed" % link.label, 6)
+
+    def _link_opened(self, link, conn, error, now):
+        """An opening thread has finished, one way or the other."""
+        if link not in self._links:
+            # Removed while it was opening.
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            return
+        link.opening = False
+        if error is not None or conn is None:
+            link.open_failures += 1
+            link.error = _describe_link_error(error)
+            link.next_open_at = now + min(
+                self.LINK_REOPEN_MAX_S, self.LINK_REOPEN_S * link.open_failures)
+            if link.open_failures == 1:
+                # Once: a link that will not open is retried quietly, and
+                # its state stays on the link line for as long as it fails.
+                self._link_event("Link: could not open %s - %s. Still trying."
+                                 % (link.label, link.error), 4)
+            return
+        link.open_failures = 0
+        link.error = None
+        conn.target_system, conn.target_component = self._vehicle
+        self._fail_on_eof(conn)
+        link.conn = conn
+        if link is self._active_link:
+            # The link in use, opened again after it broke.
+            with self._send_lock:
+                self.master = conn
+        self._read_link(link)
+
+    @staticmethod
+    def _fail_on_eof(conn):
+        """Make a TCP link closed from the far end fail, not go quiet.
+
+        pymavlink's answer to a closed TCP socket is to print "EOF on TCP
+        socket" and carry on returning nothing, at full speed, for ever:
+        the link looks merely silent and is never opened again. Raising
+        instead sends it down the same road as any broken link - closed,
+        reported, and reopened - which is what an LTE bridge restarting
+        its server needs.
+        """
+        if isinstance(conn, mavutil.mavtcp):
+            def eof():
+                raise ConnectionError("closed by the other end")
+            conn.handle_eof = eof
+            # A reset already raises; pymavlink only adds a line printed
+            # to the console first. The failure is reported where it is
+            # read, so that line is just noise in the log.
+            conn.handle_disconnect = lambda: None
+
+    def _read_link(self, link):
+        """Start the thread that reads one link into the shared queue."""
+        conn = link.conn
+
+        def read():
+            while self._running and link.conn is conn:
+                try:
+                    msg = conn.recv_match(blocking=True, timeout=0.5)
+                except OSError as e:
+                    # As on the single link: an ICMP echo of a UDP send to
+                    # a bridge not yet listening, not a broken link. On UDP
+                    # only. Windows reports a TCP connection reset with the
+                    # same number, and there it IS a broken link: skipping
+                    # it re-read the dead socket in a tight loop for ever -
+                    # over a million times in the test that found it.
+                    if (getattr(e, "winerror", None) == 10054
+                            and isinstance(conn, mavutil.mavudp)):
+                        continue
+                    self._rx.put((link, conn, None, e))
+                    return
+                except Exception as e:
+                    self._rx.put((link, conn, None, e))
+                    return
+                if msg is not None:
+                    self._rx.put((link, conn, msg, None))
+
+        threading.Thread(target=read, daemon=True,
+                         name="MavGCS link read").start()
+
+    def _receive_multi(self):
+        """The next frame to act on: from the link in use, or None."""
+        try:
+            link, conn, msg, error = self._rx.get(timeout=0.25)
+        except queue.Empty:
+            return None
+        if conn is not link.conn:
+            return None                 # from a connection since replaced
+        now = time.time()
+        if error is not None:
+            self._link_broke(link, error, now)
+            return None
+        mtype = msg.get_type()
+        if mtype == "BAD_DATA":
+            return msg if link is self._active_link else None
+        sysid, compid = msg.get_srcSystem(), msg.get_srcComponent()
+        if (mtype == "HEARTBEAT" and _is_vehicle_heartbeat(msg)
+                and sysid != self._vehicle[0]):
+            link.foreign = sysid
+        link.health.on_frame(
+            now, (sysid, compid), msg.get_seq(), sysid == self._vehicle[0],
+            msg.time_boot_ms if mtype == "ATTITUDE" else None)
+        if mtype == "FILE_TRANSFER_PROTOCOL":
+            # A parameter transfer is a conversation with one link - the
+            # one it started on, which is where the aircraft answers.
+            ftp = self._ftp
+            return (msg if ftp is not None
+                    and getattr(ftp, "master", None) is conn else None)
+        return msg if link is self._active_link else None
+
+    def _link_broke(self, link, error, now):
+        """A link's connection failed: close it, and open it again later."""
+        conn, link.conn = link.conn, None
+        link.error = _describe_link_error(error)
+        link.next_open_at = now + self.LINK_REOPEN_S
+        # Said here, so not said again as "lost" by _note_link_changes.
+        link.was_alive = False
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._link_event("Link: %s failed - %s. Reopening."
+                         % (link.label, link.error), 4)
+        if len(self._links) == 1:
+            # The only link: nothing carries the aircraft now, and the big
+            # indicator says so, as it always has for a broken link.
+            self.connection_status.emit(
+                False, "Link error: %s. Reopening." % link.error)
+        if link is self._active_link:
+            # Off it at once, if anything else is carrying the aircraft.
+            self._choose_link(now)
+
+    def _note_link_changes(self, now):
+        """Say when a link comes up, drops, or carries another aircraft."""
+        for link in self._links:
+            alive = link.conn is not None and link.health.alive(now)
+            if alive and not link.was_alive:
+                if not link.ever_up:
+                    link.ever_up = True
+                    self._link_event("Link: %s is up - same aircraft, ready"
+                                     % link.label, 6)
+                else:
+                    self._link_event("Link: %s is back" % link.label, 6)
+                    if len(self._links) == 1:
+                        # The only link, broken and now reopened: the
+                        # indicator goes back to CONNECTED by itself.
+                        self.connection_status.emit(
+                            True, "Connected (sysid=%d, compid=%d)"
+                            % self._vehicle)
+                if now - link.rates_at >= self.LINK_RATES_AGAIN_S:
+                    # Its own rates, as every link needs - and again after
+                    # a long silence, in case the aircraft restarted.
+                    link.rates_at = now
+                    self._on_link(link, self._apply_stream_rates_here)
+            elif link.was_alive and not alive:
+                # The link in use going quiet with another to move to is
+                # said once, by the move itself: "now using X - Y went
+                # quiet". Said here too, it was two lines for one event.
+                # "Another to move to" is the chooser's own test - heard
+                # from within the last second - or with both links failing
+                # together neither loss was ever said: this one waited for
+                # a move that the chooser, rightly, never made.
+                fresh = multilink.LinkChooser.FRESH_S
+                moving = link is self._active_link and any(
+                    other is not link and other.conn is not None
+                    and other.health.alive(now)
+                    and now - other.health.last_vehicle_at <= fresh
+                    for other in self._links)
+                if not moving:
+                    self._link_event("Link: %s lost" % link.label, 4)
+            link.was_alive = alive
+            if (link.foreign is not None and not link.ever_up
+                    and not link.foreign_reported):
+                link.foreign_reported = True
+                self._link_event(
+                    "Link: %s carries a different aircraft (system %d) - "
+                    "not used" % (link.label, link.foreign), 3)
+
+    def _link_busy(self):
+        """Half-way through a conversation with the aircraft on one link."""
+        return (self._mission_state is not None or self._ftp is not None
+                or self._param_active or bool(self._param_writes)
+                or self._fence_enable_pending is not None
+                or self._fence_confirm_deadline is not None)
+
+    def _choose_link(self, now):
+        """Ask the chooser whether to move, and move if it says so."""
+        open_links = [l for l in self._links if l.conn is not None]
+        lag = multilink.lags(now, {id(l): l.health for l in open_links})
+        views = [multilink.LinkView(
+                    id(l), l.conn is not None and l.health.alive(now),
+                    l.health.alive_since, l.health.loss_pct,
+                    lag.get(id(l), 0.0), l.order,
+                    None if l.health.last_vehicle_at is None
+                    else now - l.health.last_vehicle_at)
+                 for l in self._links]
+        key, why = self._chooser.decide(now, views, id(self._active_link),
+                                        busy=self._link_busy())
+        if key is None or key == id(self._active_link):
+            return
+        new = next(l for l in self._links if id(l) == key)
+        old = self._active_link
+        with self._send_lock:
+            self._active_link = new
+            self.master = new.conn
+        if why == "silent":
+            reason = "%s went quiet" % old.label
+        elif why == "loss":
+            reason = "%s was losing %.0f%% of what the aircraft sent" % (
+                old.label, old.health.loss_pct)
+        else:
+            # "now using A - A is 0.9 s quicker" named the same link twice
+            # and left out the one it was quicker than.
+            reason = "%.1f s quicker than %s" % (
+                lag.get(id(old), 0.0) - lag.get(id(new), 0.0), old.label)
+        self._link_event("Link: now using %s - %s" % (new.label, reason),
+                         4 if why == "silent" else 6)
+
+    def _on_link(self, link, fn):
+        """Run fn with every send going out on this link, then put it back.
+
+        Holds the send lock throughout, so nothing else can send while
+        self.master points somewhere other than the link in use.
+        """
+        if link.conn is None:
+            return
+        with self._send_lock:
+            active = self.master
+            self.master = link.conn
+            try:
+                fn()
+            except Exception:
+                pass
+            finally:
+                self.master = active
+
+    def _link_event(self, text, severity=6):
+        """A link change: on the feedback line now, and in the message log.
+
+        And on the link line at once, rather than at its next second: in
+        the rehearsal a screenshot taken 0.8 s after a move still showed
+        the old link marked in use.
+        """
+        self.command_feedback.emit(text)
+        self.status_text_update.emit(text, severity)
+        self._stats_at = None
+
+    def _emit_links_stats(self, now):
+        """The link line's figures, one entry per link."""
+        self._stats_at = now
+        open_links = [l for l in self._links if l.conn is not None]
+        lag = multilink.lags(now, {id(l): l.health for l in open_links})
+        out = []
+        for link in self._links:
+            link.health.tick(now)
+            alive = link.conn is not None and link.health.alive(now)
+            if link.conn is None and not link.ever_up:
+                state = "failed"
+            elif not link.ever_up:
+                state = "other" if link.foreign is not None else "waiting"
+            elif not alive:
+                state = "lost"
+            elif link is self._active_link:
+                state = "active"
+            else:
+                state = "standby"
+            out.append({"label": link.label,
+                        "connection": link.connection_string,
+                        "state": state,
+                        "rx_mps": link.health.rx_mps,
+                        "loss_pct": link.health.loss_pct,
+                        "lag_s": lag.get(id(link), 0.0),
+                        "error": link.error})
+        # Bytes each way on the link in use, for the line as one link
+        # draws it - which is how a single link reopened by this
+        # machinery is still shown. pymavlink counts them per connection,
+        # so a reopened connection starts again from zero and is only a
+        # baseline the first time.
+        active = self._active_link
+        rx_bps = tx_bps = 0.0
+        totals = None
+        if active is not None and active.conn is not None:
+            try:
+                mav = active.conn.mav
+                totals = (int(mav.total_bytes_received),
+                          int(mav.total_bytes_sent))
+            except Exception:
+                totals = None
+        last = self._link_bytes_last
+        if (totals is not None and last is not None
+                and last[0] is active.conn and now > last[1]):
+            span = now - last[1]
+            rx_bps = max(0, totals[0] - last[2]) / span
+            tx_bps = max(0, totals[1] - last[3]) / span
+        self._link_bytes_last = ((active.conn, now) + totals
+                                 if totals is not None else None)
+        self.link_stats_update.emit({
+            "rx_bps": rx_bps, "tx_bps": tx_bps,
+            "rx_mps": active.health.rx_mps if active else 0.0,
+            "loss_pct": active.health.loss_pct if active else 0.0,
+            "links": out,
+        })
+
     def apply_stream_rates(self):
         """Tell the vehicle what to send us.
 
@@ -1404,6 +2015,18 @@ class MavlinkLink(QThread):
         exactly as it did before, so a firmware that does not support
         SET_MESSAGE_INTERVAL loses nothing.
         """
+        if self._multi:
+            # Per link, as above: every output port on the aircraft keeps
+            # its own rates. A backup link left alone would carry the
+            # vehicle's default stream, and a switch onto it would land on
+            # something quite unlike the link it replaced.
+            for link in list(self._links):
+                self._on_link(link, self._apply_stream_rates_here)
+            return
+        self._apply_stream_rates_here()
+
+    def _apply_stream_rates_here(self):
+        """apply_stream_rates, on whichever link self.master is."""
         if self.master is None:
             return
 
@@ -1631,18 +2254,12 @@ class MavlinkLink(QThread):
     # How many times to send one parameter before giving up on it.
     PARAM_WRITE_TRIES = 3
 
-    # A backwards step larger than this is read as a frame arriving out
-    # of order, not as that many losses. Losing more than half the
-    # sequence space between two received frames is far less likely than
-    # two frames having swapped places, which UDP does routinely.
-    SEQ_REORDER_LIMIT = 128
-    # A telemetry radio injects RADIO_STATUS under a fixed identity -
-    # ord('3'), ord('D') - and both ends of the link can emit under it
-    # with sequence counters of their own. Counting those interleaved
-    # streams as one sender reports losses that never happened, which is
-    # why pymavlink excludes the same tuple. Nothing is learned from the
-    # sequence of a radio's own status messages anyway.
-    SEQ_RADIO_TUPLE = (ord("3"), ord("D"))
+    # The counting rules - and the reasons for them - live with the
+    # counter itself, multilink.SequenceCounter, which the single link and
+    # each of several links all use. Named here as well for anything that
+    # still looks for them on this class.
+    SEQ_REORDER_LIMIT = multilink.SequenceCounter.REORDER_LIMIT
+    SEQ_RADIO_TUPLE = multilink.SequenceCounter.RADIO
 
     # A stall really does mean stalled. PARAM_REQUEST_LIST restarts the
     # vehicle's streaming from the beginning, so a chase round started too
@@ -2151,6 +2768,15 @@ class MavlinkLink(QThread):
 
     def _restore_default_rates(self):
         """Put every message we touched back to the vehicle's own rate."""
+        if self._multi:
+            # On every link: each one's rates were set separately.
+            for link in list(self._links):
+                self._on_link(link, self._restore_default_rates_here)
+            return
+        self._restore_default_rates_here()
+
+    def _restore_default_rates_here(self):
+        """_restore_default_rates, on whichever link self.master is."""
         if self.master is None or self._full_telemetry:
             return          # full telemetry never changed anything
         names = list(self.SUPPORTING_RATES) + list(self.DISABLED_MESSAGES) + [
@@ -2227,30 +2853,20 @@ class MavlinkLink(QThread):
 
         Sequence numbers belong to the sender, so they are counted per
         (system, component): two sources interleaving are not losses.
+
+        The rules themselves are multilink.SequenceCounter's, shared with
+        every one of several links. Out of order or duplicated, a frame
+        takes back the loss it was counted as when its successor came
+        first; heard again after a silence, a sender is resumed rather
+        than read as a long run of late frames - which once took back
+        every loss counted before an outage.
         """
         try:
             key = (msg.get_srcSystem(), msg.get_srcComponent())
             seq = msg.get_seq()
         except Exception:
             return
-        if key == self.SEQ_RADIO_TUPLE:
-            return                      # the radio's own chatter
-        last = self._seq_last.get(key)
-        if last is None:
-            self._seq_last[key] = seq
-            return                      # first frame from this sender
-        gap = (seq - last - 1) % 256
-        if gap > self.SEQ_REORDER_LIMIT:
-            # Arrived out of order, or a duplicate. Its successor came
-            # first and this frame was counted missing then, so take that
-            # back - and leave the mark at the highest sequence seen,
-            # otherwise the frames after it are counted missing too and
-            # one swap costs two.
-            if self._seq_lost > 0:
-                self._seq_lost -= 1
-            return
-        self._seq_last[key] = seq
-        self._seq_lost += gap
+        self._seq.count(key, seq, time.time())
 
     def _emit_link_stats(self, now):
         """What the radio is actually carrying, once a second.
@@ -2266,13 +2882,16 @@ class MavlinkLink(QThread):
         connection opened. A cumulative figure barely moves once a flight
         has been going a while, which is exactly when it would matter.
         """
+        if self._multi:
+            self._emit_links_stats(now)
+            return
         if self.master is None:
             return
         try:
             mav = self.master.mav
             totals = (int(mav.total_bytes_received), int(mav.total_bytes_sent),
                       int(mav.total_packets_received), int(mav.total_packets_sent),
-                      int(self._seq_lost),
+                      int(self._seq.lost),
                       int(mav.total_receive_errors))
         except Exception:
             return
@@ -2376,9 +2995,36 @@ class MavlinkLink(QThread):
             from pymavlink.mavftp import MAVFTP
         except Exception:
             return False                # no FTP support in this pymavlink
+
+        class _QuietMAVFTP(MAVFTP):
+            """MAVFTP that never reads the link itself.
+
+            The note above was right about the transfer and missed two
+            places: the constructor resets the aircraft's FTP sessions
+            and then waits for the answer, and every finished transfer
+            ends its session the same way - each through
+            process_ftp_reply, which loops on recv_match(type=FTP) for up
+            to five seconds. recv_match with a type takes frames off the
+            link and throws away every one that is not FTP: attitude,
+            position, heartbeats. And the constructor runs on the GUI
+            thread, so pressing PARAMS also froze the window while it
+            read a link the receive thread was reading too. With several
+            links it made a healthy link look dead - its frames were
+            being eaten - and the ground station moved off it.
+
+            Nothing is lost by not waiting: those two answers matter to
+            nobody, the aircraft acts on the requests in the order they
+            arrive, and every FTP frame still reaches the transfer
+            through _feed_param_ftp.
+            """
+
+            def process_ftp_reply(self, operation_name, timeout=5):
+                from pymavlink.mavftp import FtpError, MAVFTPReturn
+                return MAVFTPReturn(operation_name, FtpError.Success)
+
         try:
-            ftp = MAVFTP(self.master, self.master.target_system,
-                         self.master.target_component)
+            ftp = _QuietMAVFTP(self.master, self.master.target_system,
+                               self.master.target_component)
             # The incremental entry points are private to the class. They
             # are what MAVProxy drives it by, and the alternative is
             # letting it own the link.
