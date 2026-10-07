@@ -1926,8 +1926,14 @@ class MavlinkLink(QThread):
             self.connection_status.emit(
                 False, "Link error: %s Reopening." % _sentence(link.error))
         if link is self._active_link:
-            # Off it at once, if anything else is carrying the aircraft.
-            self._choose_link(now)
+            # Off it at once, if anything else is carrying the aircraft -
+            # by the rules for a link chosen by hand, if one was: by the
+            # automatic ones, a chosen link that failed was left without
+            # a word about coming back to it.
+            if self._chosen is not None:
+                self._follow_choice(now)
+            else:
+                self._choose_link(now)
 
     def _note_link_changes(self, now):
         """Say when a link comes up, drops, or carries another aircraft."""
@@ -2021,7 +2027,9 @@ class MavlinkLink(QThread):
         new = next(l for l in self._links if id(l) == key)
         old = self._active_link
         if why == "silent":
-            reason = "%s went quiet" % old.label
+            # Unplugged or closed is not quiet: said as it is.
+            reason = "%s %s" % (old.label, "failed" if old.conn is None
+                                else "went quiet")
         elif why in ("loss", "lossy"):
             reason = "%s was losing %.0f%% of what the aircraft sent" % (
                 old.label, old.health.loss_pct)
@@ -2095,21 +2103,29 @@ class MavlinkLink(QThread):
         if chosen is None:
             self._chosen = None
             return
-        h = chosen.health
-        if chosen.conn is not None and h.alive(now):
+        active = self._active_link
+
+        def working(link):
+            return (link is not None and link.conn is not None
+                    and link.health.alive(now))
+
+        if working(chosen):
+            if active is chosen:
+                return
+            h = chosen.health
             # One that keeps dropping out is taken back only once it is
             # steady again: otherwise every few seconds of it working
-            # dragged the ground station back, for the next drop to
-            # drag it away.
-            if (self._active_link is not chosen
-                    and now - h.alive_since >= self.CHOSEN_SETTLE_S
-                    and not chosen.drop_outs.unsteady):
+            # dragged the ground station back, for the next drop to drag
+            # it away. But at once if the link standing in for it has
+            # stopped too - a chosen link just back beats one not working
+            # at all, which is where it used to stay until the wait ran out.
+            if (not working(active)
+                    or (now - h.alive_since >= self.CHOSEN_SETTLE_S
+                        and not chosen.drop_outs.unsteady)):
                 self._use_link(chosen, "Link: back on %s - chosen by hand"
                                % chosen.label, 6)
             return
-        active = self._active_link
-        if active is not chosen and active is not None and (
-                active.conn is not None and active.health.alive(now)):
+        if active is not chosen and working(active):
             return                      # already standing in for it
         fresh = [l for l in self._links if l is not chosen
                  and l.conn is not None and l.health.alive(now)
@@ -2121,8 +2137,10 @@ class MavlinkLink(QThread):
         when = ("once it has worked for %.0f s" % multilink.DropOuts.STEADY_S
                 if chosen.drop_outs.unsteady else "when it returns")
         self._use_link(stand_in, "Link: now using %s - %s, chosen by hand, "
-                       "went quiet; back to it %s"
-                       % (stand_in.label, chosen.label, when), 4)
+                       "%s; back to it %s"
+                       % (stand_in.label, chosen.label,
+                          "failed" if chosen.conn is None else "went quiet",
+                          when), 4)
 
     def _on_link(self, link, fn):
         """Run fn with every send going out on this link, then put it back.
@@ -2193,9 +2211,12 @@ class MavlinkLink(QThread):
         for link in self._links:
             link.health.tick(now)
             alive = link.conn is not None and link.health.alive(now)
-            if link.conn is None and not link.ever_up:
+            if link.conn is None and not link.ever_up and link.error:
                 state = "failed"
             elif not link.ever_up:
+                # Still being opened counts as waiting: called "failed"
+                # until its port opened, a radio just added read as
+                # broken for its first second.
                 state = "other" if link.foreign is not None else "waiting"
             elif not alive:
                 state = "lost"

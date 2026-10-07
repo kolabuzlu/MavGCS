@@ -104,6 +104,7 @@ note("one link: nothing about several links is running",
 print("")
 print("2. adding a second link")
 t_add = time.time()
+n_add = len(stats)
 link.add_link("udpin:0.0.0.0:%d" % pb)
 note("the second link comes up as the same aircraft",
      wait_for(lambda: said("UDP %d is up - same aircraft" % pb, t_add), 6.0),
@@ -111,6 +112,18 @@ note("the second link comes up as the same aircraft",
 note("the line shows the first in use and the second ready",
      wait_for(lambda: last_states() == ["active", "standby"], 3.0),
      last_states())
+
+
+def states_of(label, since):
+    return [l["state"] for d in stats[since:] for l in d.get("links", [])
+            if l["label"] == label]
+
+
+# The user's log of 2026-10-07 had COM36 "failed" for its first second,
+# while its port was still being opened.
+note("while it was being opened it read as waiting, never as failed",
+     "failed" not in states_of("UDP %d" % pb, n_add),
+     sorted(set(states_of("UDP %d" % pb, n_add))))
 note("the new link was given its own telemetry rates",
      wait_for(lambda: ("COMMAND_LONG", M.MAV_CMD_SET_MESSAGE_INTERVAL) in B.got,
               2.0))
@@ -192,6 +205,24 @@ B.silent = False
 note("and returned to when it works again",
      wait_for(lambda: said("back on UDP %d - chosen by hand" % pb, t_q), 8.0),
      said("Link", t_q))
+# The link standing in stops while the chosen one is only just back: back
+# to the chosen one at once. It used to wait out the chosen link's settling
+# time first - on a link that was not working at all.
+MavlinkLink.CHOSEN_SETTLE_S = 5.0
+t_q2 = time.time()
+B.silent = True
+wait_for(lambda: said("now using UDP %d - UDP %d, chosen by hand, went quiet"
+                      % (pa, pb), t_q2), 4.0)
+B.silent = False
+wait_for(lambda: said("UDP %d is back" % pb, t_q2), 3.0)
+t_s2 = time.time()
+A.silent = True
+note("the link standing in stops too: straight back to the chosen one",
+     wait_for(lambda: said("back on UDP %d - chosen by hand" % pb, t_s2), 2.5),
+     said("Link", t_q2))
+A.silent = False
+MavlinkLink.CHOSEN_SETTLE_S = 1.0
+wait_for(lambda: said("UDP %d is back" % pa, t_s2), 3.0)
 t_a = time.time()
 link.choose_link("udpin:0.0.0.0:%d" % pa)       # the first again, by hand,
 wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_a), 3.0)
@@ -343,6 +374,31 @@ note("and it is opened again by itself",
      said("TCP %d" % pt, t_hang))
 note("one message for the failure, not a second one saying lost",
      not said("TCP %d lost" % pt, t_hang), said("TCP %d" % pt, t_hang))
+# The link in use failing - unplugged, closed - is not going quiet, and a
+# link chosen by hand that fails is still one to come back to. A failure
+# was handed to the automatic rules, which said neither.
+t_h = time.time()
+link.choose_link("tcp:127.0.0.1:%d" % pt)
+wait_for(lambda: said("now using TCP %d - chosen by hand" % pt, t_h), 3.0)
+T.hang_up()
+note("chosen by hand, it fails: the move says so, and that it will return",
+     wait_for(lambda: said("TCP %d, chosen by hand, failed; back to it when "
+                           "it returns" % pt, t_h), 4.0), said("Link", t_h))
+note("and it does", wait_for(
+    lambda: said("back on TCP %d - chosen by hand" % pt, t_h), 8.0),
+    said("Link", t_h))
+link.choose_link("")                    # automatic again, still on it
+wait_for(lambda: said("choosing automatically again", t_h), 3.0)
+t_h2 = time.time()
+T.hang_up()
+note("in use and failing, chosen automatically: said as failing",
+     wait_for(lambda: said("- TCP %d failed" % pt, t_h2), 4.0)
+     and not said("TCP %d went quiet" % pt, t_h2), said("Link", t_h2))
+t_c = time.time()
+link.choose_link("udpin:0.0.0.0:%d" % pa)       # back as before, for the rest
+wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_c), 3.0)
+link.choose_link("")
+wait_for(lambda: said("choosing automatically again", t_c), 3.0)
 
 print("")
 print("9. links that cannot be had")
@@ -356,6 +412,10 @@ note("a link that will not open says so once, and keeps trying",
 note("and says why in plain words",
      bool(said("TCP %d - nothing is listening there" % dead, t_d)),
      said("TCP %d" % dead, t_d))
+n_dead = len(stats)
+note("having failed, it reads as failed",
+     wait_for(lambda: "failed" in states_of("TCP %d" % dead, n_dead), 3.0),
+     sorted(set(states_of("TCP %d" % dead, n_dead))))
 t_dup = time.time()
 link.add_link("udpin:0.0.0.0:%d" % pa)
 note("the same link twice is refused",
