@@ -22,3 +22,8 @@ logs/
 mav.parm
 mav.tlog
 mav.tlog.raw
+
+# Finder writes one of these into any folder it has opened, holding icon
+# positions and view settings. Nothing to do with the program, and it
+# comes straight back the next time the folder is looked at.
+.DS_Store
