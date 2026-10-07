@@ -325,6 +325,7 @@ from PySide6.QtGui import (QIcon, QImage, QPainter, QPixmap, QPen, QColor,
 from PySide6.QtCore import (QBuffer, QByteArray, QIODevice, QPoint, QPointF,
                             QSize, QUrl, QStandardPaths)
 from PySide6.QtGui import QRegion
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QGridLayout, QFrame, QInputDialog,
@@ -3639,6 +3640,9 @@ class ConnectionPanel(QGroupBox):
     add_link_requested = Signal(str)
     # One of several links, closed for good - from the right-click menu.
     remove_link_requested = Signal(str)
+    # A link to use by hand, or "" to choose automatically again - also
+    # from the right-click menu.
+    choose_link_requested = Signal(str)
     disconnect_requested = Signal()
     update_requested = Signal()
     telemetry_settings_requested = Signal()
@@ -3750,9 +3754,10 @@ class ConnectionPanel(QGroupBox):
         # While a link is open this button adds another one; see
         # set_connected. Nothing about it changes until then.
         self._connected = False
-        # (label, connection string) of every link while there are two or
-        # more, for the right-click menu. See set_links.
+        # Every link while there are two or more, and whether one was
+        # chosen by hand - for the right-click menu. See set_links.
         self._links = []
+        self._manual = False
 
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setFixedHeight(self.FIELD_HEIGHT)
@@ -3885,22 +3890,47 @@ class ConnectionPanel(QGroupBox):
     def contextMenuEvent(self, event):
         """Right-click reaches the same settings as the button, for anyone
         who looks for a context menu first - and, with several links open,
-        is where one of them is closed."""
+        is where a link is chosen by hand, handed back to the automatic
+        choice, or closed."""
+        self.build_context_menu().exec(event.globalPos())
+
+    def build_context_menu(self):
+        """The right-click menu, as it stands now."""
         menu = QMenu(self)
         menu.addAction("Settings...",
                        self.telemetry_settings_requested.emit)
         if len(self._links) >= 2:
             menu.addSeparator()
-            for label, connection in self._links:
+            # One tick between them: automatic, or exactly one link.
+            group = QActionGroup(menu)
+            group.setExclusive(True)
+            auto = menu.addAction("Choose the link automatically")
+            auto.setCheckable(True)
+            auto.setChecked(not self._manual)
+            group.addAction(auto)
+            auto.triggered.connect(
+                lambda checked=False: self.choose_link_requested.emit(""))
+            for link in self._links:
+                use = menu.addAction("Use %s" % link.get("label", "link"))
+                use.setCheckable(True)
+                use.setChecked(bool(self._manual and link.get("chosen")))
+                group.addAction(use)
+                use.triggered.connect(
+                    lambda checked=False, c=link.get("connection", ""):
+                    self.choose_link_requested.emit(c))
+            menu.addSeparator()
+            for link in self._links:
                 menu.addAction(
-                    "Remove link %s" % label,
-                    lambda c=connection: self.remove_link_requested.emit(c))
-        menu.exec(event.globalPos())
+                    "Remove link %s" % link.get("label", "link"),
+                    lambda c=link.get("connection", ""):
+                    self.remove_link_requested.emit(c))
+        return menu
 
-    def set_links(self, links):
-        """The links now open, as (label, connection string) - kept only
-        for the right-click menu, which offers to remove any of them."""
+    def set_links(self, links, manual=False):
+        """The links now open, and whether one was chosen by hand - kept
+        only for the right-click menu."""
         self._links = list(links)
+        self._manual = bool(manual)
 
     def set_update_state(self, text: str, found: bool = False, enabled: bool = True):
         """Reflect a check in the button itself, so a waiting or successful
@@ -4835,6 +4865,8 @@ class MainWindow(QMainWindow):
         self.connection_panel.add_link_requested.connect(self.on_add_link_requested)
         self.connection_panel.remove_link_requested.connect(
             self.on_remove_link_requested)
+        self.connection_panel.choose_link_requested.connect(
+            self.on_choose_link_requested)
         self.connection_panel.disconnect_requested.connect(self.on_disconnect_requested)
         self.connection_panel.update_requested.connect(self.on_check_updates)
         self.connection_panel.telemetry_settings_requested.connect(
@@ -6423,15 +6455,15 @@ class MainWindow(QMainWindow):
                 room = max(10, label.width()
                            // max(1, label.fontMetrics().horizontalAdvance("0"))
                            - 2)
+            manual = bool(stats.get("manual"))
             label.setTextFormat(Qt.TextFormat.RichText)
-            label.setText(multilink.link_line_html(links, room))
-            self.link_stats_label.setToolTip(multilink.link_tooltip(links))
+            label.setText(multilink.link_line_html(links, room, manual))
+            self.link_stats_label.setToolTip(
+                multilink.link_tooltip(links, manual))
             self.link_stats_label.setStyleSheet(
                 "color: #9aa4ad; font-size: 10px; font-family: %s;"
                 % MONO_FAMILY)
-            self.connection_panel.set_links(
-                [(l.get("label", "link"), l.get("connection", ""))
-                 for l in links])
+            self.connection_panel.set_links(links, manual)
             return
         self.connection_panel.set_links([])
         self.link_stats_label.setTextFormat(Qt.TextFormat.AutoText)
@@ -6906,6 +6938,12 @@ class MainWindow(QMainWindow):
         """One of several links closed, from the right-click menu."""
         if self.link is not None:
             self.link.remove_link(connection_string)
+
+    def on_choose_link_requested(self, connection_string):
+        """A link chosen by hand - or "" for automatic - from the
+        right-click menu. See MavlinkLink.choose_link."""
+        if self.link is not None:
+            self.link.choose_link(connection_string)
 
     def on_connect_requested(self, connection_string):
         if not connection_string:

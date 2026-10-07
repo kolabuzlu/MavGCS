@@ -79,6 +79,16 @@ note("short of room, the link in use keeps its figures",
 tiny = plain(multilink.link_line_html(links, 20))
 note("very short of room, the rest become a count",
      "+3 more" in tiny and "COM36" in tiny, tiny)
+manual_line = plain(multilink.link_line_html(links[:2], 80, manual=True))
+note("chosen by hand, the line says so first",
+     manual_line.startswith(multilink.MANUAL_PREFIX), manual_line)
+over = [r for r in range(12, 120)
+        if len(plain(multilink.link_line_html(links, r, manual=True))) > r]
+note("and still never needs more room than it has", not over, over[:1])
+tip_m = multilink.link_tooltip([dict(links[0], chosen=True), links[1]],
+                               manual=True)
+note("the tooltip names the link chosen by hand, and how to hand it back",
+     "Chosen by hand: COM36" in tip_m and "back to automatic" in tip_m)
 evil = plain(multilink.link_line_html(
     [{"label": "<b>x</b>", "state": "active"},
      {"label": "y", "state": "standby"}]))

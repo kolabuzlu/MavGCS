@@ -84,7 +84,7 @@ def _one(link: dict, detailed: bool):
 SEPARATOR = "   "
 
 
-def link_tooltip(links) -> str:
+def link_tooltip(links, manual=False) -> str:
     """The detail the line has no room for, one link to a row."""
     words = {"active": "in use", "standby": "ready",
              "waiting": "no aircraft heard on it yet", "lost": "lost",
@@ -105,13 +105,24 @@ def link_tooltip(links) -> str:
         if link.get("connection"):
             row += "\n      " + str(link["connection"])
         rows.append(row)
-    return ("\n".join(rows) + "\n\nMavGCS uses the best link by itself: it "
-            "moves at once when the one in use goes quiet, and otherwise "
-            "only when another has been clearly better for a few seconds."
-            "\nRight-click the Connection panel to remove a link.")
+    chosen = [l.get("label", "link") for l in links if l.get("chosen")]
+    if manual and chosen:
+        how = ("Chosen by hand: %s. MavGCS stays on it however the others "
+               "compare, and leaves it only while it is silent - coming "
+               "back as soon as it works again." % chosen[0])
+    else:
+        how = ("MavGCS uses the best link by itself: it moves at once when "
+               "the one in use goes quiet, and otherwise only when another "
+               "has been clearly better for a few seconds.")
+    return ("\n".join(rows) + "\n\n" + how + "\nRight-click the Connection "
+            "panel to choose a link by hand, go back to automatic, or "
+            "remove a link.")
 
 
-def link_line_html(links, max_chars=None) -> str:
+MANUAL_PREFIX = "manual"
+
+
+def link_line_html(links, max_chars=None, manual=False) -> str:
     """Every link on one line: which is in use, and how each is doing.
 
     Only used with two or more links. A single link keeps the line it has
@@ -124,8 +135,18 @@ def link_line_html(links, max_chars=None) -> str:
     their figures - their state still shows in the mark and its colour,
     and the tooltip has the rest - and if even that is too long, the link
     in use drops its figures too.
+
+    manual: the link was chosen by hand. Said first, in amber, so a
+    ground station that will not switch for quality never looks like one
+    that will - and counted in the room like everything else.
     """
     gap = "&nbsp;" * len(SEPARATOR)
+    if manual:
+        lead = '<span style="color:%s">%s</span>%s' % (
+            COLOUR_DOWN, MANUAL_PREFIX, gap)
+        room = (None if max_chars is None
+                else max(3, max_chars - len(MANUAL_PREFIX) - len(SEPARATOR)))
+        return lead + link_line_html(links, room, manual=False)
     plans = ([True] * len(links),
              [link.get("state") == "active" for link in links],
              [False] * len(links))

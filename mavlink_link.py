@@ -455,6 +455,10 @@ class MavlinkLink(QThread):
         self._link_lock = threading.Lock()
         self._add_requests = []         # from the GUI thread
         self._remove_requests = []      # likewise
+        self._choice_requests = []      # likewise; "" means automatic
+        # The link the user picked by hand, as its connection string - or
+        # None, and the chooser picks. See _follow_choice.
+        self._chosen = None
         self._opened = []               # from the opening threads
         self._chooser = multilink.LinkChooser()
         self._links_eval_at = 0.0
@@ -1531,14 +1535,21 @@ class MavlinkLink(QThread):
         with self._link_lock:
             self._remove_requests.append(connection_string)
 
+    def choose_link(self, connection_string):
+        """Use this link by hand - or, given "" or None, choose again
+        automatically. GUI thread; queued. See _follow_choice."""
+        with self._link_lock:
+            self._choice_requests.append(connection_string or "")
+
     def _links_tick(self, now):
         """Everything about several links except a frame arriving."""
         if not (self._multi or self._add_requests or self._opened
-                or self._remove_requests):
+                or self._remove_requests or self._choice_requests):
             return
         with self._link_lock:
             requests, self._add_requests = self._add_requests, []
             removals, self._remove_requests = self._remove_requests, []
+            choices, self._choice_requests = self._choice_requests, []
             opened, self._opened = self._opened, []
         for connection_string in requests:
             self._begin_link(connection_string, now)
@@ -1546,6 +1557,8 @@ class MavlinkLink(QThread):
             self._link_opened(link, conn, error, now)
         for connection_string in removals:
             self._end_link(connection_string, now)
+        for connection_string in choices:
+            self._set_choice(connection_string, now)
         if not self._multi:
             return
         if now - self._links_hb_at >= 1.0:
@@ -1572,7 +1585,10 @@ class MavlinkLink(QThread):
         if now >= self._links_eval_at:
             self._links_eval_at = now + self.LINK_EVAL_EVERY_S
             self._note_link_changes(now)
-            self._choose_link(now)
+            if self._chosen is not None:
+                self._follow_choice(now)
+            else:
+                self._choose_link(now)
 
     def _begin_link(self, connection_string, now):
         """A link asked for: refuse a duplicate, else start opening it."""
@@ -1679,11 +1695,12 @@ class MavlinkLink(QThread):
                     "not removed" % link.label, 4)
                 return
             new = min(others, key=lambda l: (l.health.loss_pct, l.order))
-            with self._send_lock:
-                self._active_link = new
-                self.master = new.conn
-            self._link_event("Link: now using %s - %s removed"
-                             % (new.label, link.label), 6)
+            self._use_link(new, "Link: now using %s - %s removed"
+                           % (new.label, link.label), 6)
+        if self._chosen_link() is link:
+            self._chosen = None
+            self._link_event("Link: %s was the one chosen by hand - "
+                             "choosing automatically again" % link.label, 6)
         self._links.remove(link)
         conn, link.conn = link.conn, None
         if conn is not None:
@@ -1898,9 +1915,6 @@ class MavlinkLink(QThread):
             return
         new = next(l for l in self._links if id(l) == key)
         old = self._active_link
-        with self._send_lock:
-            self._active_link = new
-            self.master = new.conn
         if why == "silent":
             reason = "%s went quiet" % old.label
         elif why == "loss":
@@ -1911,8 +1925,88 @@ class MavlinkLink(QThread):
             # and left out the one it was quicker than.
             reason = "%.1f s quicker than %s" % (
                 lag.get(id(old), 0.0) - lag.get(id(new), 0.0), old.label)
-        self._link_event("Link: now using %s - %s" % (new.label, reason),
-                         4 if why == "silent" else 6)
+        self._use_link(new, "Link: now using %s - %s" % (new.label, reason),
+                       4 if why == "silent" else 6)
+
+    def _use_link(self, new, text, severity):
+        """Make this link the one in use, and say so."""
+        with self._send_lock:
+            self._active_link = new
+            self.master = new.conn
+        self._link_event(text, severity)
+
+    def _chosen_link(self):
+        """The link chosen by hand, or None."""
+        if self._chosen is None:
+            return None
+        wanted = self._chosen.strip().lower()
+        return next((l for l in self._links
+                     if l.connection_string.strip().lower() == wanted), None)
+
+    def _set_choice(self, connection_string, now):
+        """By hand, or automatically again - as asked from the window."""
+        if not connection_string:
+            if self._chosen is not None:
+                self._chosen = None
+                # The chooser starts from here: no move the moment it is
+                # handed back, only when one is earned again.
+                self._chooser.last_move_at = now
+                self._link_event("Link: choosing automatically again", 6)
+            return
+        self._chosen = connection_string
+        link = self._chosen_link()
+        if link is None:
+            self._chosen = None
+            return
+        self._chooser.last_move_at = now
+        if link is self._active_link:
+            self._link_event("Link: %s chosen by hand - staying on it"
+                             % link.label, 6)
+        elif link.conn is not None and link.health.alive(now):
+            self._use_link(link, "Link: now using %s - chosen by hand"
+                           % link.label, 6)
+        else:
+            self._link_event(
+                "Link: %s chosen by hand, but it is not carrying the "
+                "aircraft yet - it will be used when it is" % link.label, 4)
+
+    # A chosen link that went quiet is taken back only after it has
+    # worked again for this long, so one flickering in and out does not
+    # drag the ground station back and forth with it.
+    CHOSEN_SETTLE_S = 3.0
+
+    def _follow_choice(self, now):
+        """Manual: the link chosen by hand - never left for being slower or
+        lossier, which is the point of choosing. Left only while it is
+        silent, for a link that works, and returned to once it has worked
+        again for CHOSEN_SETTLE_S: a ground station that stuck to a dead
+        link because it was told to would leave the pilot with nothing.
+        """
+        chosen = self._chosen_link()
+        if chosen is None:
+            self._chosen = None
+            return
+        h = chosen.health
+        if chosen.conn is not None and h.alive(now):
+            if (self._active_link is not chosen
+                    and now - h.alive_since >= self.CHOSEN_SETTLE_S):
+                self._use_link(chosen, "Link: back on %s - chosen by hand"
+                               % chosen.label, 6)
+            return
+        active = self._active_link
+        if active is not chosen and active is not None and (
+                active.conn is not None and active.health.alive(now)):
+            return                      # already standing in for it
+        fresh = [l for l in self._links if l is not chosen
+                 and l.conn is not None and l.health.alive(now)
+                 and now - l.health.last_vehicle_at
+                 <= multilink.LinkChooser.FRESH_S]
+        if not fresh:
+            return
+        stand_in = min(fresh, key=lambda l: (l.health.loss_pct, l.order))
+        self._use_link(stand_in, "Link: now using %s - %s, chosen by hand, "
+                       "went quiet; back to it when it returns"
+                       % (stand_in.label, chosen.label), 4)
 
     def _on_link(self, link, fn):
         """Run fn with every send going out on this link, then put it back.
@@ -1964,6 +2058,7 @@ class MavlinkLink(QThread):
                 state = "standby"
             out.append({"label": link.label,
                         "connection": link.connection_string,
+                        "chosen": link is self._chosen_link(),
                         "state": state,
                         "rx_mps": link.health.rx_mps,
                         "loss_pct": link.health.loss_pct,
@@ -1997,6 +2092,7 @@ class MavlinkLink(QThread):
             "rx_mps": active.health.rx_mps if active else 0.0,
             "loss_pct": active.health.loss_pct if active else 0.0,
             "links": out,
+            "manual": self._chosen is not None,
         })
 
     def apply_stream_rates(self):

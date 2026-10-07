@@ -41,6 +41,7 @@ multilink.LinkChooser.HOLD_S = 1.0
 multilink.LinkChooser.SETTLE_S = 1.0
 multilink.LinkChooser.DWELL_S = 2.0
 MavlinkLink.LINK_REOPEN_S = 0.5
+MavlinkLink.CHOSEN_SETTLE_S = 1.0
 
 M = mavutil.mavlink
 fails = []
@@ -164,6 +165,40 @@ note("moves back to the first link",
 note("because of the loss", bool(said("losing", t_loss)),
      said("losing", t_loss))
 B.drop_every = 0
+
+print("")
+print("6b. choosing a link by hand")
+# The user asked for it: "implement manual selection ... or an auto
+# selection". Chosen by hand, a link is kept however the others compare;
+# it is left only while silent, and returned to when it works again.
+t_m = time.time()
+link.choose_link("udpin:0.0.0.0:%d" % pb)
+note("a link chosen by hand is used at once",
+     wait_for(lambda: said("now using UDP %d - chosen by hand" % pb, t_m), 3.0),
+     said("Link", t_m))
+B.drop_every = 3                    # lossy now: automatic would leave it
+time.sleep(5.0)
+note("and kept however the other compares",
+     not said("now using UDP %d" % pa, t_m), said("now using", t_m))
+B.drop_every = 0
+t_q = time.time()
+B.silent = True
+note("it is left only while it is silent",
+     wait_for(lambda: said("now using UDP %d - UDP %d, chosen by hand, went "
+                           "quiet" % (pa, pb), t_q), 4.0), said("Link", t_q))
+B.silent = False
+note("and returned to when it works again",
+     wait_for(lambda: said("back on UDP %d - chosen by hand" % pb, t_q), 8.0),
+     said("Link", t_q))
+t_a = time.time()
+link.choose_link("udpin:0.0.0.0:%d" % pa)       # the first again, by hand,
+wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_a), 3.0)
+link.choose_link("")                             # then automatic
+note("automatic again when asked",
+     wait_for(lambda: said("choosing automatically again", t_a), 3.0),
+     said("Link", t_a))
+note("and the line knows which it is",
+     wait_for(lambda: not any(d.get("manual") for d in stats[-2:]), 3.0))
 
 print("")
 print("7. a link carrying a different aircraft")
