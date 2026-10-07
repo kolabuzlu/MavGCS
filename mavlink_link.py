@@ -20,6 +20,7 @@ recv_match(blocking=True) would otherwise freeze your whole UI.
 import os
 os.environ.setdefault("MAVLINK20", "1")
 
+import errno
 import time
 import math
 import queue
@@ -199,15 +200,22 @@ def _describe_link_error(error):
     if winerror == 10048 or "address already in use" in text.lower():
         return "that port is already in use by another program"
     lowered = text.lower()
-    # pyserial's messages, matched on the Python class names inside them,
-    # which are the same in every language. First: a radio pulled out
-    # mid-read reports ClearCommError wrapping a PermissionError, and must
-    # not be taken for a port another program holds.
-    if "clearcommerror" in lowered:
+    code = getattr(error, "errno", None)
+    # pyserial's messages. On Windows they carry Python class names, the
+    # same in every language. First: a radio pulled out mid-read reports
+    # ClearCommError wrapping a PermissionError, and must not be taken for
+    # a port another program holds. On macOS the same events read
+    # differently - the port still selects as readable but gives nothing,
+    # or the read says the device is gone - and each got its raw text
+    # until the Mac's own check of 2026-10-07 asked what a Mac would say.
+    if ("clearcommerror" in lowered or "returned no data" in lowered
+            or "device not configured" in lowered
+            or "input/output error" in lowered):
         return "the device went away - unplugged?"
-    if "filenotfounderror" in lowered:
+    if "filenotfounderror" in lowered or (
+            code == errno.ENOENT and "could not open port" in lowered):
         return "no such port - is the radio plugged in?"
-    if "permissionerror" in lowered:
+    if "permissionerror" in lowered or code == errno.EBUSY:
         return "the port is in use by another program"
     return text
 

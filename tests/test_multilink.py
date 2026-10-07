@@ -524,6 +524,7 @@ note("the requests still go out", link.master.mav.sent >= 2,
 
 print("")
 print("7. why a link failed, in words")
+import serial
 from mavlink_link import _describe_link_error
 
 
@@ -553,6 +554,22 @@ for error, want in (
         (Exception("ClearCommError failed (PermissionError(13, 'The device "
                    "does not recognize the command.', None, 22))"),
          "the device went away - unplugged?"),
+        # The same events on a Mac, in pyserial's words there.
+        (serial.SerialException(
+            "device reports readiness to read but returned no data (device "
+            "disconnected or multiple access on port?)"),
+         "the device went away - unplugged?"),
+        (serial.SerialException("read failed: [Errno 6] Device not "
+                                "configured"),
+         "the device went away - unplugged?"),
+        (serial.SerialException(
+            2, "could not open port /dev/cu.usbserial-A10K5: [Errno 2] No "
+               "such file or directory: '/dev/cu.usbserial-A10K5'"),
+         "no such port - is the radio plugged in?"),
+        (serial.SerialException(
+            16, "could not open port /dev/cu.usbserial-A10K5: [Errno 16] "
+                "Resource busy: '/dev/cu.usbserial-A10K5'"),
+         "the port is in use by another program"),
         (Exception("something nobody has seen before"),
          "something nobody has seen before")):
     got = _describe_link_error(error)
