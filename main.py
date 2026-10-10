@@ -5116,38 +5116,54 @@ class MainWindow(QMainWindow):
         alter the answer for points that did not themselves move, and the
         worker skips a request identical to the one it just answered.
         """
-        points = []
-        for wp in self._mission_points():
-            alt = wp["alt"]
-            if alt is None:
-                alt = self._mission_default_alt
-            if alt is None:
-                # No altitude decided for this point yet, so there is
-                # nothing to check it against.
-                continue
-            # The frame goes with the number: the same 80 is a different
-            # height above the ground depending on what it is measured
-            # from, and the worker is what turns one into the other.
-            points.append((wp["id"], wp["lat"], wp["lon"], float(alt),
-                           wp.get("frame", "RELATIVE")))
-        self.wp_terrain_worker.check(self._home_alt_amsl, points)
+        points, ends = [], []
+        for route in self._mission_routes():
+            for wp in route:
+                alt = wp["alt"]
+                if alt is None:
+                    alt = self._mission_default_alt
+                if alt is None:
+                    # No altitude decided for this point yet, so there is
+                    # nothing to check it against.
+                    continue
+                # The frame goes with the number: the same 80 is a
+                # different height above the ground depending on what it
+                # is measured from, and the worker is what turns one into
+                # the other.
+                points.append((wp["id"], wp["lat"], wp["lon"], float(alt),
+                               wp.get("frame", "RELATIVE")))
+            # No leg from the end of this route to the start of the next.
+            if points:
+                ends.append(points[-1][0])
+        self.wp_terrain_worker.check(self._home_alt_amsl, points, ends)
+
+    def _mission_routes(self):
+        """The waypoints as routes, each in flight order and each point
+        once: the mission on the vehicle, then the one being drawn.
+
+        Two routes, never one. Run together into a single list, the end of
+        one met the start of the other as a leg nothing will ever fly -
+        and the terrain check drew it red whenever it crossed the ground:
+        a line from a new draft point to the mission being flown (user
+        report, 2026-10-10). The fence check invented the same leg.
+
+        _sent_mission holds the very same dicts as _waypoint_queue for a
+        moment while a mission is started, so a point already on one
+        route is not repeated on the other.
+        """
+        routes, seen = [], set()
+        for batch in (self._sent_mission, self._waypoint_queue):
+            route = [wp for wp in batch if wp["id"] not in seen]
+            seen.update(wp["id"] for wp in route)
+            if route:
+                routes.append(route)
+        return routes
 
     def _mission_points(self):
-        """The mission in flight order, each point once.
-
-        _sent_mission holds the very same dicts as _waypoint_queue once a
-        mission has been started, so running the two together lists every
-        point twice. That was merely wasteful while each point was judged
-        on its own; for the legs between them it would invent one from
-        the last waypoint back to the first.
-        """
-        seen, ordered = set(), []
-        for wp in self._waypoint_queue + self._sent_mission:
-            if wp["id"] in seen:
-                continue
-            seen.add(wp["id"])
-            ordered.append(wp)
-        return ordered
+        """Every waypoint once, the routes one after the other. For what is
+        asked of each point on its own - never for the legs between them,
+        which belong to _mission_routes."""
+        return [wp for route in self._mission_routes() for wp in route]
 
     def _recheck_fence_containment(self):
         """Which waypoints sit outside the fence, and which legs leave it.
@@ -5169,10 +5185,11 @@ class MainWindow(QMainWindow):
                    if not point_in_fence(wp["lat"], wp["lon"],
                                          self._fence_points)]
         legs = []
-        for a, b in zip(pts, pts[1:]):
-            if leg_leaves_fence((a["lat"], a["lon"]), (b["lat"], b["lon"]),
-                                self._fence_points):
-                legs.append((a["id"], b["id"]))
+        for route in self._mission_routes():
+            for a, b in zip(route, route[1:]):
+                if leg_leaves_fence((a["lat"], a["lon"]),
+                                    (b["lat"], b["lon"]), self._fence_points):
+                    legs.append((a["id"], b["id"]))
         self.map_view.set_fence_violations(outside, legs)
         # Every edit to the route runs this again; the message is only
         # worth repeating when the answer has actually changed.

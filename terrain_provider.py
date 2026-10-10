@@ -732,7 +732,8 @@ class WaypointTerrainWorker(QThread):
 
     # Two lists. First, [(waypoint id, clearance in metres)] for every
     # point it could judge. Second, [(from id, to id, worst clearance)]
-    # for every leg between consecutive points. Negative means inside the
+    # for every leg between consecutive points of a route (see check's
+    # ends). Negative means inside the
     # hill. Anything with no terrain data is simply absent - which is not
     # the same as a clearance of zero and must not be shown as one.
     result_ready = Signal(list, list)
@@ -768,7 +769,7 @@ class WaypointTerrainWorker(QThread):
         super().__init__(parent)
         self._running = True
         self._lock = threading.Lock()
-        # (home_alt_amsl, [(id, lat, lon, alt, frame)])
+        # (home_alt_amsl, [(id, lat, lon, alt, frame)], ids ending a route)
         self._request = None
         self._last_done = None      # the request last answered, to avoid rework
         # When to have another go at a request that was answered only in
@@ -776,16 +777,25 @@ class WaypointTerrainWorker(QThread):
         self._retry_at = None
         self._provider = TerrainProvider()
 
-    def check(self, home_alt_amsl, waypoints):
+    def check(self, home_alt_amsl, waypoints, ends=()):
         """Thread-safe; call from the GUI thread whenever anything moves.
 
         waypoints is [(id, lat, lon, alt_m, frame)], where frame is one of
         WAYPOINT_FRAMES. Points whose altitude is not yet decided should
         simply be left out.
+
+        ends: ids of points that finish a route. A leg is judged from each
+        point to the next, but never from one of these. The list can hold
+        two routes - the mission on the vehicle and the next one being
+        drawn - and nothing flies from the end of one to the start of the
+        other. Judged anyway, that leg was drawn red whenever it crossed
+        the ground: a line from a draft point to the mission being flown,
+        reported by the user on 2026-10-10.
         """
         with self._lock:
             self._request = (home_alt_amsl,
-                             tuple(self._normalise(wp) for wp in waypoints))
+                             tuple(self._normalise(wp) for wp in waypoints),
+                             frozenset(int(i) for i in ends))
 
     @staticmethod
     def _normalise(wp):
@@ -833,7 +843,7 @@ class WaypointTerrainWorker(QThread):
 
     def clear(self):
         with self._lock:
-            self._request = (None, ())
+            self._request = (None, (), frozenset())
             self._last_done = None
             self._retry_at = None
 
@@ -862,7 +872,7 @@ class WaypointTerrainWorker(QThread):
 
     def _answer(self, req):
         """One pass over a request: judge every point, then every leg."""
-        home_alt, points = req
+        home_alt, points, ends = req
         clearances = []
         for wp_id, lat, lon, alt, frame in points:
             if not self._running:
@@ -876,14 +886,15 @@ class WaypointTerrainWorker(QThread):
                 continue
             clearances.append((int(wp_id), margin))
 
+        pairs = [(a, b) for a, b in zip(points, points[1:])
+                 if a[0] not in ends]
         legs = []
-        if len(points) > 1:
-            for a, b in zip(points, points[1:]):
-                if not self._running:
-                    break
-                worst = self._leg_clearance(home_alt, a, b)
-                if worst is not None:
-                    legs.append((int(a[0]), int(b[0]), worst))
+        for a, b in pairs:
+            if not self._running:
+                break
+            worst = self._leg_clearance(home_alt, a, b)
+            if worst is not None:
+                legs.append((int(a[0]), int(b[0]), worst))
 
         if self._running:
             # An answer is only final when it covered everything
@@ -899,8 +910,7 @@ class WaypointTerrainWorker(QThread):
             # position, and asking again for ever over ground it never
             # looked up would chase an answer it already has.
             complete = (len(clearances) == len(points)
-                        and (len(points) < 2
-                             or len(legs) == len(points) - 1))
+                        and len(legs) == len(pairs))
             self._last_done = req
             self._retry_at = (
                 None if complete or not self._provider.retry_pending()
