@@ -1560,7 +1560,14 @@ var targetMarker = null;
 // sequence instead of showing the single Fly to Here popup.
 var waypointMode = false;
 var waypointMarkers = [];  // markers in the CURRENT (uncommitted) queue
-var waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
+// A point drawn but not yet on the aircraft, and the line joining them:
+// yellow, as the user asked (2026-10-10), replacing a light blue. The
+// amber-yellow every other "not sent yet" on this map already uses - an
+// altitude changed since sending, a fence waiting for the vehicle - so
+// the colour says one thing wherever it appears. Sent points go grey,
+// the one being flown blue.
+var WP_DRAFT = '#ffc107';
+var waypointLine = L.polyline([], {color: WP_DRAFT, weight: 2, dashArray: '6,6'}).addTo(map);
 // Everything ever added (current queue + previously committed/sent
 // batches) - this is what Clear actually removes. Committing a queue
 // (see commitWaypoints) keeps items here but out of waypointMarkers, so
@@ -1665,8 +1672,9 @@ function refreshWpIcon(m) {
 
 function waypointIcon(number, sent, altText, dirty, belowTerrain, aglText,
                       outsideFence, wpCmd, isActive) {
-    var fill   = sent ? '#5b6b78' : '#3af';
-    var text   = sent ? '#cfd8e0' : 'white';
+    var fill   = sent ? '#5b6b78' : WP_DRAFT;
+    // Dark on the yellow: white on it could not be read.
+    var text   = sent ? '#cfd8e0' : '#212121';
     var border = sent ? 'rgba(255,255,255,0.55)' : 'white';
     var ring   = '';
     // The one the aircraft is flying to. Once a mission is sent every
@@ -2503,8 +2511,8 @@ function commitWaypoints() {
     //
     // Grey the batch as it goes, because the next queue starts numbering
     // at 1 again - matching the mission the vehicle actually gets. Left
-    // in the same blue, the map would show two "1"s with nothing to say
-    // which had been flown and which was still being planned.
+    // in the planning yellow, the map would show two "1"s with nothing to
+    // say which had been flown and which was still being planned.
     // A new mission REPLACES the old one on the vehicle, so the old one
     // stops being drawn here too. Left up, the map showed two batches that
     // both looked live - two markers numbered "1", only one of which the
@@ -2532,7 +2540,7 @@ function commitWaypoints() {
     wpDefaultAlt = null;
     waypointLine.setStyle({color: '#5b6b78', opacity: 0.7});
     waypointMarkers = [];
-    waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
+    waypointLine = L.polyline([], {color: WP_DRAFT, weight: 2, dashArray: '6,6'}).addTo(map);
     allWaypointLayers.push(waypointLine);
 }
 
@@ -2545,7 +2553,7 @@ function clearWaypoints() {
     allWaypointLayers = [];
     waypointMarkers = [];
     sentLayers = [];
-    waypointLine = L.polyline([], {color: '#3af', weight: 2, dashArray: '6,6'}).addTo(map);
+    waypointLine = L.polyline([], {color: WP_DRAFT, weight: 2, dashArray: '6,6'}).addTo(map);
     allWaypointLayers.push(waypointLine);
 }
 
