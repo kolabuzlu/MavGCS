@@ -512,13 +512,20 @@ class FakeConn:
 link = MavlinkLink("udpin:0.0.0.0:14999")
 link.master = FakeConn()
 import time as _time
+# Loaded first, so the clock below times the read starting and nothing
+# else. Loading it cold is the read's first-ever import of the module, and
+# on CI's freshly booted Windows runner that alone can take seconds - a
+# failure there (2026-10-10) that said nothing about the read.
+import pymavlink.mavftp  # noqa: F401
 t = _time.time()
 started = link._start_param_ftp()
 held = _time.time() - t
 note("the read starts", started is True)
 note("without reading the link once", link.master.reads == 0,
      "%d reads" % link.master.reads)
-note("and without holding the caller", held < 0.5, "%.2f s" % held)
+# A second, against V2.3.3's 3.7 s: room for a slow runner, none for the
+# freeze. Not reading the link, above, is the real proof.
+note("and without holding the caller", held < 1.0, "%.2f s" % held)
 note("the requests still go out", link.master.mav.sent >= 2,
      "%d FTP frames sent" % link.master.mav.sent)
 

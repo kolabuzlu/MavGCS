@@ -23,6 +23,15 @@ ROOT = HERE.parent
 
 
 def main():
+    # The suites write UTF-8 (see PYTHONIOENCODING below) and their output
+    # carries the link line's marks; this console may not. On CI's Windows
+    # runner it is cp1252, and printing a failed suite's output there
+    # raised UnicodeEncodeError - losing the one thing a red run is for,
+    # the reason (V2.4.1, 2026-10-10). Escaped instead of fatal.
+    try:
+        sys.stdout.reconfigure(errors="backslashreplace")
+    except Exception:
+        pass
     suites = sorted(HERE.glob("test_*.py"))
     if not suites:
         print("No suites found in %s" % HERE)
