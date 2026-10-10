@@ -69,3 +69,4 @@ one first tagged.
 | V2.3.2 | `e0719e10a6` | 2026-09-28 | Nothing sent to the map can be lost, and both platforms have a layout gate (re-cut) |
 | V2.3.3 | `427d6ca068` | 2026-09-28 | The first launch moves onto the discrete graphics card again |
 | V2.4.0 | `4535f177ef` | 2026-10-07 | Link switching: several links to one aircraft, the best one used by itself |
+| V2.4.1 | `afc2cf0c18` | 2026-10-10 | Draft waypoints in yellow, and a drawn mission no longer joined to the one in the air |
