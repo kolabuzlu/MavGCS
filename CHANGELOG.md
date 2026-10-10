@@ -1,5 +1,7 @@
 # MavGCS Changelog
 
+## V2.4.1 - Bug fixes and improvements.
+
 ## V2.4.0 - Link switching added.
 Bug fixes and improvements.
 
