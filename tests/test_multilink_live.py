@@ -223,6 +223,12 @@ note("the link standing in stops too: straight back to the chosen one",
 A.silent = False
 MavlinkLink.CHOSEN_SETTLE_S = 1.0
 wait_for(lambda: said("UDP %d is back" % pa, t_s2), 3.0)
+# Both links' silences are still in their loss figures - frames missed
+# while silent count as lost. Handed back to automatic before those are
+# clean, the first link read as really bad and was rightly left at once,
+# a step before 6c meant it to be: a failure on CI's slow Mac runner
+# (V2.4.1's release commit) with nothing wrong in MavGCS.
+time.sleep(multilink.LinkHealth.LOSS_WINDOW_S + 1.0)
 t_a = time.time()
 link.choose_link("udpin:0.0.0.0:%d" % pa)       # the first again, by hand,
 wait_for(lambda: said("now using UDP %d - chosen by hand" % pa, t_a), 3.0)
