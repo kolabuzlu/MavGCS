@@ -1,26 +1,42 @@
-"""MavGCS never sends terrain data to the aircraft.
+"""MavGCS sends terrain only where and when the pilot asks: never in flight.
 
 ArduPilot with its terrain system on asks every connected ground station
 for the terrain tiles it lacks - around where it is, and around the
 mission's waypoints - in the air as on the ground. A station that serves
 terrain answers with TERRAIN_DATA from its own SRTM: MAVProxy does by
 default (its terrain module is in the default list), and Mission Planner
-does as far as is known. The pilot does not want terrain sent to an
-aircraft in flight, and starts missions in the air (2026-10-12).
+does too. The pilot does not want terrain sent to an aircraft in flight,
+and starts missions in the air (2026-10-12).
 
-MavGCS has never sent it - nothing was ever written to - so this makes
-that a rule a future change cannot break by accident: no source file of
-the app may send or encode TERRAIN_DATA or handle TERRAIN_REQUEST, and a
-real link asked for terrain by the fake plane, as ArduPilot asks, must
-send nothing terrain-related back. Each check first shows it can catch
-the thing it guards against.
+MavGCS answers none of it, with one exception the pilot asked for the same
+day: Terrain Upload, an area drawn on the map and loaded onto the card -
+over the flight controller's own USB cable only, only while the aircraft
+is disarmed, and only when the pilot starts it. This makes that a rule a
+future change cannot break by accident:
+
+1. Terrain is sent from one module, terrain_upload.py, and no other source
+   file of the app may send or encode it, or handle the aircraft's asking.
+2. A real link that is not the flight controller's USB, asked for terrain
+   as ArduPilot asks, sends nothing terrain-related back - even with an
+   upload forced through underneath the button's own refusal.
+3. On a link that does count as the USB, an upload does send - which shows
+   section 2 would have seen it - and the moment the aircraft reports
+   itself armed, not one more terrain message goes out.
+4. ArduPilot's simulator counts as well (the pilot asked to rehearse with
+   SITL, 2026-10-12): it talks over the network but cannot fly, and it
+   alone answers for its SIM_ settings. An aircraft that does not - the
+   plane of section 2, on the same kind of link - stays refused.
+
+Each check first shows it can catch the thing it guards against.
 """
 
 import ast
 import io
+import math
 import os
 import socket
 import sys
+import threading
 import time
 import tokenize
 
@@ -30,10 +46,13 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 os.environ.setdefault("MAVLINK20", "1")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 from PySide6.QtCore import QCoreApplication, Qt
 from pymavlink import mavutil
 
+import terrain_upload
 from fake_plane import FakePlane, UdpChannel, free_port
+from fake_terrain import FakeTerrainPlane
 from mavlink_link import MavlinkLink
 
 M = mavutil.mavlink
@@ -47,15 +66,19 @@ def note(name, ok, detail=""):
         fails.append(name)
 
 
-# Names that send or build terrain data, and the two message types whose
-# handling would be the start of serving it. Matched as code - names, and
-# string literals that ARE the name - never in comments, and never inside
-# a docstring that merely mentions one.
+# Names that send or build terrain, or ask the aircraft about it, and the
+# message types whose handling would be the start of serving it. Matched as
+# code - names, and string literals that ARE the name - never in comments,
+# and never inside a docstring that merely mentions one.
 FORBIDDEN_NAMES = {"terrain_data_send", "terrain_data_encode",
+                   "terrain_check_send", "terrain_check_encode",
                    "MAVLink_terrain_data_message",
                    "MAVLINK_MSG_ID_TERRAIN_DATA",
                    "MAVLINK_MSG_ID_TERRAIN_REQUEST"}
 FORBIDDEN_STRINGS = FORBIDDEN_NAMES | {"TERRAIN_DATA", "TERRAIN_REQUEST"}
+# The one module allowed them. Everything it sends goes through the link's
+# own check as well as its own; sections 2 and 3 test both together.
+ALLOWED = {"terrain_upload.py"}
 
 
 def offences(source):
@@ -75,7 +98,7 @@ def offences(source):
 
 
 print("")
-print("1. no source file of the app can serve terrain")
+print("1. terrain is sent from terrain_upload.py and nowhere else")
 note("the check finds one when there is one",
      offences("link.master.mav.terrain_data_send(1, 2, 3, 4, [])\n"
               "if mtype == 'TERRAIN_REQUEST':\n    pass\n")
@@ -88,22 +111,93 @@ note("and not in a comment or a docstring that only mentions it",
 app_files = sorted(f for f in os.listdir(ROOT) if f.endswith(".py"))
 found = {}
 for name in app_files:
+    if name in ALLOWED:
+        continue
     with open(os.path.join(ROOT, name), encoding="utf-8") as f:
         hits = offences(f.read())
     if hits:
         found[name] = hits
-note("none in the app's %d source files" % len(app_files), not found,
-     found or ", ".join(app_files))
+note("none in the app's other %d source files" % (len(app_files) - 1),
+     not found, found or ", ".join(f for f in app_files if f not in ALLOWED))
+with open(os.path.join(ROOT, "terrain_upload.py"), encoding="utf-8") as f:
+    upload_src = f.read()
+note("(and the one that may, does - so the line above is not vacuous)",
+     any(w == "terrain_data_send" for _l, w in offences(upload_src)))
 
 
-print("")
-print("2. asked for terrain as ArduPilot asks, a real link sends none")
-app = QCoreApplication.instance() or QCoreApplication([])
-plane = FakePlane()
-port = free_port()
-ch = UdpChannel(port)
-plane.channels.append(ch)
-plane.start()
+# ---------------------------------------------------------------------------
+# A fake plane whose terrain is ArduPilot's, mirrored (tests/fake_terrain.py),
+# on a real UDP link: it asks for what it lacks and answers what it is asked.
+
+class TerrainChannel(UdpChannel):
+    """A plane's port that also carries its terrain system."""
+
+    def __init__(self, gcs_port, terrain):
+        super().__init__(gcs_port)
+        self.terrain = terrain
+        self.lock = threading.Lock()
+        self.terrain_heard = []         # (type, when) of terrain from the GCS
+        self.asked = 0                  # TERRAIN_REQUESTs it sent
+        self._parse = M.MAVLink(None)
+        # The plane's own thread and the terrain's both send on this port,
+        # and encoding a frame hands it back through one shared buffer.
+        self._out_lock = threading.Lock()
+
+    def frame(self, msg):
+        with self._out_lock:
+            return super().frame(msg)
+
+    def later(self, data, now):
+        with self._out_lock:
+            super().later(data, now)
+
+    def heard(self, data):
+        super().heard(data)
+        try:
+            msgs = self._parse.parse_buffer(data) or []
+        except Exception:
+            return
+        t = self.terrain
+        with self.lock:
+            for m in msgs:
+                kind = m.get_type()
+                if kind.startswith("TERRAIN"):
+                    self.terrain_heard.append((kind, time.monotonic()))
+                if kind == "TERRAIN_CHECK":
+                    t.terrain_check_send(m.lat, m.lon)
+                elif kind == "TERRAIN_DATA":
+                    t.terrain_data_send(m.lat, m.lon, m.grid_spacing,
+                                        m.gridbit, list(m.data))
+                elif kind == "PARAM_REQUEST_READ":
+                    t.param_request_read_send(1, 1, m.param_id, -1)
+                elif kind == "PARAM_SET":
+                    t.param_set_send(1, 1, m.param_id, m.param_value, 9)
+                elif kind == "COMMAND_LONG":
+                    t.command_long_send(1, 1, m.command, 0, m.param1,
+                                        m.param2)
+
+    def pump(self, now):
+        """The terrain system's own time, and what it has to say."""
+        with self.lock:
+            self.terrain.step(now)
+            out = self.terrain.take()
+        for kind, msg in out:
+            if kind == "PARAM_VALUE":
+                name, value = msg
+                msg = M.MAVLink_param_value_message(
+                    name.encode(), value, M.MAV_PARAM_TYPE_REAL32, 1, 0)
+            if kind == "TERRAIN_REQUEST":
+                self.asked += 1
+            data = self.frame(msg)
+            if data is not None:
+                self.later(data, time.time())
+
+
+def pumping(ch, stop):
+    t0 = time.monotonic()
+    while not stop.is_set():
+        ch.pump(time.monotonic() - t0)
+        time.sleep(0.02)
 
 
 def wait_for(pred, timeout):
@@ -115,9 +209,59 @@ def wait_for(pred, timeout):
     return pred()
 
 
-def terrain_heard():
-    return [t for t, _c in ch.got if t.startswith("TERRAIN")]
+def ground(lats, lons):
+    return 900.0 + 300.0 * np.sin(np.asarray(lats) * 40.0) * np.cos(
+        np.asarray(lons) * 30.0)
 
+
+class _Tile:
+    def sample_many(self, lats, lons):
+        return ground(lats, lons)
+
+
+class _Map:
+    """No internet in a test: the map is made up, and the same every run."""
+
+    def tile_for(self, lat, lon):
+        return _Tile(), "ok"
+
+
+# The link builds its upload with the app's real map; here, with the one
+# above. Nothing else about the upload or the link is replaced.
+terrain_upload._default_provider = lambda on_status: _Map()
+
+AREA = [(39.90, 32.80), (39.91, 32.80), (39.91, 32.81), (39.90, 32.81)]
+
+
+def start_plane(terrain):
+    plane = FakePlane()
+    port = free_port()
+    ch = TerrainChannel(port, terrain)
+    plane.channels.append(ch)
+    plane.start()
+    stop = threading.Event()
+    threading.Thread(target=pumping, args=(ch, stop), daemon=True).start()
+    return plane, ch, port, stop
+
+
+def connect(port, **kw):
+    link = MavlinkLink("udpin:0.0.0.0:%d" % port, **kw)
+    status, finished = [], []
+    link.connection_status.connect(lambda c, m: status.append(c),
+                                   Qt.ConnectionType.DirectConnection)
+    link.terrain_upload_finished.connect(
+        lambda ok, text: finished.append((ok, text)),
+        Qt.ConnectionType.DirectConnection)
+    link.start()
+    return link, status, finished
+
+
+app = QCoreApplication.instance() or QCoreApplication([])
+
+print("")
+print("2. on any link but the flight controller's USB, nothing terrain")
+plane, ch, port, stop = start_plane(FakeTerrainPlane(position=(
+    int(39.905 * 1e7), int(32.805 * 1e7))))
 
 # First, that the plane's record would show it: TERRAIN_DATA sent to it
 # the way a station serving terrain would send it.
@@ -127,31 +271,97 @@ probe.sendto(server.terrain_data_encode(
     -353632610, 1491652300, 100, 0, [0] * 16).pack(server),
     ch.sock.getsockname())
 note("the plane's record would show terrain data sent to it",
-     wait_for(lambda: "TERRAIN_DATA" in terrain_heard(), 3.0),
-     terrain_heard())
+     wait_for(lambda: ("TERRAIN_DATA", None) in ch.got, 3.0))
 probe.close()
 ch.got.clear()
+ch.terrain_heard.clear()
 
-link = MavlinkLink("udpin:0.0.0.0:%d" % port)
-status = []
-link.connection_status.connect(lambda c, m: status.append(c),
-                               Qt.ConnectionType.DirectConnection)
-link.start()
+link, status, finished = connect(port)
 note("(the link is up)", wait_for(lambda: any(status), 15.0))
-# What ArduPilot sends with TERRAIN_ENABLE on and tiles missing: a 4x8
-# grid of 4x4 blocks around a point, every block asked for.
-asker = M.MAVLink(None, srcSystem=1, srcComponent=1)
-for i in range(6):
-    msg = asker.terrain_request_encode(-353632610, 1491652300, 100,
-                                       (1 << 56) - 1)
-    ch.sock.sendto(msg.pack(asker), ch.dest)
-    time.sleep(0.5)
-time.sleep(2.0)
-note("six terrain requests over three seconds: nothing terrain sent back",
-     not terrain_heard(), terrain_heard())
+note("(and the plane, missing its terrain, is asking for it)",
+     wait_for(lambda: ch.asked >= 2, 10.0), "%d requests" % ch.asked)
+note("(the link asked whether it is the simulator, and was not told so)",
+     ("PARAM_REQUEST_READ", None) in ch.got and not link._simulator)
+blocker = link.terrain_upload_blocker()
+note("Terrain Upload is refused over it, and the pilot told why",
+     blocker is not None and "own USB cable" in blocker
+     and "network link" in blocker, blocker)
+# Underneath the button's refusal, as a bug might: the upload itself must
+# still send nothing on this link.
+link.start_terrain_upload(AREA)
+note("an upload forced through anyway stops at once",
+     wait_for(lambda: finished, 10.0)
+     and not finished[0][0] and "not the flight controller's own USB" in finished[0][1],
+     finished)
+time.sleep(3.0)
+note("asked for terrain all the while: nothing terrain-related sent back",
+     not ch.terrain_heard, ch.terrain_heard[:5])
 note("(and the link answered as a ground station all along)",
      ("HEARTBEAT", None) in ch.got)
 link.stop()
+stop.set()
+plane.stop()
+
+
+print("")
+print("3. on the USB, it sends - and not one message once the plane is armed")
+plane, ch, port, stop = start_plane(FakeTerrainPlane())
+link, status, finished = connect(
+    port, usb_check=lambda connection: (True, "the flight controller's USB"))
+note("(the link is up)", wait_for(lambda: any(status), 15.0))
+note("the upload is allowed: a USB link and a disarmed aircraft",
+     link.terrain_upload_blocker() is None, link.terrain_upload_blocker())
+link.start_terrain_upload(AREA)
+note("it sends terrain - so section 2 would have seen any",
+     wait_for(lambda: any(k == "TERRAIN_DATA" for k, _t in ch.terrain_heard),
+              30.0), "%d terrain messages" % len(ch.terrain_heard))
+armed_seen = []
+link.status_update.connect(
+    lambda d: armed_seen.append(time.monotonic())
+    if d.get("armed") == "YES" and not armed_seen else None,
+    Qt.ConnectionType.DirectConnection)
+plane.armed = True
+note("(the link hears the aircraft armed)",
+     wait_for(lambda: armed_seen, 5.0))
+note("the upload stops, saying why",
+     wait_for(lambda: finished, 10.0) and not finished[0][0]
+     and "armed" in finished[0][1], finished)
+time.sleep(3.0)
+# Anything already on its way when the heartbeat arrived lands within
+# milliseconds on this machine; a quarter of a second covers it.
+late = [(k, round(t - armed_seen[0], 3)) for k, t in ch.terrain_heard
+        if armed_seen and t > armed_seen[0] + 0.25]
+note("not one terrain message once the aircraft said it was armed",
+     armed_seen and not late, late[:5])
+link.stop()
+stop.set()
+plane.stop()
+
+print("")
+print("4. ArduPilot's simulator: over the network, and allowed")
+plane, ch, port, stop = start_plane(FakeTerrainPlane(sim_speedup=1))
+link, status, finished = connect(port)
+note("(the link is up)", wait_for(lambda: any(status), 15.0))
+note("it says it is the simulator", wait_for(lambda: link._simulator, 10.0))
+note("so the upload is allowed, on a network link",
+     link.terrain_upload_blocker() is None, link.terrain_upload_blocker())
+link.start_terrain_upload(AREA)
+note("and it loads", wait_for(lambda: finished, 120.0) and finished[0][0],
+     finished)
+link.stop()
+stop.set()
+plane.stop()
+
+# A SIM_SPEEDUP that is not a number is no answer at all.
+plane, ch, port, stop = start_plane(FakeTerrainPlane(sim_speedup=float("nan")))
+link, status, finished = connect(port)
+note("(the link is up)", wait_for(lambda: any(status), 15.0))
+time.sleep(3.0)
+note("an answer that is not a number does not make it the simulator",
+     not link._simulator and link.terrain_upload_blocker() is not None,
+     link.terrain_upload_blocker())
+link.stop()
+stop.set()
 plane.stop()
 
 print("")

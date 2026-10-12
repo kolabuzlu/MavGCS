@@ -197,15 +197,52 @@ class _TileData:
         bot = self.grid[r1, c0] * (1 - fc) + self.grid[r1, c1] * fc
         return float(top * (1 - fr) + bot * fr)
 
+    def sample_many(self, lats, lons):
+        """sample() for whole arrays at once: NaN where a point is outside.
+
+        The same bounds, the same clamping inside the last arcsecond and
+        the same interpolation, so a height read this way is the height
+        sample() gives for that point - the terrain upload puts on the
+        aircraft exactly the ground the map's own checks are drawn from.
+        It reads a thousand points per square, which one call at a time
+        in Python would make the slowest part of the whole upload.
+        """
+        lats = np.asarray(lats, dtype=np.float64)
+        lons = np.asarray(lons, dtype=np.float64)
+        col = (lons - self.origin_lon) / self.px_lon
+        row = (self.origin_lat - lats) / self.px_lat
+        inside = ((col >= 0) & (row >= 0)
+                  & (col < self.width) & (row < self.height))
+        col = np.where(inside, col, 0.0)
+        row = np.where(inside, row, 0.0)
+        c0 = np.minimum(col.astype(np.int64), self.width - 1)
+        r0 = np.minimum(row.astype(np.int64), self.height - 1)
+        c1 = np.minimum(c0 + 1, self.width - 1)
+        r1 = np.minimum(r0 + 1, self.height - 1)
+        fc, fr = col - c0, row - r0
+        g = self.grid
+        top = g[r0, c0] * (1 - fc) + g[r0, c1] * fc
+        bot = g[r1, c0] * (1 - fc) + g[r1, c1] * fc
+        return np.where(inside, top * (1 - fr) + bot * fr, np.nan)
+
 
 def _decode_tile(raw: bytes) -> _TileData:
     """Decode a Copernicus GLO-30 GeoTIFF tile into a _TileData."""
-    with tifffile.TiffFile(io.BytesIO(raw)) as tif:
-        page = tif.pages[0]
-        grid = page.asarray().astype(np.float32)
-        tags = page.tags
-        scale = tags[33550].value  # ModelPixelScaleTag: (scaleX, scaleY, scaleZ)
-        tie = tags[33922].value    # ModelTiepointTag: (i, j, k, x, y, z)
+    # Closed by hand: tifffile's objects refer to one another, so they live
+    # until Python's occasional full sweep - and through the buffer they
+    # held the whole file, 47 MB of it per tile decoded, all that while.
+    # Measured 2026-10-12: 46.7 MB still held after the tile was dropped,
+    # 0.0 with the buffer closed.
+    buf = io.BytesIO(raw)
+    try:
+        with tifffile.TiffFile(buf) as tif:
+            page = tif.pages[0]
+            grid = page.asarray().astype(np.float32)
+            tags = page.tags
+            scale = tags[33550].value  # ModelPixelScaleTag: (scaleX, scaleY, scaleZ)
+            tie = tags[33922].value    # ModelTiepointTag: (i, j, k, x, y, z)
+    finally:
+        buf.close()
     px_lon, px_lat = abs(scale[0]), abs(scale[1])
     origin_lon = tie[3] - tie[0] * px_lon
     origin_lat = tie[4] + tie[1] * px_lat
@@ -309,9 +346,26 @@ class TerrainProvider:
                     # so a stop (or a crash) part-way through a direct write
                     # would leave a truncated file that then fails to decode
                     # forever.
-                    tmp = path.with_suffix(".part")
-                    tmp.write_bytes(raw)
-                    os.replace(tmp, path)
+                    #
+                    # The temporary name is this writer's own. The terrain
+                    # upload reads tiles on a thread of its own, with a
+                    # provider of its own, while the radar reads them on
+                    # its thread - and both can fetch the same tile at the
+                    # same moment, the one the aircraft is sitting in. One
+                    # shared ".part" would then be written by two at once
+                    # and could be renamed into the cache half-finished.
+                    tmp = path.with_suffix(".%d.%d.part" % (
+                        os.getpid(), threading.get_ident()))
+                    try:
+                        tmp.write_bytes(raw)
+                        os.replace(tmp, path)
+                    except OSError:
+                        # Not cached, but downloaded: the tile is good in
+                        # memory, so use it rather than throw it away.
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                     enforce_cache_limit()
             except urllib.error.HTTPError as exc:
                 # 404 or 403 from the tile store means there is no such
@@ -408,6 +462,22 @@ class TerrainProvider:
         """Terrain elevation (m, ~= MSL) at lat/lon, or None if unavailable."""
         tile = self._load_tile(tile_name(lat, lon))
         return tile.sample(lat, lon) if tile else None
+
+    def tile_for(self, lat: float, lon: float):
+        """(the decoded tile holding lat/lon, or None; and why if None).
+
+        "absent" is a tile the store says does not exist - sea, or ground
+        the dataset leaves out - and will not appear by asking again.
+        "failed" is one that could not be fetched just now and might yet.
+        The terrain upload needs the two kept apart: it must never send a
+        height for ground it has no data for, and it should say which of
+        the two it was.
+        """
+        key = tile_name(lat, lon)
+        tile = self._load_tile(key)
+        if tile is not None:
+            return tile, "ok"
+        return None, ("absent" if key in self._absent else "failed")
 
     def fan(self, lat, lon, heading_deg, half_angle_deg, range_m, ang_cells, rad_cells):
         """

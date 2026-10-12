@@ -404,6 +404,9 @@ LEAFLET_HTML = """
   .fence-state::before { display: none; }
   .fence-state-wait   { color: #ffc107; }
   .fence-state-failed { color: #ff6b6b; }
+  /* Done before the third corner: dimmed, so it reads as not yet - the
+     buttons' own white text would otherwise look the same either way. */
+  #terrain-upload-control button:disabled { opacity: 0.4; cursor: default; }
   #zoom-indicator {
     position: absolute; top: 76px; left: 10px; width: 30px;
     background: rgba(0,0,0,0.6); color: white;
@@ -506,7 +509,8 @@ LEAFLET_HTML = """
      does - or it would swallow map clicks across that whole strip. -->
 <div id="overlay-slot" style="
     position: absolute; top: 10px; left: 43px; width: 123px;
-    z-index: 1000; display: flex; justify-content: center;
+    z-index: 1000; display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
     pointer-events: none;
 ">
 <div id="overlay-control" style="
@@ -533,6 +537,50 @@ LEAFLET_HTML = """
                onchange="setWeatherEnabled(this.checked);"
                style="margin: 0; cursor: pointer;">
         <label for="weather-checkbox" style="cursor: pointer; user-select: none;">Weather</label>
+    </div>
+</div>
+<!-- Terrain Upload, under the switches: the same black, 8px below as the
+     boxes in the right-hand column are spaced, and its left edge on the
+     switches' left edge (alignTerrainPanel). A longer line widens it to
+     the right, where the map is empty under the cache panel, and never
+     towards the zoom readout to the left of this column. -->
+<div id="terrain-upload-control" style="
+    background: rgba(0,0,0,0.6); color: white;
+    padding: 5px 8px; border-radius: 4px;
+    font-family: sans-serif; font-size: 12px;
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+    align-self: flex-start;
+    pointer-events: auto;
+">
+    <button id="tu-start" onclick="terrainUploadPressed();"
+            title="Draw an area and load its terrain onto the aircraft's SD card - over the flight controller's own USB cable, disarmed"
+            style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   cursor: pointer;">Terrain Upload</button>
+    <span id="tu-title" style="display: none; user-select: none;
+                               font-weight: 700;">Terrain Upload</span>
+    <span id="tu-text" style="display: none; user-select: none;
+                              white-space: nowrap;"></span>
+    <div id="tu-buttons" style="display: none; gap: 4px;">
+        <button id="tu-done" onclick="finishTerrainArea();" disabled
+                title="Load the terrain of this area, and a margin round it"
+                style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   cursor: pointer;">Done</button>
+        <button id="tu-cancel" onclick="cancelTerrainArea();"
+                title="Discard the drawing"
+                style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   cursor: pointer;">Cancel</button>
+        <button id="tu-stop" onclick="stopTerrainUpload();"
+                title="Stop loading; what is on the card stays there"
+                style="background: rgba(255,255,255,0.12); color: #fff;
+                   border: 1px solid rgba(255,255,255,0.25); border-radius: 3px;
+                   font-family: sans-serif; font-size: 11px; padding: 1px 6px;
+                   cursor: pointer;">Stop</button>
     </div>
 </div>
 </div>
@@ -2330,6 +2378,7 @@ function setFenceDrawing(on) {
     // turning one on turns the other off rather than letting a click
     // mean two things.
     if (fenceDrawing && waypointMode) { setWaypointMode(false); }
+    if (fenceDrawing && terrainDrawing) { setTerrainUploadState('idle', ''); }
     refreshFenceButtons();
 }
 
@@ -2441,9 +2490,125 @@ function setFenceFailed(reason) {
                            className: 'fence-state fence-state-failed'});
 }
 
+// ---- terrain upload --------------------------------------------------
+// The area is drawn here as a fence is, corner by corner, and handed to
+// Python whole on Done. Whether it may go at all is Python's to say - only
+// over the flight controller's own USB cable, only disarmed - so the
+// button asks first, and drawing begins only when Python says so.
+var terrainDrawing = false;
+var terrainPoints = [];
+var terrainMarkers = [];
+var terrainShape = null;
+
+function terrainUploadPressed() {
+    if (bridge) { bridge.terrainUploadPressed(); }
+}
+
+// The switches' box is centred in its column, so where its left edge falls
+// depends on how wide its labels render. Measured rather than assumed.
+function alignTerrainPanel() {
+    var box = document.getElementById('overlay-control');
+    var slot = document.getElementById('overlay-slot');
+    var panel = document.getElementById('terrain-upload-control');
+    if (!box || !slot || !panel) { return; }
+    panel.style.marginLeft = (box.getBoundingClientRect().left -
+                              slot.getBoundingClientRect().left) + 'px';
+}
+alignTerrainPanel();
+if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(alignTerrainPanel);
+}
+
+function terrainCornerIcon() {
+    return L.divIcon({
+        className: 'terrain-corner',
+        html: '<div style="width:10px;height:10px;border-radius:50%;' +
+              'background:#26c6da;border:2px solid #fff;"></div>',
+        iconSize: [10, 10], iconAnchor: [5, 5],
+    });
+}
+
+function clearTerrainArea() {
+    for (var i = 0; i < terrainMarkers.length; i++) {
+        map.removeLayer(terrainMarkers[i]);
+    }
+    terrainMarkers = [];
+    terrainPoints = [];
+    if (terrainShape) { map.removeLayer(terrainShape); terrainShape = null; }
+}
+
+function addTerrainCorner(lat, lon) {
+    terrainPoints.push([lat, lon]);
+    terrainMarkers.push(L.marker([lat, lon], {icon: terrainCornerIcon(),
+                                              interactive: false}).addTo(map));
+    if (terrainShape) { map.removeLayer(terrainShape); }
+    // A line until there are three corners - two points enclose nothing.
+    terrainShape = (terrainPoints.length >= 3
+        ? L.polygon(terrainPoints, {color: '#26c6da', weight: 2,
+                                    fillOpacity: 0.06, dashArray: '5,5',
+                                    interactive: false})
+        : L.polyline(terrainPoints, {color: '#26c6da', weight: 2,
+                                     dashArray: '5,5', interactive: false})
+    ).addTo(map);
+    var done = document.getElementById('tu-done');
+    if (done) { done.disabled = terrainPoints.length < 3; }
+}
+
+function finishTerrainArea() {
+    if (terrainPoints.length < 3 || !bridge) { return; }
+    bridge.terrainUploadRequested(JSON.stringify(terrainPoints));
+}
+
+function cancelTerrainArea() {
+    setTerrainUploadState('idle', '');
+}
+
+function stopTerrainUpload() {
+    if (bridge) { bridge.terrainUploadStopped(); }
+}
+
+// What the control shows, from Python: 'idle' (the button), 'drawing'
+// (Done and Cancel) or 'uploading' (how far it has got, and Stop).
+function setTerrainUploadState(state, text) {
+    var show = function (id, on, shown) {
+        var el = document.getElementById(id);
+        if (el) { el.style.display = on ? (shown || '') : 'none'; }
+    };
+    terrainDrawing = (state === 'drawing');
+    if (terrainDrawing) {
+        // Clicks on the map mean corners now, and nothing else.
+        if (fenceDrawing) { setFenceDrawing(false); }
+        if (waypointMode) { setWaypointMode(false); }
+    }
+    if (state === 'idle') { clearTerrainArea(); }
+    if (state === 'uploading' && terrainShape && terrainShape.setStyle) {
+        terrainShape.setStyle({dashArray: null, fillOpacity: 0.1});
+    }
+    show('tu-start', state === 'idle');
+    show('tu-title', state !== 'idle');
+    show('tu-buttons', state !== 'idle', 'flex');
+    show('tu-done', state === 'drawing');
+    show('tu-cancel', state === 'drawing');
+    show('tu-stop', state === 'uploading');
+    var t = document.getElementById('tu-text');
+    if (t) {
+        t.textContent = (state === 'drawing') ? 'Click the corners'
+                                              : (text || '');
+        t.style.display = (state === 'idle') ? 'none' : '';
+    }
+    var done = document.getElementById('tu-done');
+    if (done) { done.disabled = terrainPoints.length < 3; }
+    alignTerrainPanel();
+}
+
 map.on('click', function(e) {
     var lat = e.latlng.lat;
     var lon = e.latlng.lng;
+
+    if (terrainDrawing) {
+        addTerrainCorner(lat, lon);
+        return;
+    }
 
     if (fenceDrawing) {
         addFenceCorner(lat, lon);
@@ -3462,6 +3627,9 @@ class Bridge(QObject):
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
+    terrain_upload_pressed = Signal()
+    terrain_upload_requested = Signal(list)
+    terrain_upload_stopped = Signal()
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
@@ -3501,6 +3669,24 @@ class Bridge(QObject):
     @Slot()
     def fenceCleared(self):
         self.fence_cleared.emit()
+
+    @Slot()
+    def terrainUploadPressed(self):
+        self.terrain_upload_pressed.emit()
+
+    @Slot(str)
+    def terrainUploadRequested(self, points_json):
+        """The drawn area's corners, as JSON - see fenceRequested."""
+        try:
+            pts = json.loads(points_json)
+        except (ValueError, TypeError):
+            return
+        self.terrain_upload_requested.emit(
+            [(float(a), float(b)) for a, b in pts if a is not None])
+
+    @Slot()
+    def terrainUploadStopped(self):
+        self.terrain_upload_stopped.emit()
 
     @Slot(bool)
     def adsbToggled(self, enabled):
@@ -3556,6 +3742,9 @@ class MapView(QWebEngineView):
     fence_requested = Signal(list)
     fence_cleared = Signal()
     home_moved = Signal(float, float)
+    terrain_upload_pressed = Signal()
+    terrain_upload_requested = Signal(list)
+    terrain_upload_stopped = Signal()
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
@@ -3591,6 +3780,12 @@ class MapView(QWebEngineView):
             self.fence_cleared, Qt.ConnectionType.QueuedConnection)
         self._bridge.home_moved.connect(
             self.home_moved, Qt.ConnectionType.QueuedConnection)
+        self._bridge.terrain_upload_pressed.connect(
+            self.terrain_upload_pressed, Qt.ConnectionType.QueuedConnection)
+        self._bridge.terrain_upload_requested.connect(
+            self.terrain_upload_requested, Qt.ConnectionType.QueuedConnection)
+        self._bridge.terrain_upload_stopped.connect(
+            self.terrain_upload_stopped, Qt.ConnectionType.QueuedConnection)
         self._bridge.adsb_toggled.connect(
             self.adsb_toggled, Qt.ConnectionType.QueuedConnection)
         self._bridge.adsb_center_changed.connect(
@@ -3902,6 +4097,12 @@ class MapView(QWebEngineView):
         """Ask the page what it is currently drawing (watcher only)."""
         self.page().runJavaScript("JSON.stringify(mavgcsDrawState());",
                                   callback)
+
+    def set_terrain_upload_state(self, state, text=""):
+        """What the Terrain Upload control shows: "idle", "drawing" or
+        "uploading", with a line saying how far it has got."""
+        self._run_js("setTerrainUploadState(%s, %s);"
+                     % (json.dumps(str(state)), json.dumps(str(text))))
 
     def set_fence_failed(self, reason):
         """The upload did not get there - say so on the shape itself."""

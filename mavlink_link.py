@@ -30,6 +30,7 @@ from PySide6.QtCore import QThread, Signal
 from pymavlink import mavutil
 
 import multilink
+import terrain_upload
 
 # Recent pymavlink versions dropped the "device:baud with no known prefix
 # means serial" fallback - mavlink_connection() now treats ANY string
@@ -261,6 +262,44 @@ class _Link:
 MISSION_STEP_TIMEOUT_S = 10.0
 
 
+class _TerrainLinkIO:
+    """What a terrain upload needs from the link (see
+    terrain_upload.TerrainUpload) - and the rule a second time, here at the
+    link: terrain goes out only on the flight controller's own USB - or to
+    ArduPilot's simulator, which cannot fly - and only while the aircraft
+    is disarmed. A setting or a message rate the upload puts back goes out
+    only there as well, armed or not."""
+
+    def __init__(self, link):
+        self._link = link
+
+    def where(self):
+        return self._link._terrain_where()
+
+    def armed(self):
+        return bool(self._link._was_armed)
+
+    def send_terrain(self, fn):
+        if self._link._was_armed or not self._link._terrain_where()[0]:
+            return False
+        return self._link._terrain_send(fn)
+
+    def send_setting(self, fn):
+        if not self._link._terrain_where()[0]:
+            return False
+        return self._link._terrain_send(fn)
+
+    def progress(self, done, total, text):
+        self._link.terrain_upload_progress.emit(int(done), int(total), text)
+
+    def note(self, text):
+        self._link._terrain_event(text, 6)
+
+    def finished(self, ok, text):
+        self._link._terrain_event(text, 6 if ok else 4)
+        self._link.terrain_upload_finished.emit(bool(ok), text)
+
+
 class MavlinkLink(QThread):
     # roll, pitch, yaw in radians
     attitude_update = Signal(float, float, float)
@@ -410,6 +449,11 @@ class MavlinkLink(QThread):
     # it actually knows: spacing is the grid size of its terrain data
     # and comes back zero when it has none.
     vehicle_terrain_update = Signal(float, float, int)
+    # Terrain Upload (see terrain_upload.py): squares done, squares in all,
+    # and a line for the map's control; then whether it all went in and
+    # read back as sent, and what happened.
+    terrain_upload_progress = Signal(int, int, str)
+    terrain_upload_finished = Signal(bool, str)
 
     # The five EKF variances, sent apart from the single worst-of figure
     # the HUD flag uses. Buried in that max() a variance can only say the
@@ -488,7 +532,8 @@ class MavlinkLink(QThread):
     )
 
     def __init__(self, connection_string="udpin:0.0.0.0:14550", parent=None,
-                 attitude_hz=5.0, position_hz=2.0, full_telemetry=False):
+                 attitude_hz=5.0, position_hz=2.0, full_telemetry=False,
+                 usb_check=None):
         """
         connection_string examples:
           "udpin:0.0.0.0:14550"   -> listen for incoming UDP packets on 14550
@@ -541,6 +586,20 @@ class MavlinkLink(QThread):
         self._rx = queue.Queue()
         self._link_lock = threading.Lock()
         self._add_requests = []         # from the GUI thread
+        # Terrain Upload: the one running, if any; what the GUI asked for,
+        # waiting for this thread; and whether each link is the flight
+        # controller's own USB, worked out once per link per upload.
+        # usb_check is for tests, which have no flight controller to plug
+        # in: the app always gets the real one.
+        self._terrain_upload = None
+        self._terrain_cmds = []
+        self._usb_known = {}
+        self._usb_check = usb_check or terrain_upload.flight_controller_usb
+        self._vehicle_heard = False
+        # Whether the aircraft is ArduPilot's simulator (SITL): it has
+        # settings a flight controller does not - see
+        # _request_simulator_check.
+        self._simulator = False
         self._remove_requests = []      # likewise
         self._choice_requests = []      # likewise; "" means automatic
         # The link the user picked by hand, as its connection string - or
@@ -657,6 +716,15 @@ class MavlinkLink(QThread):
         try:
             self._run_link()
         finally:
+            # A terrain upload still running: put back what it changed on
+            # the aircraft while the link is still open, and say how far it
+            # got - no waiting for an answer on the way out.
+            if self._terrain_upload is not None:
+                try:
+                    self._terrain_upload.close("the link was closed")
+                except Exception:
+                    pass
+                self._terrain_upload = None
             # Hand the vehicle back as we found it. Stream rates live in the
             # autopilot, not here, so anything we asked for outlives this
             # process: close the app, downgrade it, and the vehicle is still
@@ -760,6 +828,7 @@ class MavlinkLink(QThread):
             # the real autopilot's ids, not the (0, 0) default.
             self.master.target_system = hb.get_srcSystem()
             self.master.target_component = hb.get_srcComponent()
+            self._vehicle_heard = True
             self.connection_status.emit(
                 True,
                 f"Connected (sysid={self.master.target_system}, "
@@ -779,6 +848,7 @@ class MavlinkLink(QThread):
             self._request_battery_limits()
             self._request_fence_params()
             self._request_terrain_follow()
+            self._request_simulator_check()
             self._param_retries = 0
             self._param_retry_next = time.time() + self.PARAM_RETRY_EVERY_S
             if self._want_elevator:
@@ -825,6 +895,8 @@ class MavlinkLink(QThread):
             self._drive_mode_request(now)
             # And the same for a terrain-following press.
             self._drive_terrain_follow(now)
+            # A terrain upload, if one is running or was asked for.
+            self._drive_terrain_upload(now)
 
             if self._ftp is not None:
                 self._drive_param_ftp(now)
@@ -982,6 +1054,16 @@ class MavlinkLink(QThread):
                 # Belongs to the parameter transfer and to nothing else.
                 self._feed_param_ftp(msg)
                 continue
+
+            # The aircraft asking for terrain, and its answers to the
+            # upload's questions, go to the upload while one runs - and to
+            # nothing at all otherwise. An answer about a square of the
+            # area is not about the ground under the aircraft, so it goes
+            # no further.
+            if (self._terrain_upload is not None
+                    and mtype in terrain_upload.HEARD):
+                if self._terrain_upload.on_message(msg, mtype):
+                    continue
 
             if mtype == "ATTITUDE":
                 self.attitude_update.emit(msg.roll, msg.pitch, msg.yaw)
@@ -1235,10 +1317,15 @@ class MavlinkLink(QThread):
                 # also how a write is confirmed.
                 if self._param_writes:
                     self._on_param_write_echo(name, msg.param_value)
+                if self._terrain_upload is not None:
+                    self._terrain_upload.on_param(name, msg.param_value)
                 if name == "WP_LOITER_RAD":
                     self.command_feedback.emit(
                         f"Loiter radius now {msg.param_value:.0f} m"
                     )
+                elif (name == "SIM_SPEEDUP"
+                      and math.isfinite(msg.param_value)):
+                    self._simulator = True
                 elif name == "TERRAIN_FOLLOW":
                     # Whatever drew this reading - our own write, the
                     # parameter window, another ground station, a
@@ -1913,6 +2000,10 @@ class MavlinkLink(QThread):
 
     def _link_broke(self, link, error, now):
         """A link's connection failed: close it, and open it again later."""
+        self._usb_known.pop(link.connection_string, None)
+        if link is self._active_link and self._terrain_upload is not None:
+            self._terrain_upload.stop("the link it was on broke (%s)"
+                                      % _describe_link_error(error))
         conn, link.conn = link.conn, None
         link.error = _describe_link_error(error)
         link.next_open_at = now + self.LINK_REOPEN_S
@@ -2013,12 +2104,109 @@ class MavlinkLink(QThread):
         link.down_counted = True
         return link.drop_outs.dropped(now)
 
+    # ------------------------------------------------------------------
+    # Terrain Upload. The work is terrain_upload.TerrainUpload's; this is
+    # where it meets the link.
+
+    def terrain_upload_blocker(self):
+        """Why a terrain upload cannot start now, or None. GUI thread."""
+        if self.master is None or not self._vehicle_heard:
+            return ("Terrain Upload: connect to the aircraft first - over "
+                    "the flight controller's own USB cable.")
+        self._usb_known.pop(self._active_connection(), None)
+        allowed, what = self._terrain_where()
+        if not allowed:
+            return ("Terrain Upload works only over the flight controller's "
+                    "own USB cable (or with ArduPilot's simulator). The link "
+                    "in use, %s, is %s."
+                    % (multilink.link_label(self._active_connection()), what))
+        if self._was_armed:
+            return "Terrain Upload: the aircraft is armed - disarm it first."
+        if self._terrain_upload is not None or self._terrain_cmds:
+            return "A terrain upload is already running."
+        return None
+
+    def start_terrain_upload(self, polygon):
+        """Load the terrain of this area onto the aircraft. GUI thread;
+        queued, and checked again on the link thread before anything is
+        sent."""
+        with self._link_lock:
+            self._terrain_cmds.append(("start", list(polygon)))
+
+    def stop_terrain_upload(self, reason="Stop was pressed"):
+        with self._link_lock:
+            self._terrain_cmds.append(("stop", reason))
+
+    def _active_connection(self):
+        if self._multi and self._active_link is not None:
+            return self._active_link.connection_string
+        return self.connection_string
+
+    def _usb_where(self):
+        """(is the link in use the flight controller's own USB, what it
+        is). Asked of the operating system once per link per upload:
+        listing the ports takes a moment, and a port does not change what
+        it is while it stays plugged in."""
+        connection = self._active_connection()
+        known = self._usb_known.get(connection)
+        if known is None:
+            known = self._usb_check(connection)
+            self._usb_known[connection] = known
+        return known
+
+    def _terrain_event(self, text, severity):
+        """News of a terrain upload: on the feedback line, kept in the
+        message log - a summary is longer than that line shows - and in a
+        watched run's log."""
+        self.command_feedback.emit(text)
+        self.status_text_update.emit(text, severity)
+        _log("TERRAIN", text)
+
+    def _terrain_where(self):
+        """(may terrain go to the aircraft on the link in use, what it is):
+        the flight controller's own USB, or ArduPilot's simulator."""
+        usb, what = self._usb_where()
+        if usb:
+            return True, what
+        if self._simulator:
+            return True, "ArduPilot's simulator (SITL)"
+        return False, what
+
+    def _terrain_send(self, fn):
+        try:
+            with self._send_lock:
+                if self.master is None:
+                    return False
+                fn(self.master.mav, self.master.target_system,
+                   self.master.target_component)
+            return True
+        except Exception as e:
+            _log("TERRAIN", "send failed: %s" % (e,))
+            return False
+
+    def _drive_terrain_upload(self, now):
+        with self._link_lock:
+            cmds, self._terrain_cmds = self._terrain_cmds, []
+        for kind, arg in cmds:
+            if kind == "start":
+                if self._terrain_upload is None:
+                    self._usb_known.clear()
+                    self._terrain_upload = terrain_upload.TerrainUpload(
+                        arg, _TerrainLinkIO(self))
+            elif self._terrain_upload is not None:
+                self._terrain_upload.stop(arg)
+        if self._terrain_upload is not None:
+            self._terrain_upload.tick()
+            if self._terrain_upload.ended:
+                self._terrain_upload = None
+
     def _link_busy(self):
         """Half-way through a conversation with the aircraft on one link."""
         return (self._mission_state is not None or self._ftp is not None
                 or self._param_active or bool(self._param_writes)
                 or self._fence_enable_pending is not None
-                or self._fence_confirm_deadline is not None)
+                or self._fence_confirm_deadline is not None
+                or self._terrain_upload is not None)
 
     def _choose_link(self, now):
         """Ask the chooser whether to move, and move if it says so."""
@@ -2743,6 +2931,27 @@ class MavlinkLink(QThread):
     # cannot fight somebody changing it elsewhere.
     TF_RETRY_EVERY_S = 1.5
     TF_RETRY_FOR_S = 12.0
+
+    def _request_simulator_check(self):
+        """Ask whether the aircraft is ArduPilot's simulator.
+
+        SIM_SPEEDUP is one of the simulator's own settings; a flight
+        controller has none of them. A real aircraft answers this read with
+        PARAM_ERROR "does not exist" (or, on older firmware, not at all) -
+        no message for the pilot either way - and the simulator with its
+        value. That answer is what lets Terrain Upload run against SITL,
+        which talks over the network, while a real aircraft on any link but
+        its USB - a radio, or LTE arriving on 127.0.0.1 - is still refused.
+        """
+        if self.master is None:
+            return
+        try:
+            with self._send_lock:
+                self.master.mav.param_request_read_send(
+                    self.master.target_system, self.master.target_component,
+                    b"SIM_SPEEDUP", -1)
+        except Exception:
+            pass
 
     def _request_terrain_follow(self):
         """Ask what TERRAIN_FOLLOW is, rather than assuming it is off."""

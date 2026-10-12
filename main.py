@@ -4879,6 +4879,12 @@ class MainWindow(QMainWindow):
         self.map_view.fence_requested.connect(self.on_fence_requested)
         self.map_view.home_moved.connect(self.on_home_moved)
         self.map_view.fence_cleared.connect(self.on_fence_cleared)
+        self.map_view.terrain_upload_pressed.connect(
+            self.on_terrain_upload_pressed)
+        self.map_view.terrain_upload_requested.connect(
+            self.on_terrain_upload_requested)
+        self.map_view.terrain_upload_stopped.connect(
+            self.on_terrain_upload_stopped)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
         # Under the watcher only, say what the map is drawing every few
@@ -6297,6 +6303,53 @@ class MainWindow(QMainWindow):
             "Aircraft confirms geofence %s" % ("ON" if enabled else "OFF"))
         self.map_view.set_fence_armed(enabled)
 
+    # ---- Terrain Upload (see terrain_upload.py) ---------------------------
+
+    def _terrain_upload_blocker(self):
+        if self.link is None:
+            return ("Terrain Upload: connect to the aircraft first - over "
+                    "the flight controller's own USB cable.")
+        return self.link.terrain_upload_blocker()
+
+    def on_terrain_upload_pressed(self):
+        """The map's Terrain Upload button.
+
+        Drawing starts only if the upload could go - over the flight
+        controller's own USB cable, the aircraft disarmed - so an area is
+        never drawn for nothing. Asked again on Done, and once more on the
+        link before anything is sent.
+        """
+        reason = self._terrain_upload_blocker()
+        if reason:
+            self.on_command_feedback(reason)
+            return
+        self.map_view.set_terrain_upload_state("drawing")
+        self.on_command_feedback(
+            "Terrain Upload: click the corners of the area on the map, "
+            "then Done")
+
+    def on_terrain_upload_requested(self, points):
+        """Done pressed on a drawn area."""
+        reason = self._terrain_upload_blocker()
+        if reason:
+            self.on_command_feedback(reason)
+            self.map_view.set_terrain_upload_state("idle")
+            return
+        self.map_view.set_terrain_upload_state("uploading", "Starting")
+        self.link.start_terrain_upload(points)
+
+    def on_terrain_upload_stopped(self):
+        if self.link is not None:
+            self.link.stop_terrain_upload()
+
+    def on_terrain_upload_progress(self, done, total, text):
+        self.map_view.set_terrain_upload_state("uploading", text)
+
+    def on_terrain_upload_finished(self, ok, summary):
+        # The summary is on the feedback line and in the message log
+        # already - see MavlinkLink._terrain_event.
+        self.map_view.set_terrain_upload_state("idle")
+
     # How long to wait for the vehicle to answer a home change before
     # putting the marker back. Without this a command that draws no reply
     # leaves an amber house sitting somewhere home is not.
@@ -6681,9 +6734,11 @@ class MainWindow(QMainWindow):
         A terrain-frame waypoint is flown against terrain data the AIRCRAFT
         holds, not ours. ArduPilot wants TERRAIN_ENABLE on and tiles for
         the area - on its own card, or streamed to it by a ground station
-        that serves them, which this does not do. Without them it will not
-        hold the height above the ground that was asked for, and nothing
-        about the upload says so: the mission is accepted either way.
+        that serves them, which this never does in flight: Terrain Upload
+        puts them on the card, on the ground, over the flight controller's
+        USB. Without them it will not hold the height above the ground
+        that was asked for, and nothing about the upload says so: the
+        mission is accepted either way.
 
         TERRAIN_REPORT's spacing is zero when the aircraft holds none,
         which is what _vehicle_terrain_is_good watches - so this is
@@ -6694,7 +6749,8 @@ class MainWindow(QMainWindow):
         self.on_command_feedback(
             "Note: the aircraft reports no terrain data of its own. A "
             "terrain mission needs TERRAIN_ENABLE on and tiles for this "
-            "area on its card - MavGCS does not stream them.")
+            "area on its card - load them on the ground with Terrain "
+            "Upload (USB). MavGCS never streams them in flight.")
 
     def on_waypoint_alt_changed(self, wp_id, alt):
         """An altitude typed into a waypoint's popup on the map.
@@ -6931,6 +6987,10 @@ class MainWindow(QMainWindow):
         self.link.param_write_done.connect(self.on_param_write_done)
         self.link.link_stats_update.connect(self.on_link_stats)
         self.link.vehicle_terrain_update.connect(self.on_vehicle_terrain)
+        self.link.terrain_upload_progress.connect(
+            self.on_terrain_upload_progress)
+        self.link.terrain_upload_finished.connect(
+            self.on_terrain_upload_finished)
         self.link.ekf_variances_update.connect(self.sensor_panel.set_variances)
         self.link.status_text_update.connect(self.on_status_text)
         self.link.start()
@@ -7101,6 +7161,8 @@ class MainWindow(QMainWindow):
         self._vehicle_terrain_at = None
         self._own_terrain_elev = None
         self.vehicle_terrain_worker.clear()
+        # An area being drawn or loaded has nothing to go to any more.
+        self.map_view.set_terrain_upload_state("idle")
 
     # The middle state says what to do about it rather than what it is.
     # "MARGINAL" described the margin; by the time the margin is that

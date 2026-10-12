@@ -189,6 +189,7 @@ class FakePlane(threading.Thread):
         super().__init__(daemon=True)
         self.channels = []
         self.custom_mode = 0
+        self.armed = False          # said in every heartbeat, as ArduPlane does
         self.running = True
         self.t0 = time.time()
 
@@ -206,7 +207,9 @@ class FakePlane(threading.Thread):
                 if now - last_hb >= 1.0:
                     frames.insert(0, M.MAVLink_heartbeat_message(
                         M.MAV_TYPE_FIXED_WING, M.MAV_AUTOPILOT_ARDUPILOTMEGA,
-                        M.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.custom_mode,
+                        M.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+                        | (M.MAV_MODE_FLAG_SAFETY_ARMED if self.armed else 0),
+                        self.custom_mode,
                         M.MAV_STATE_STANDBY, 3))
                 for f in frames:
                     data = ch.frame(f)
