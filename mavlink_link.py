@@ -509,6 +509,12 @@ class MavlinkLink(QThread):
         self._mode_wanted = None
         self._mode_retry_next = 0.0
         self._mode_retry_until = 0.0
+        # The aircraft's mode by its last heartbeat, and what it was when
+        # the outstanding mode was asked for - so a change made some other
+        # way, by the pilot's switch or a failsafe, can be told from a
+        # request that was lost. See _note_vehicle_mode.
+        self._vehicle_mode = None
+        self._mode_before = None
         # TERRAIN_FOLLOW: what the aircraft last said, and what we have
         # asked it to be and not yet seen echoed. See set_terrain_follow.
         self._terrain_follow = None
@@ -1528,11 +1534,8 @@ class MavlinkLink(QThread):
 
                 # The aircraft saying which mode it is in is the only
                 # confirmation worth having - an ACK says the command was
-                # received, not that the mode took. However it got there,
-                # including the pilot's own switch, there is nothing left
-                # to chase.
-                if self._mode_wanted is not None and mode == self._mode_wanted:
-                    self._clear_mode_request()
+                # received, not that the mode took.
+                self._note_vehicle_mode(mode)
 
                 # ArduPilot sets home at arming and announces it once. Once
                 # is not much of a guarantee over a radio link that drops
@@ -4058,6 +4061,7 @@ class MavlinkLink(QThread):
         # there is only ever one mode outstanding.
         now = time.time()
         self._mode_wanted = mode_name
+        self._mode_before = self._vehicle_mode
         self._mode_retry_next = now + self.MODE_RETRY_EVERY_S
         self._mode_retry_until = now + self.MODE_RETRY_FOR_S
         self.mode_pending.emit(mode_name)
@@ -4086,9 +4090,33 @@ class MavlinkLink(QThread):
         if self._mode_wanted is None:
             return
         self._mode_wanted = None
+        self._mode_before = None
         self._mode_retry_next = 0.0
         self._mode_retry_until = 0.0
         self.mode_pending.emit("")
+
+    def _note_vehicle_mode(self, mode):
+        """A heartbeat from the aircraft: the mode it is in now.
+
+        In the mode asked for, however it got there, there is nothing left
+        to chase. In a mode that is neither that one nor the one it was in
+        when the button was pressed, something else has changed it - the
+        pilot's switch, a failsafe, a mission running out - and repeating
+        the button would fight it. It used to, for the rest of the ten
+        seconds: on a poor link, a mode chosen on the transmitter could be
+        undone by a press it had overtaken. The pilot asked for that to
+        stop (2026-10-12). Still in the mode it was in, the request may
+        simply have been lost, and repeating it is what the repeat is for.
+        """
+        if self._mode_wanted is not None:
+            if mode == self._mode_wanted:
+                self._clear_mode_request()
+            elif self._mode_before is not None and mode != self._mode_before:
+                wanted = self._mode_wanted
+                self._clear_mode_request()
+                self.command_feedback.emit(
+                    f"Mode changed to {mode} - not repeating {wanted}")
+        self._vehicle_mode = mode
 
     def _drive_mode_request(self, now):
         """Send the outstanding mode again, or give up on it."""

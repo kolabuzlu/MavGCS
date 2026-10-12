@@ -53,10 +53,13 @@ class Link:
     _send_mode = SEND
     _drive_mode_request = DRIVE
     _clear_mode_request = CLEAR
+    _note_vehicle_mode = MavlinkLink._note_vehicle_mode
 
     def __init__(self, delivery=1.0):
         self._send_lock = threading.Lock()
         self._mode_wanted = None
+        self._vehicle_mode = None
+        self._mode_before = None
         self._mode_retry_next = 0.0
         self._mode_retry_until = 0.0
         self.command_feedback = Emitter()
@@ -160,6 +163,66 @@ link._mode_retry_next, link._mode_retry_until = 0.0, 100.0
 link._drive_mode_request(50.0)
 note("nothing more is sent", link.attempts == before,
      "%d -> %d" % (before, link.attempts))
+
+print("")
+print("5b. a mode nobody here asked for: the repeat stops, it does not fight")
+# The pilot asked for this (2026-10-12): on a poor link, a press could
+# undo a mode chosen on the transmitter after it - or a failsafe's RTL -
+# for the rest of the ten seconds. Now the repeat stops the moment the
+# aircraft reports a mode it was neither in when pressed nor asked for.
+
+
+def pressed(mode, was="AUTO", delivery=0.0):
+    """A press on a link that loses it; the aircraft last said `was`."""
+    lk = Link(delivery=delivery)
+    lk._note_vehicle_mode(was)
+    lk.set_mode(mode)
+    lk._mode_retry_next, lk._mode_retry_until = 0.0, 100.0
+    return lk
+
+
+link = pressed("LOITER")
+link._note_vehicle_mode("AUTO")             # the request was lost
+link._drive_mode_request(1.0)
+note("still in the old mode: the request was lost, so it is repeated",
+     link._mode_wanted == "LOITER" and link.attempts == 2,
+     "%d sends" % link.attempts)
+
+link = pressed("LOITER", delivery=1.0)
+link._note_vehicle_mode("LOITER")
+note("in the mode asked for: confirmed, and nothing more said",
+     link._mode_wanted is None
+     and not any("not repeating" in m for m in link.command_feedback.said))
+
+link = pressed("LOITER")
+link._note_vehicle_mode("MANUAL")           # the pilot's own switch
+before = link.attempts
+link._drive_mode_request(5.0)
+note("the pilot's switch: the repeat stops, nothing more is sent",
+     link._mode_wanted is None and link.attempts == before,
+     "%d -> %d sends" % (before, link.attempts))
+note("and says why", link.command_feedback.said[-1]
+     == "Mode changed to MANUAL - not repeating LOITER",
+     link.command_feedback.said[-1])
+note("and the button stops being lit", link.mode_pending.said[-1] == "")
+
+link = pressed("LOITER")
+link._note_vehicle_mode("RTL")              # a failsafe
+note("a failsafe's RTL is not fought either", link._mode_wanted is None)
+
+link = Link(delivery=0.0)                   # no heartbeat seen before it
+link.set_mode("LOITER")
+link._note_vehicle_mode("MANUAL")
+note("no mode known before the press: it cannot tell, so it repeats as before",
+     link._mode_wanted == "LOITER")
+
+link = pressed("LOITER")
+link._note_vehicle_mode("MANUAL")
+link.delivery = 1.0
+link.set_mode("LOITER")                     # pressed again, on purpose
+note("pressing again afterwards sends it as normal",
+     link._mode_wanted == "LOITER"
+     and link.on_wire[-1] == PLANE_MODES["LOITER"], link.on_wire)
 
 print("")
 print("6. the button colours")
