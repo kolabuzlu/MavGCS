@@ -71,3 +71,4 @@ one first tagged.
 | V2.4.0 | `4535f177ef` | 2026-10-07 | Link switching: several links to one aircraft, the best one used by itself |
 | V2.4.1 | `afc2cf0c18` | 2026-10-10 | Draft waypoints in yellow, and a drawn mission no longer joined to the one in the air |
 | V2.4.2 | `5084227bdb` | 2026-10-12 | A mode button's repeat never fights the pilot's switch or a failsafe |
+| V2.5.0 | `60acee5a7c` | 2026-10-12 | Terrain Upload: an area's terrain onto the aircraft, over USB only |
