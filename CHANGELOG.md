@@ -1,6 +1,6 @@
 # MavGCS Changelog
 
-## V2.5.0 - Terrain Upload added.
+## V2.5.0 - Terrain upload added.
 Bug fixes and improvements.
 
 ## V2.4.2 - Bug fixes and improvements.
