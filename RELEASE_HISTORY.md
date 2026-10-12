@@ -70,3 +70,4 @@ one first tagged.
 | V2.3.3 | `427d6ca068` | 2026-09-28 | The first launch moves onto the discrete graphics card again |
 | V2.4.0 | `4535f177ef` | 2026-10-07 | Link switching: several links to one aircraft, the best one used by itself |
 | V2.4.1 | `afc2cf0c18` | 2026-10-10 | Draft waypoints in yellow, and a drawn mission no longer joined to the one in the air |
+| V2.4.2 | `5084227bdb` | 2026-10-12 | A mode button's repeat never fights the pilot's switch or a failsafe |
