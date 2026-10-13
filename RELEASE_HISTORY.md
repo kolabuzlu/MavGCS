@@ -74,3 +74,4 @@ one first tagged.
 | V2.5.0 | `60acee5a7c` | 2026-10-12 | Terrain Upload: an area's terrain onto the aircraft, over USB only |
 | V2.5.1 | `1a05547795` | 2026-10-13 | Review fixes: Terrain Upload's simulator rule, degree-line squares and thin strips, the card's pauses, no SD card said at once; the waypoint box unticks |
 | V2.5.2 | `d26752f7c9` | 2026-10-13 | Attitude and GPS position rates: 4 Hz offered, and a fresh install starts at 4 Hz attitude, 2 Hz position |
+| V2.5.3 | `5dd508a570` | 2026-10-13 | Terrain Upload sends each part once, again only if still missing 2 s later: no more flooding a flight controller's USB |
