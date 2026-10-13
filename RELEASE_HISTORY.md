@@ -73,3 +73,4 @@ one first tagged.
 | V2.4.2 | `5084227bdb` | 2026-10-12 | A mode button's repeat never fights the pilot's switch or a failsafe |
 | V2.5.0 | `60acee5a7c` | 2026-10-12 | Terrain Upload: an area's terrain onto the aircraft, over USB only |
 | V2.5.1 | `1a05547795` | 2026-10-13 | Review fixes: Terrain Upload's simulator rule, degree-line squares and thin strips, the card's pauses, no SD card said at once; the waypoint box unticks |
+| V2.5.2 | `d26752f7c9` | 2026-10-13 | Attitude and GPS position rates: 4 Hz offered, and a fresh install starts at 4 Hz attitude, 2 Hz position |
