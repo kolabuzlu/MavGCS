@@ -761,6 +761,15 @@ class TerrainUpload:
     # its card has taken it, and that is not a broken card.
     RELOAD_ROUNDS = 1
     REQUEST_INTERVAL_US = 100_000
+    # A part of a square already sent goes again only this long after. The
+    # aircraft asks for a square every REQUEST_INTERVAL_US for as long as
+    # any part of it has not reached it, and a real one over USB takes in
+    # about 150 parts a second (ArduPlane 4.7.1, 2026-10-13): answering
+    # every ask with every part still missing put more into the cable than
+    # it could take - 6066 parts sent for one square of 56, the copies
+    # queuing ahead of everything new - and 3 squares of 29 were loaded in
+    # 82 s. Sent again after this, in case one never arrived.
+    RESEND_S = 2.0
     PROGRESS_EVERY_S = 0.25
     # Within this of what was sent, the height the aircraft reports agrees:
     # whole metres, interpolated in float.
@@ -815,6 +824,7 @@ class TerrainUpload:
                                     #           nomap / lost / mismatch
         self._why_nomap = {}
         self._answered = set()      # area squares this upload sent
+        self._sent_at = {}          # square -> when each part last went
         self._extra = set()         # squares outside it, answered
         self._reported = {}         # square -> height read back at the end
         self._pushing = set()       # asked about only to empty its memory
@@ -1271,6 +1281,7 @@ class TerrainUpload:
                 del self._result[sq]
                 self._reported.pop(sq, None)
                 self._tries.pop(sq, None)
+                self._sent_at.pop(sq, None)
             self._round = lost
             self._queue = deque(lost)
             self._begin_loading(now)
@@ -1370,20 +1381,28 @@ class TerrainUpload:
                 return
             heights = got[0]
             self._extra.add(sq)
-        self._answer(msg, heights)
+        self._answer(sq, msg, heights)
 
-    def _answer(self, msg, heights):
+    def _answer(self, sq, msg, heights):
         if not self._may_send_terrain():
             return
+        sent_at = self._sent_at.setdefault(sq, [float("-inf")] * GRIDBITS)
+        now = self._clock()
+        bits = [b for b in range(GRIDBITS) if int(msg.mask) >> b & 1
+                and now - sent_at[b] >= self.RESEND_S]
+        if not bits:
+            return                      # all of it still on its way
         lat, lon, spacing = int(msg.lat), int(msg.lon), self._spacing
-        bits = [b for b in range(GRIDBITS) if int(msg.mask) >> b & 1]
 
         def send(mav, sysid, compid):
             for bit in bits:
                 mav.terrain_data_send(lat, lon, spacing, bit,
                                       gridbit_data(heights, bit))
         if self._io.send_terrain(send):
-            self._moved_at = self._clock()
+            now = self._clock()
+            for bit in bits:
+                sent_at[bit] = now
+            self._moved_at = now
 
     # ---- the end ------------------------------------------------------------
 

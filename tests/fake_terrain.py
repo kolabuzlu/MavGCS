@@ -21,12 +21,17 @@ read from ArduPilot master on 2026-10-12, piece by piece:
     spacing 0 where it has no height, and the pending/loaded counts
     (send_terrain_report, get_statistics);
   - TERRAIN_OPTIONS Disable Download (request_missing), the height
-    correction from arming (height_amsl, corrected).
+    correction from arming (height_amsl, corrected);
+  - optionally, how fast it takes in what the ground station sends: a real
+    one over USB took in about 150 TERRAIN_DATA a second (ArduPlane 4.7.1,
+    2026-10-13), the rest waiting in the cable, in order, everything else
+    sent behind them.
 
 Time is the caller's: step() moves it on.
 """
 
 import os
+from collections import deque
 
 import numpy as np
 
@@ -61,7 +66,8 @@ class FakeTerrainPlane:
     """AP_Terrain on one telemetry port."""
 
     def __init__(self, spacing=100, cache_size=12, options=0, enable=1,
-                 card=True, position=None, offset=0.0, sim_speedup=None):
+                 card=True, position=None, offset=0.0, sim_speedup=None,
+                 intake=None):
         self.params = {"TERRAIN_ENABLE": float(enable),
                        "TERRAIN_SPACING": float(spacing),
                        "TERRAIN_OPTIONS": float(options),
@@ -75,6 +81,12 @@ class FakeTerrainPlane:
         self.card = card
         self.position = position        # (lat_e7, lon_e7) or None: no fix
         self.offset = offset            # added to every height reported
+        # Messages from the ground station it takes in a second, None for
+        # each at once; the rest wait in the cable, in order. A burst of a
+        # tenth of a second's worth fits in its buffers.
+        self.intake = intake
+        self.inbox = deque()            # (handler, args) not yet taken in
+        self._intake_budget = 0.0
         self.now = 0.0
         self.outbox = []                # (kind, message) for the GCS
         self.request_interval = 1.0     # TERRAIN_REQUEST slot, default 1 Hz
@@ -93,6 +105,8 @@ class FakeTerrainPlane:
         self._echo_count = 0
         self.drop_writes = set()        # squares whose next write is lost
         self.always_drop = set()        # squares the card never keeps
+        self.lose_data_every = 0        # every Nth TERRAIN_DATA lost on the way
+        self._data_count = 0
 
     # ---- what the ground station sends ----------------------------------
 
@@ -107,14 +121,24 @@ class FakeTerrainPlane:
         return int(self.params["TERRAIN_ENABLE"]) != 0
 
     # pymavlink's send methods, called through io.send_terrain/send_setting.
+    # Each is recorded as sent at once, and acted on when it is taken in.
     def terrain_check_send(self, lat, lon):
         self.got.append(("TERRAIN_CHECK", (lat, lon), self.now))
-        self._report((lat, lon), extrapolate=False)
+        self._arrive(self._report, (lat, lon), False)
 
     def terrain_data_send(self, lat, lon, grid_spacing, gridbit, data):
         sq = T.square_of_corner(lat, lon, grid_spacing)
         self.got.append(("TERRAIN_DATA", sq, self.now))
         self.data_after.append((self.now, sq))
+        self._data_count += 1
+        if (self.lose_data_every
+                and self._data_count % self.lose_data_every == 0):
+            return                      # lost on the way
+        self._arrive(self._take_data, lat, lon, grid_spacing, gridbit,
+                     list(data))
+
+    def _take_data(self, lat, lon, grid_spacing, gridbit, data):
+        """handle_terrain_data."""
         for e in self.cache:
             if (e.state is not None and abs(e.lat - lat) <= 5
                     and abs(e.lon - lon) <= 5
@@ -134,18 +158,27 @@ class FakeTerrainPlane:
     def param_request_read_send(self, sysid, compid, name, index):
         name = name.decode() if isinstance(name, bytes) else name
         self.got.append(("PARAM_REQUEST_READ", name, self.now))
+        self._arrive(self._param_read, name)
+
+    def _param_read(self, name):
         if name in self.params:
             self._echo(name)
 
     def param_set_send(self, sysid, compid, name, value, ptype):
         name = name.decode() if isinstance(name, bytes) else name
         self.got.append(("PARAM_SET", (name, value), self.now))
+        self._arrive(self._param_set, name, value)
+
+    def _param_set(self, name, value):
         if name in self.params:
             self.params[name] = float(int(value))
             self._echo(name)
 
     def command_long_send(self, sysid, compid, command, conf, p1, p2, *rest):
         self.got.append(("COMMAND_LONG", (command, p1, p2), self.now))
+        self._arrive(self._command, command, p1, p2)
+
+    def _command(self, command, p1, p2):
         if (command == M.MAV_CMD_SET_MESSAGE_INTERVAL
                 and int(p1) == M.MAVLINK_MSG_ID_TERRAIN_REQUEST):
             if int(p2) > 0:
@@ -154,6 +187,22 @@ class FakeTerrainPlane:
             else:
                 self.request_interval = 1.0
                 self.interval_set = False
+
+    def _arrive(self, handler, *args):
+        if self.intake is None:
+            handler(*args)
+        else:
+            self.inbox.append((handler, args))
+
+    def _take_in(self, elapsed):
+        """update_receive: what has come down the cable, as fast as it
+        takes it in."""
+        self._intake_budget = min(self._intake_budget + elapsed * self.intake,
+                                  max(1.0, self.intake * 0.1))
+        while self.inbox and self._intake_budget >= 1.0:
+            self._intake_budget -= 1.0
+            handler, args = self.inbox.popleft()
+            handler(*args)
 
     def _echo(self, name):
         self._echo_count += 1
@@ -309,7 +358,9 @@ class FakeTerrainPlane:
 
     def step(self, now):
         """Everything the aircraft does up to this time."""
-        self.now = now
+        elapsed, self.now = now - self.now, now
+        if self.intake is not None:
+            self._take_in(elapsed)
         if now >= self.next_update:
             self.next_update = now + 0.1
             self.update()

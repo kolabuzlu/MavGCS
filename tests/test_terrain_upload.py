@@ -24,6 +24,7 @@ import math
 import os
 import random
 import sys
+from collections import Counter
 from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -411,6 +412,42 @@ note("its own square was answered, and said so",
 note("at the aircraft's pace - about 2 s a square",
      r.t < len(r.session._usable) * 2.0 + 60, "%.0f s for %d squares"
      % (r.t, len(r.session._usable)))
+
+
+def whole_on_card(rig):
+    return [sq for sq in rig.session._usable
+            if rig.plane.on_card(sq) is not None
+            and rig.plane.on_card(sq)[0] == (1 << 56) - 1]
+
+
+# A real one over USB takes in about 150 parts a second (ArduPlane 4.7.1,
+# 2026-10-13), the rest waiting in the cable, in order. With no position
+# fix it asks for a square ten times a second until all of it has reached
+# it, and every ask was answered with every part still missing: copies of
+# parts already on their way, queuing ahead of everything new. On the real
+# one 6066 parts went for one square of 56, and 3 squares of 29 were
+# loaded in 82 s; here 391564 parts went in 14 minutes, and the upload
+# ended without one square loaded and checked.
+r = Rig(FakeTerrainPlane(intake=150), AREA)
+done = r.run()
+parts = Counter(r.sent("TERRAIN_DATA"))
+note("on an aircraft that takes in 150 parts a second: done, every square "
+     "on its card, whole",
+     done and done[0] and len(whole_on_card(r)) == len(r.session._usable),
+     "%d of %d; %s" % (len(whole_on_card(r)), len(r.session._usable), done))
+note("each part sent once, not again while it is on its way",
+     parts and sum(parts.values()) <= 1.1 * 56 * len(parts),
+     "%d parts for %d squares, at most %d for one"
+     % (sum(parts.values()), len(parts), max(parts.values() or [0])))
+note("in well under a minute", r.t < 60, "%.0f s" % r.t)
+# And a part that never arrives goes again, a while later.
+plane = FakeTerrainPlane()
+plane.lose_data_every = 7
+r = Rig(plane, AREA)
+done = r.run()
+note("a part lost on the way is sent again: done, every square whole",
+     done and done[0] and len(whole_on_card(r)) == len(r.session._usable),
+     "%d of %d; %s" % (len(whole_on_card(r)), len(r.session._usable), done))
 
 # Already on the card: left alone.
 plane = FakeTerrainPlane()
