@@ -532,7 +532,7 @@ class MavlinkLink(QThread):
     )
 
     def __init__(self, connection_string="udpin:0.0.0.0:14550", parent=None,
-                 attitude_hz=5.0, position_hz=2.0, full_telemetry=False,
+                 attitude_hz=4.0, position_hz=2.0, full_telemetry=False,
                  usb_check=None):
         """
         connection_string examples:

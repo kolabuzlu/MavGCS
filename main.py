@@ -3124,9 +3124,11 @@ class TelemetryRatesDialog(QDialog):
     def cog_enabled(cls) -> bool:
         return bool(load_settings().get(cls.SETTING_COG, cls.DEFAULT_COG))
 
-    DEFAULT_ATTITUDE = 5.0
+    # What a fresh install asks for (the pilot's choice, 2026-10-13). A rate
+    # once chosen in the dialog is saved and stays.
+    DEFAULT_ATTITUDE = 4.0
     DEFAULT_POSITION = 2.0
-    CHOICES = [1.0, 2.0, 3.0, 5.0]
+    CHOICES = [1.0, 2.0, 3.0, 4.0, 5.0]
 
     @classmethod
     def current(cls):
