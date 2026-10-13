@@ -35,6 +35,7 @@ import numpy as np
 
 import terrain_upload as T
 from fake_terrain import FakeTerrainPlane
+from terrain_provider import _TileData
 
 fails = []
 
@@ -125,6 +126,39 @@ note("the point a square is asked about is in that square, even on a "
      "degree's edge", check_bad == 0, "%d wrong" % check_bad)
 note("every point lands on its own grid step", point_bad == 0,
      "%d of %d off; worst %.5f of a step" % (point_bad, compared, worst))
+# The last square of a row can be all but gone at its degree's east line:
+# a strip metres wide, often tapering to nothing inside the square. A
+# quarter step in was already the next degree, so the square was asked
+# about there - and never loaded, but counted as already on the card
+# (found 2026-10-13). Every row's last square, 60 S to 60 N.
+
+
+def east_line(square, north_steps, spacing):
+    """Steps east of its corner where a square's degree ends, north_steps
+    north of that corner, by the aircraft's arithmetic (get_distance_NE
+    scales by the latitude halfway to the point)."""
+    lat, _lon = T._place(square, north_steps, 0, spacing)
+    return (1e7 * T.LATLON_TO_M * T.longitude_scale(
+        int((square.lat_deg * 1e7 + float(lat)) / 2.0))) / spacing
+
+
+rows_seen = strip_bad = 0
+for spacing in (30, 50, 100, 200):
+    top = 1e7 * T.LATLON_TO_M / spacing
+    for lat_deg in range(-60, 60):
+        for gx in range(int(top // T.BLOCK_SPACING_X) + 1):
+            n0 = gx * T.BLOCK_SPACING_X
+            if n0 >= top:
+                continue
+            first = T.Square(lat_deg, 29, gx, 0)
+            widest = max(east_line(first, n0 + c, spacing)
+                         for c in (0, min(T.BLOCK_SPACING_X, top - n0)))
+            sq = T.Square(lat_deg, 29, gx, int(widest // T.BLOCK_SPACING_Y))
+            p = T.check_point(sq, spacing)
+            rows_seen += 1
+            strip_bad += p is None or T.square_at(p[0], p[1], spacing)[0] != sq
+note("the last square of every row, however thin, is asked about inside it",
+     strip_bad == 0, "%d wrong of %d" % (strip_bad, rows_seen))
 # One worked by hand, so the mirror is not only consistent with itself:
 # a square's corner is a whole number of square-widths from its degree's
 # corner, and the first square is that corner.
@@ -499,11 +533,19 @@ note("the link closing: ends at once, sends what puts the aircraft back, "
      done and not done[0] and "unconfirmed" in done[1]
      and int(r.plane.params["TERRAIN_OPTIONS"]) == 1, done)
 
-# No card: the aircraft never finishes reading it, so it never asks.
+# No card: the aircraft never finishes reading it, so it never asks - as a
+# real ArduPlane 4.7.1 with no card did (2026-10-13): every square held
+# waiting for the card, nothing asked for. Said within seconds, not after
+# every square has timed out (that took over ten minutes on "Loading").
 r = Rig(FakeTerrainPlane(card=False), AREA)
 done = r.run(until=3000.0)
-note("no card: finishes, saying the aircraft never took the squares",
-     done and not done[0] and "never taken" in done[1], done)
+note("no card: said within seconds, asking whether a card is in",
+     done and not done[0] and "is there a card in it" in done[1]
+     and r.t < 30.0, "%.0f s: %s" % (r.t, done))
+note("and with a position fix too",
+     Rig(FakeTerrainPlane(card=False, position=(
+         int(LAT0 * 1e7), int(LON0 * 1e7))), AREA).run(until=3000.0)[1]
+     .count("is there a card in it") == 1)
 
 # A small memory, and a write the card lost once. Loaded early, that square
 # is pushed out of the aircraft's memory long before the check, so the
@@ -547,6 +589,133 @@ r = Rig(FakeTerrainPlane(offset=7.0), AREA)
 done = r.run()
 note("a height correction from arming is allowed for, and said",
      done and done[0] and "+7.0 m" in done[1], done)
+
+# Between batches, the card's turn: a batch loaded, then nothing new until
+# the aircraft has written it. A new square to ask about is a read, reads go
+# before writes, and the next new square can push a finished one out of the
+# aircraft's memory unwritten. The pause only ever began after a timeout,
+# never after a batch answered normally (found 2026-10-13): over an area of
+# about ninety squares the card then lost some for good.
+events = []                         # ("batch" or "pause", reload round)
+_tick_loading = T.TerrainUpload._tick_loading
+
+
+def counted(self, now):
+    was_empty, was_settling = not self._in_flight, self._settling_since
+    _tick_loading(self, now)
+    if was_settling is None and self._settling_since is not None:
+        events.append(("pause", self._reload_round))
+    if was_empty and self._in_flight:
+        events.append(("batch", self._reload_round))
+
+
+T.TerrainUpload._tick_loading = counted
+try:
+    r = Rig(FakeTerrainPlane(), box(LAT0, LON0, 8.0))
+    done = r.run(until=3000.0)
+finally:
+    T.TerrainUpload._tick_loading = _tick_loading
+whole = [sq for sq in r.session._usable if r.plane.on_card(sq) is not None
+         and r.plane.on_card(sq)[0] == (1 << 56) - 1]
+unpaused = sum(1 for a, b in zip(events, events[1:])
+               if a == b and a[0] == "batch")
+note("the card gets its turn between one batch and the next",
+     sum(e[0] == "batch" for e in events) > 2 and unpaused == 0,
+     "%d batches, %d pauses, %d started with no pause before them"
+     % (sum(e[0] == "batch" for e in events),
+        sum(e[0] == "pause" for e in events), unpaused))
+note("so a large area is kept whole, every square of it",
+     done and done[0] and len(whole) == len(r.session._usable),
+     "%d of %d; %s" % (len(whole), len(r.session._usable), done))
+# And checked as it is. Checked one square after another, new ones went
+# ahead of squares still waiting to be read from the card, three of them
+# timed out as "lost", were found on the card when loaded again - and the
+# summary said "3 already on the card" for a card that was empty (found
+# 2026-10-13).
+note("onto an empty card, nothing is said to be on it already, and nothing "
+     "had to be loaded twice",
+     done and "already on the card" not in done[1]
+     and r.session._reload_round == 0,
+     "reload rounds %d; %s" % (r.session._reload_round, done))
+
+
+class DemMap:
+    """The map's own tiles (terrain_provider._TileData): one degree each,
+    chosen by the floor, PixelIsPoint from the north-west corner - only
+    coarser than the real ones, at 30 arcseconds. Map above never refuses
+    a point; these refuse what a real tile refuses."""
+
+    N = 120
+
+    def __init__(self, fn=planar):
+        self.fn, self.tiles = fn, {}
+
+    def tile_for(self, lat, lon):
+        key = (math.floor(lat), math.floor(lon))
+        if key not in self.tiles:
+            px = 1.0 / self.N
+            rows = (key[0] + 1) - px * np.arange(self.N)
+            cols = key[1] + px * np.arange(self.N)
+            grid = self.fn(rows[:, None] + 0 * cols[None, :],
+                           cols[None, :] + 0 * rows[:, None])
+            self.tiles[key] = _TileData(grid.astype(np.float32),
+                                        key[0] + 1, key[1], px, px)
+        return self.tiles[key], "ok"
+
+
+# The first row of every square at the bottom of a degree lies exactly on
+# its whole latitude. With the aircraft parked in that band - 1.1 km north
+# of the 40th parallel - and an area across the line, everything loads
+# (found 2026-10-13: those squares were refused as having no map, and the
+# aircraft, asking for its own square first, then took nothing at all).
+band = (int(40.01 * 1e7), int(LON0 * 1e7))
+own = T.square_at(band[0], band[1], 100)[0]
+r = Rig(FakeTerrainPlane(position=band), box(40.01, LON0, 1.0),
+        world=DemMap())
+done = r.run()
+lowest = [sq for sq in r.session._squares if sq.lat_deg == 40 and sq.gx == 0]
+note("(the aircraft is parked in the first row of squares of its degree)",
+     own.gx == 0 and own.lat_deg == 40, own)
+note("parked just north of a whole degree of latitude: done, all of it",
+     done is not None and done[0] and "no map" not in done[1], done)
+note("the squares at the bottom of the degree are on the card, whole",
+     lowest and all(r.plane.on_card(sq) is not None
+                    and r.plane.on_card(sq)[0] == (1 << 56) - 1
+                    for sq in lowest), "%d squares" % len(lowest))
+
+# Ground near the aircraft that the map has no data for: the tile south of
+# the 40th parallel missing (sea, or ground the map leaves out), the
+# aircraft parked 1.1 km north of it with a position fix. It holds the
+# squares round itself in memory and asks for the first one missing, the
+# same one, for ever - so squares after it are never taken. Found on
+# ArduPilot's simulator (2026-10-13): two of twenty never loaded, after
+# four minutes, and the pilot was asked whether the SD card was in.
+r = Rig(FakeTerrainPlane(position=band), box(40.04, LON0, 1.0),
+        world=Map(planar, absent={(39, math.floor(LON0))}))
+done = r.run(until=3000.0)
+note("map-less ground beside the aircraft: said plainly, not the SD card",
+     done and not done[0] and "keeps asking first for ground near itself"
+     in done[1] and "SD card" not in done[1], done)
+note("said while it happens, too",
+     any("squares are coming slowly" in n for n in r.notes), r.notes[-1:])
+taken = r.session.counts().get("loaded", 0)
+note("most of it loaded anyway, and checked, within minutes",
+     done and r.t < 240 and taken * 2 > len(r.session._usable),
+     "%.0f s, %s" % (r.t, r.session.counts()))
+
+# Across the 30th meridian at 36.8 N, where the last squares of two rows
+# west of it are such strips, onto an empty card: all of it loaded, and
+# nothing said to be on the card already.
+r = Rig(FakeTerrainPlane(), box(36.785, 30.0, 2.5), world=Map(hills))
+done = r.run()
+strips = [sq for sq in r.session._usable
+          if sq.lon_deg == 29 and sq.gy == 32 and sq.gx in (36, 37)]
+note("across a meridian with strips at its edge: done, none 'already there'",
+     done and done[0] and "already on the card" not in done[1], done)
+note("and the strips are on the card, whole",
+     len(strips) == 2 and all(r.plane.on_card(sq) is not None
+                              and r.plane.on_card(sq)[0] == (1 << 56) - 1
+                              for sq in strips), strips)
 
 r = Rig(FakeTerrainPlane(), box(LAT0, LON0, 30.0), max_squares=50)
 done = r.run()

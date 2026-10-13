@@ -2377,7 +2377,7 @@ function setFenceDrawing(on) {
     // Drawing a fence and queueing waypoints both want map clicks, so
     // turning one on turns the other off rather than letting a click
     // mean two things.
-    if (fenceDrawing && waypointMode) { setWaypointMode(false); }
+    if (fenceDrawing && waypointMode) { stopQueueingWaypoints(); }
     if (fenceDrawing && terrainDrawing) { setTerrainUploadState('idle', ''); }
     refreshFenceButtons();
 }
@@ -2578,7 +2578,7 @@ function setTerrainUploadState(state, text) {
     if (terrainDrawing) {
         // Clicks on the map mean corners now, and nothing else.
         if (fenceDrawing) { setFenceDrawing(false); }
-        if (waypointMode) { setWaypointMode(false); }
+        if (waypointMode) { stopQueueingWaypoints(); }
     }
     if (state === 'idle') { clearTerrainArea(); }
     if (state === 'uploading' && terrainShape && terrainShape.setStyle) {
@@ -2666,6 +2666,15 @@ map.on('click', function(e) {
 
 function setWaypointMode(enabled) {
     waypointMode = enabled;
+}
+
+function stopQueueingWaypoints() {
+    // Queueing is the window's setting - its "Queue waypoints on map
+    // click" box - so when the map turns it off itself, the window is told.
+    // Otherwise the box stayed ticked while clicks queued nothing and
+    // dropped Fly to Here pins instead (found 2026-10-13).
+    setWaypointMode(false);
+    if (bridge) { bridge.waypointModeOff(); }
 }
 
 function commitWaypoints() {
@@ -3630,6 +3639,7 @@ class Bridge(QObject):
     terrain_upload_pressed = Signal()
     terrain_upload_requested = Signal(list)
     terrain_upload_stopped = Signal()
+    waypoint_mode_off = Signal()
 
     @Slot(float, float)
     def flyToHere(self, lat, lon):
@@ -3688,6 +3698,12 @@ class Bridge(QObject):
     def terrainUploadStopped(self):
         self.terrain_upload_stopped.emit()
 
+    @Slot()
+    def waypointModeOff(self):
+        """The page stopped queueing waypoints by itself: drawing a fence
+        or a terrain area takes the map's clicks."""
+        self.waypoint_mode_off.emit()
+
     @Slot(bool)
     def adsbToggled(self, enabled):
         self.adsb_toggled.emit(enabled)
@@ -3745,6 +3761,7 @@ class MapView(QWebEngineView):
     terrain_upload_pressed = Signal()
     terrain_upload_requested = Signal(list)
     terrain_upload_stopped = Signal()
+    waypoint_mode_off = Signal()
 
     def __init__(self, tile_proxy_port: int, parent=None):
         super().__init__(parent)
@@ -3786,6 +3803,8 @@ class MapView(QWebEngineView):
             self.terrain_upload_requested, Qt.ConnectionType.QueuedConnection)
         self._bridge.terrain_upload_stopped.connect(
             self.terrain_upload_stopped, Qt.ConnectionType.QueuedConnection)
+        self._bridge.waypoint_mode_off.connect(
+            self.waypoint_mode_off, Qt.ConnectionType.QueuedConnection)
         self._bridge.adsb_toggled.connect(
             self.adsb_toggled, Qt.ConnectionType.QueuedConnection)
         self._bridge.adsb_center_changed.connect(

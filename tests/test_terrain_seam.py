@@ -95,6 +95,24 @@ note("every latitude in it answers",
      "%d of %d" % (sum(v is not None for v in lat_answered), len(lat_strip)))
 
 print("")
+print("the tile's own southern line - the last latitude it owns")
+# Chosen by the floor, a tile owns its degree from the southern line up,
+# the line itself included - and the first row of every square an aircraft
+# files at the bottom of a degree lies exactly on it. Refusing it there
+# refused all of those squares (found 2026-10-13).
+on_line = west.sample(0.0, 0.25)
+note("exactly on it answers, with the edge sample",
+     on_line is not None and abs(on_line - 10.0) < 1e-4, repr(on_line))
+many = west.sample_many(np.array([0.0, 0.0, 0.0001]),
+                        np.array([0.25, 0.5, 0.25]))
+note("and so does sample_many, as the terrain upload reads it",
+     np.all(np.isfinite(many))
+     and np.allclose(many, [10.0, 20.0, 10.0], atol=1e-4), repr(many))
+note("but nothing south of it",
+     west.sample(-1e-6, 0.25) is None
+     and np.isnan(west.sample_many(np.array([-1e-6]), np.array([0.25]))[0]))
+
+print("")
 print("both at once - the tile's far corner")
 note("the corner answers", west.sample(0.0001, 0.9999) is not None,
      repr(west.sample(0.0001, 0.9999)))

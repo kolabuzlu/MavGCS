@@ -216,23 +216,60 @@ def square_points(square, spacing):
 
 
 def check_point(square, spacing):
-    """Where a square is asked about: (lat, lon) in degrees x 1e7.
+    """Where a square is asked about: (lat, lon) in degrees x 1e7 - or None
+    for a square no place is filed under at all.
 
     CHECK_AT where the square has room for it. The last square of a
     degree, north or east, is mostly in the next degree - the aircraft
     files a point there under that degree's squares, not this one - so
     for those the point moves back towards the corner until it is a point
-    of this square again, keeping the quarter-step offsets.
+    of this square again, keeping the quarter-step offsets. Where even a
+    quarter step is past the degree's line - all that is left of the
+    square is a strip thinner than that, metres wide and often tapering
+    to nothing inside it - the point goes halfway across the strip where
+    it is widest instead. Asked about anywhere else, the aircraft would
+    answer for the next degree's square (found 2026-10-13: such a strip
+    was never loaded, and counted as already on the card).
     """
-    point = None
     for cx in (CHECK_AT[0], 6.25, 3.25, 1.25, 0.25):
         for cy in (CHECK_AT[1], 7.75, 3.75, 1.75, 0.75, 0.25):
-            lat, lon = _place(square, square.gx * BLOCK_SPACING_X + cx,
-                              square.gy * BLOCK_SPACING_Y + cy, spacing)
-            point = int(round(float(lat))), int(round(float(lon)))
+            point = _point_in(square, cx, cy, spacing)
             if square_at(point[0], point[1], spacing)[0] == square:
                 return point
-    return point
+    n0 = square.gx * BLOCK_SPACING_X
+    north = 1e7 * LATLON_TO_M / spacing - n0    # steps to the degree's top
+    best = None
+    for cx in (0.25, CHECK_AT[0], BLOCK_SPACING_X - 0.25):
+        cx = min(cx, north / 2.0)
+        if cx <= 0:
+            continue
+        width = (_east_line(square, n0 + cx, spacing)
+                 - square.gy * BLOCK_SPACING_Y)
+        if best is None or width > best[1]:
+            best = (cx, width)
+    if best is not None and best[1] > 0:
+        point = _point_in(square, best[0], min(CHECK_AT[1], best[1] / 2.0),
+                          spacing)
+        if square_at(point[0], point[1], spacing)[0] == square:
+            return point
+    return None
+
+
+def _point_in(square, cx, cy, spacing):
+    """The place cx steps north and cy east of a square's corner, in
+    degrees x 1e7 as the aircraft holds a place."""
+    lat, lon = _place(square, square.gx * BLOCK_SPACING_X + cx,
+                      square.gy * BLOCK_SPACING_Y + cy, spacing)
+    return int(round(float(lat))), int(round(float(lon)))
+
+
+def _east_line(square, north_steps, spacing):
+    """How many grid steps east of its corner the square's degree ends,
+    north_steps north of that corner: a degree narrows towards the pole,
+    and the aircraft scales by the latitude halfway to the point."""
+    lat, _lon = _place(square, north_steps, 0, spacing)
+    return (1e7 * LATLON_TO_M * longitude_scale(
+        int((square.lat_deg * 1e7 + float(lat)) / 2.0))) / spacing
 
 
 def interpolate(heights, ix, iy, fx, fy):
@@ -397,7 +434,11 @@ def squares_for_area(polygon, spacing, margin_m=MARGIN_M):
                                 int(e_hi // BLOCK_SPACING_Y) + 2):
                     square = Square(lat_deg, lon_deg, gx, gy)
                     outline = _outline(square, n0, n1, spacing, to_xy)
-                    if outline and _within(outline, pts, margin_m):
+                    # A strip too thin to hold one place the aircraft can
+                    # be (they come in steps of 1e-7 degree) is never
+                    # needed, and could not be asked about.
+                    if (outline and _within(outline, pts, margin_m)
+                            and check_point(square, spacing) is not None):
                         found.append(square)
     return sorted(set(found))
 
@@ -409,10 +450,8 @@ def _outline(square, n0, n1, spacing, to_xy):
     e0 = square.gy * BLOCK_SPACING_Y
     corners, widest = [], 0.0
     for n, east_side in ((n0, False), (n0, True), (n1, True), (n1, False)):
-        lat, _lon = _place(square, n, 0, spacing)
         # Where this degree ends to the east, at this latitude, in steps.
-        edge = (1e7 * LATLON_TO_M * longitude_scale(
-            int((square.lat_deg * 1e7 + float(lat)) / 2.0))) / spacing
+        edge = _east_line(square, n, spacing)
         e1 = min(e0 + BLOCK_SPACING_Y, edge)
         widest = max(widest, e1 - e0)
         lat, lon = _place(square, n, max(e1, e0) if east_side else e0,
@@ -699,6 +738,22 @@ class TerrainUpload:
     # and the map has not got.
     SETTLED_S = 2.0
     SETTLE_WAIT_S = 15.0
+    # An aircraft whose card works answers for a square from it, or asks
+    # for it, within a second or two of being asked about it. Not one
+    # square either way for this long, and its card is not working - no
+    # card in it, or one it cannot use (found on a real one, 2026-10-13:
+    # ArduPlane 4.7.1 with no card holds every square waiting for the card,
+    # for ever, and asks for nothing).
+    NO_CARD_S = 15.0
+    # Ground near itself that the map has no data for: the aircraft asks
+    # for it again and again, and squares behind it in its memory wait.
+    # Asked for this many times, and not one square taken for this long,
+    # and the rest are not coming (see _starved). Long enough for the
+    # squares that still come now and then - on ArduPilot's simulator, 18
+    # of 20 did, a few seconds to a minute apart.
+    STUCK_ASKS = 3
+    STUCK_S = 60.0
+    STUCK_TURN_S = 10.0
     VERIFY_EVERY_S = 0.5
     VERIFY_WAIT_S = 15.0
     # A square found missing at the check is loaded once more before it is
@@ -767,6 +822,13 @@ class TerrainUpload:
         self._pending_changed_at = float("-inf")
         self._settling_since = None
         self._settle_asked_at = float("-inf")
+        self._batch_open = False    # a batch was started and not yet paused
+        self._asked_any = False     # the aircraft asked for a square at all
+        self._loading_began = None
+        self._moved_at = float("-inf")  # a square last answered or taken
+        self._unanswerable = {}     # square -> [times asked, why, last asked]
+        self._blocked_by = None     # (square, why) the aircraft was stuck on
+        self._stuck_noted = False
         self._last_loaded = None
         self._save_asked_at = float("-inf")
         self._interval_set = False
@@ -1005,6 +1067,10 @@ class TerrainUpload:
                            len(self._usable), self._square_size(),
                            self._margin_used / 1000.0, describe_minutes(
                                len(self._usable) * SECONDS_PER_SQUARE)))
+        self._batch_open = False
+        self._moved_at = now
+        if self._loading_began is None:
+            self._loading_began = now
         self._enter("loading", now)
 
     def _tick_loading(self, now):
@@ -1016,6 +1082,31 @@ class TerrainUpload:
         # written or not). Measured on the mirror: four of thirty lost that
         # way when squares were simply kept coming. So a batch is asked
         # about, loaded, and then nothing new until the card has it all.
+        if (self._reload_round == 0 and not self._asked_any
+                and not any(self._result.get(sq) in ("loaded", "there")
+                            for sq in self._round)
+                and now - self._loading_began >= self.NO_CARD_S):
+            self._give_up(
+                "Terrain upload: in %.0f s the aircraft did not ask for a "
+                "single square, nor read one from its SD card - is there a "
+                "card in it, and one it can use? Nothing was loaded."
+                % self.NO_CARD_S, now)
+            return
+        starved = self._starved(now)
+        if starved is not None:
+            # Not one square taken for STUCK_S while it asks and asks for
+            # ground the map cannot give it: what is left is not coming.
+            # Given up on, and said so at the end; what was taken is
+            # checked as usual.
+            self._blocked_by = starved
+            for sq in list(self._queue) + list(self._in_flight):
+                self._result[sq] = "blocked"
+            self._queue.clear()
+            self._in_flight.clear()
+            self._settling_since = None
+            self._batch_open = False
+            self._enter("saving", now)
+            return
         if self._settling_since is not None:
             if (self._pending == 0
                     or now - self._pending_changed_at >= self.SETTLED_S
@@ -1034,24 +1125,81 @@ class TerrainUpload:
             if not self._queue:
                 self._enter("saving", now)
                 return
+            if self._batch_open:
+                # The batch is done - its last square answered, between
+                # two ticks, or given up on here: the card's turn now,
+                # before anything new.
+                self._batch_open = False
+                self._settling_since = now
+                return
             for _ in range(min(self._in_flight_max, len(self._queue))):
                 self._in_flight[self._queue.popleft()] = [now, float("-inf")]
+            self._batch_open = True
+        asking = self._asking_unanswerable(now)
+        stuck = asking is not None
+        if stuck and not self._stuck_noted:
+            # Said while it happens: squares will come slowly, and why.
+            self._stuck_noted = True
+            self._note("Terrain upload: squares are coming slowly - %s."
+                       % _stuck_text(asking[0], asking[1], self._spacing))
         for sq, entry in list(self._in_flight.items()):
             since, asked_at = entry
+            if stuck and now - since > self.STUCK_TURN_S:
+                # While it waits for ground the map cannot give it, a
+                # square comes only if it lands in its memory ahead of
+                # that ground - which a new batch now and then makes
+                # happen. Turned over sooner, for more of those chances;
+                # what ends it is STUCK_S with nothing taken (_starved).
+                del self._in_flight[sq]
+                self._queue.append(sq)
+                continue
             if now - since > self.SQUARE_WAIT_S:
                 del self._in_flight[sq]
                 tries = self._tries.get(sq, 0) + 1
                 self._tries[sq] = tries
                 if tries >= self.SQUARE_TRIES:
-                    self._result[sq] = "failed"
+                    # Never taken. While the aircraft is asking for ground
+                    # the map cannot give it, that is why - not its card.
+                    asking = self._asking_unanswerable(now)
+                    if asking is not None:
+                        self._blocked_by = asking
+                        self._result[sq] = "blocked"
+                    else:
+                        self._result[sq] = "failed"
                 else:
                     self._queue.append(sq)
                 continue
             if now - asked_at >= self.CHECK_EVERY_S:
                 entry[1] = now
                 self._check(sq)
-        if not self._in_flight:
-            self._settling_since = now
+
+    def _asking_unanswerable(self, now):
+        """(the square, why) if the aircraft keeps asking for ground the
+        map has no data for - STUCK_ASKS times, the last within STUCK_S -
+        or None.
+
+        ArduPilot keeps the ground round itself in memory (with a
+        position: its own square and the eight round it) and asks for the
+        first square in memory with parts missing - the same one, again
+        and again, until it has it. Ground the map has no data for (sea,
+        ground the map leaves out, or a tile that cannot be downloaded
+        now) can never be given it, and squares after that one in its
+        memory wait behind it (found on ArduPilot's simulator,
+        2026-10-13)."""
+        for sq, (asks, why, last_at) in self._unanswerable.items():
+            if asks >= self.STUCK_ASKS and now - last_at < self.STUCK_S:
+                return sq, why
+        return None
+
+    def _starved(self, now):
+        """(the square, why) the aircraft is stuck on, or None: asking for
+        ground the map cannot give it, with not one square answered or
+        taken for STUCK_S. Squares still come now and then while it asks
+        - ones that land in its memory ahead of that ground - so a while
+        without any is what says the rest will not."""
+        if now - self._moved_at < self.STUCK_S:
+            return None
+        return self._asking_unanswerable(now)
 
     def _tick_saving(self, now):
         # Everything is in the aircraft's memory; this waits for its card.
@@ -1088,8 +1236,16 @@ class TerrainUpload:
         self._enter("verifying", now)
 
     def _tick_verifying(self, now):
-        while self._queue and len(self._in_flight) < self._in_flight_max:
-            self._in_flight[self._queue.popleft()] = [now, float("-inf")]
+        # In batches, as loading goes. The aircraft reads its card one
+        # square at a time, the first one waiting in its memory first, so
+        # new squares asked about while others still wait can go ahead of
+        # them - and kept coming one by one, they held a waiting square
+        # back past VERIFY_WAIT_S, to be called lost while it was on the
+        # card all along (found 2026-10-13). A batch, then the next one
+        # only when it is all answered.
+        if not self._in_flight:
+            for _ in range(min(self._in_flight_max, len(self._queue))):
+                self._in_flight[self._queue.popleft()] = [now, float("-inf")]
         for sq, entry in list(self._in_flight.items()):
             since, asked_at = entry
             if now - since > self.VERIFY_WAIT_S:
@@ -1109,8 +1265,10 @@ class TerrainUpload:
         if lost and self._reload_round < self.RELOAD_ROUNDS:
             self._reload_round += 1
             for sq in lost:
+                # Still counted as sent by this upload: one that turns out
+                # to be on the card after all was put there by it, not
+                # "already on the card" (found 2026-10-13).
                 del self._result[sq]
-                self._answered.discard(sq)
                 self._reported.pop(sq, None)
                 self._tries.pop(sq, None)
             self._round = lost
@@ -1164,6 +1322,7 @@ class TerrainUpload:
                 self._result[sq] = ("loaded" if sq in self._answered
                                     else "there")
                 self._last_loaded = sq
+                self._moved_at = self._clock()
             elif self.state == "verifying":
                 del self._in_flight[sq]
                 if sq not in self._pushing:
@@ -1187,6 +1346,7 @@ class TerrainUpload:
             return
         if self.state not in ("loading", "saving"):
             return
+        self._asked_any = True
         if sq in self._area:
             heights = self._reader.get(sq)[0]
             self._answered.add(sq)
@@ -1197,7 +1357,16 @@ class TerrainUpload:
             # same map by the same rules, while the upload runs.
             self._reader.want([sq])
             got = self._reader.get(sq)
-            if got is None or got[0] is None:
+            if got is None:
+                return                  # still being read from the map
+            if got[0] is None:
+                # Ground the map has no data for: never answered, and
+                # counted - asked for again and again, it holds up the
+                # rest (see _starved).
+                asks = self._unanswerable.setdefault(sq, [0, got[1], 0.0])
+                asks[0] += 1
+                asks[1] = got[1]
+                asks[2] = self._clock()
                 return
             heights = got[0]
             self._extra.add(sq)
@@ -1213,7 +1382,8 @@ class TerrainUpload:
             for bit in bits:
                 mav.terrain_data_send(lat, lon, spacing, bit,
                                       gridbit_data(heights, bit))
-        self._io.send_terrain(send)
+        if self._io.send_terrain(send):
+            self._moved_at = self._clock()
 
     # ---- the end ------------------------------------------------------------
 
@@ -1285,6 +1455,7 @@ class TerrainUpload:
         loaded, there = c.get("loaded", 0), c.get("there", 0)
         failed, lost = c.get("failed", 0), c.get("lost", 0)
         mismatch, nomap = c.get("mismatch", 0), c.get("nomap", 0)
+        blocked = c.get("blocked", 0)
         parts = []
         if self._fail_text is not None:
             ok, head = False, self._fail_text.rstrip(".")
@@ -1300,7 +1471,7 @@ class TerrainUpload:
                         % (self._stop_reason, loaded + there,
                            len(self._usable)))
         else:
-            ok = not (failed or lost or mismatch)
+            ok = not (failed or lost or mismatch or blocked)
             head = ("Terrain upload %s: %d square%s of %s loaded and checked"
                     % ("done" if ok else "finished with problems", loaded,
                        "" if loaded == 1 else "s", self._square_size()))
@@ -1309,6 +1480,10 @@ class TerrainUpload:
             if self._extra:
                 parts.append("%d more the aircraft asked for itself"
                              % len(self._extra))
+            if blocked:
+                sq, why = self._blocked_by
+                parts.append("%d not loaded: %s" % (
+                    blocked, _stuck_text(sq, why, self._spacing)))
             if failed:
                 parts.append("%d never taken by the aircraft - is its SD "
                              "card in?" % failed)
@@ -1393,6 +1568,29 @@ class TerrainUpload:
         self._progress_at = now
         self._last_progress = (text, done, total)
         self._io.progress(done, total, text)
+
+
+def _stuck_text(square, why, spacing):
+    """Why squares wait: the ground the aircraft keeps asking for first."""
+    if why == "failed":
+        return ("the aircraft keeps asking first for ground near itself, "
+                "around %s, whose map could not be downloaded just now - "
+                "check the internet connection and try again"
+                % _place_text(square, spacing))
+    return ("the aircraft keeps asking first for ground near itself, around "
+            "%s, that the map has no data for (sea, or ground the map does "
+            "not cover) - try again before it has a GPS fix, or with it "
+            "further from there" % _place_text(square, spacing))
+
+
+def _place_text(square, spacing):
+    """The middle of a square, as a pilot reads a place."""
+    lat, lon = _place(square, square.gx * BLOCK_SPACING_X
+                      + BLOCK_SPACING_X / 2.0, square.gy * BLOCK_SPACING_Y
+                      + BLOCK_SPACING_Y / 2.0, spacing)
+    lat, lon = float(lat) / 1e7, float(lon) / 1e7
+    return "%.3f %s %.3f %s" % (abs(lat), "N" if lat >= 0 else "S",
+                                abs(lon), "E" if lon >= 0 else "W")
 
 
 def _default_provider(on_status):

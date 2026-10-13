@@ -151,6 +151,12 @@ def dest_point(lat, lon, bearing_deg, dist_m):
     return math.degrees(lat2), math.degrees(lon2)
 
 
+# A tile's own whole latitude comes out at row `height` give or take the
+# last bits of a division; this much past it is still that line - a
+# millionth of a sample, micrometres of ground - and nothing further south.
+_EDGE_SLACK = 1e-6
+
+
 class _TileData:
     """A decoded DEM tile: elevation grid + geographic transform."""
 
@@ -184,10 +190,18 @@ class _TileData:
         which is nearest-neighbour over at most one arcsecond rather than
         an interpolation towards a tile that is not loaded. Well inside
         the error the DEM already carries, and the alternative is a hole.
+
+        In latitude the degree a tile owns ends on its SOUTH line, which
+        is the far end of that last arcsecond rather than past it: rows
+        run south from the north edge, so the degree's own whole latitude
+        is row `height` exactly - and it is the first row of every square
+        an aircraft files at the bottom of a degree. Refusing it there
+        refused all of those squares (found 2026-10-13).
         """
         col = (lon - self.origin_lon) / self.px_lon
         row = (self.origin_lat - lat) / self.px_lat
-        if col < 0 or row < 0 or col >= self.width or row >= self.height:
+        if (col < 0 or row < 0 or col >= self.width
+                or row > self.height + _EDGE_SLACK):
             return None
         c0 = min(int(col), self.width - 1)
         r0 = min(int(row), self.height - 1)
@@ -212,7 +226,7 @@ class _TileData:
         col = (lons - self.origin_lon) / self.px_lon
         row = (self.origin_lat - lats) / self.px_lat
         inside = ((col >= 0) & (row >= 0)
-                  & (col < self.width) & (row < self.height))
+                  & (col < self.width) & (row <= self.height + _EDGE_SLACK))
         col = np.where(inside, col, 0.0)
         row = np.where(inside, row, 0.0)
         c0 = np.minimum(col.astype(np.int64), self.width - 1)

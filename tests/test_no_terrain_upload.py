@@ -26,6 +26,11 @@ future change cannot break by accident:
    SITL, 2026-10-12): it talks over the network but cannot fly, and it
    alone answers for its SIM_ settings. An aircraft that does not - the
    plane of section 2, on the same kind of link - stays refused.
+5. The simulator's answer counts for the simulator only. Reaching a real
+   aircraft later in the same session - by Add Link, by the link opening
+   again onto another device, or by another device sending to the same
+   port - must not carry the answer over to it (found 2026-10-13: all
+   three did). A simulator started again is still recognised.
 
 Each check first shows it can catch the thing it guards against.
 """
@@ -51,7 +56,7 @@ from PySide6.QtCore import QCoreApplication, Qt
 from pymavlink import mavutil
 
 import terrain_upload
-from fake_plane import FakePlane, UdpChannel, free_port
+from fake_plane import FakePlane, TcpChannel, UdpChannel, free_port
 from fake_terrain import FakeTerrainPlane
 from mavlink_link import MavlinkLink
 
@@ -129,11 +134,10 @@ note("(and the one that may, does - so the line above is not vacuous)",
 # A fake plane whose terrain is ArduPilot's, mirrored (tests/fake_terrain.py),
 # on a real UDP link: it asks for what it lacks and answers what it is asked.
 
-class TerrainChannel(UdpChannel):
+class _TerrainPort:
     """A plane's port that also carries its terrain system."""
 
-    def __init__(self, gcs_port, terrain):
-        super().__init__(gcs_port)
+    def _carry(self, terrain):
         self.terrain = terrain
         self.lock = threading.Lock()
         self.terrain_heard = []         # (type, when) of terrain from the GCS
@@ -193,6 +197,22 @@ class TerrainChannel(UdpChannel):
                 self.later(data, time.time())
 
 
+class TerrainChannel(_TerrainPort, UdpChannel):
+    """On UDP, sending to the ground station's port."""
+
+    def __init__(self, gcs_port, terrain):
+        UdpChannel.__init__(self, gcs_port)
+        self._carry(terrain)
+
+
+class TcpTerrainChannel(_TerrainPort, TcpChannel):
+    """On TCP, as the server - as SITL's own port and MavLTE's are."""
+
+    def __init__(self, port, terrain):
+        TcpChannel.__init__(self, port)
+        self._carry(terrain)
+
+
 def pumping(ch, stop):
     t0 = time.monotonic()
     while not stop.is_set():
@@ -233,10 +253,12 @@ terrain_upload._default_provider = lambda on_status: _Map()
 AREA = [(39.90, 32.80), (39.91, 32.80), (39.91, 32.81), (39.90, 32.81)]
 
 
-def start_plane(terrain):
+def start_plane(terrain, port=None, channel=TerrainChannel):
     plane = FakePlane()
-    port = free_port()
-    ch = TerrainChannel(port, terrain)
+    if port is None:
+        port = free_port(socket.SOCK_STREAM if channel is TcpTerrainChannel
+                         else socket.SOCK_DGRAM)
+    ch = channel(port, terrain)
     plane.channels.append(ch)
     plane.start()
     stop = threading.Event()
@@ -244,8 +266,8 @@ def start_plane(terrain):
     return plane, ch, port, stop
 
 
-def connect(port, **kw):
-    link = MavlinkLink("udpin:0.0.0.0:%d" % port, **kw)
+def connect(port, connection=None, **kw):
+    link = MavlinkLink(connection or "udpin:0.0.0.0:%d" % port, **kw)
     status, finished = [], []
     link.connection_status.connect(lambda c, m: status.append(c),
                                    Qt.ConnectionType.DirectConnection)
@@ -363,6 +385,97 @@ note("an answer that is not a number does not make it the simulator",
 link.stop()
 stop.set()
 plane.stop()
+
+
+print("")
+print("5. the simulator's answer counts for the simulator only")
+
+
+def rehearse(connection=None, port=None, channel=TerrainChannel):
+    """A session that starts on the simulator, as a rehearsal does."""
+    sim = start_plane(FakeTerrainPlane(sim_speedup=1), port=port,
+                      channel=channel)
+    link, status, finished = connect(sim[2], connection=connection)
+    note("(the link is up, and the simulator recognised)",
+         wait_for(lambda: any(status), 15.0)
+         and wait_for(lambda: link.terrain_upload_blocker() is None, 10.0),
+         link.terrain_upload_blocker())
+    return sim, link, status, finished
+
+
+def closed(plane):
+    plane[3].set()
+    plane[0].stop()
+
+
+def refused(how, link, ch, finished):
+    """The aircraft reached now is not the simulator: refused at the
+    button, refused underneath it, and sent nothing terrain-related."""
+    blocker = link.terrain_upload_blocker()
+    note("%s: Terrain Upload is refused, saying why" % how,
+         blocker is not None and "network link" in blocker, blocker)
+    link.start_terrain_upload(AREA)
+    note("%s: an upload forced through anyway stops at once" % how,
+         wait_for(lambda: finished, 10.0) and not finished[-1][0]
+         and "not the flight controller's own USB" in finished[-1][1],
+         finished[-1:])
+    time.sleep(2.0)
+    note("%s: nothing terrain-related reached the aircraft" % how,
+         not ch.terrain_heard, ch.terrain_heard[:5])
+
+
+# Add Link: the pilot's likeliest road. The simulator stops, the button
+# still reads Add Link, and the real aircraft's link is added to the
+# session - the same aircraft, as far as the link can tell.
+sim, link, status, finished = rehearse()
+closed(sim)
+real = start_plane(FakeTerrainPlane())
+link.add_link("udpin:0.0.0.0:%d" % real[2])
+note("(the session moves onto the added link)",
+     wait_for(lambda: link._active_connection().endswith(":%d" % real[2]),
+              30.0), link._active_connection())
+refused("added by Add Link", link, real[1], finished)
+link.stop()
+closed(real)
+
+# The link opening again onto another device: the simulator's TCP port
+# closes, and a real aircraft's bridge (MavLTE) serves the same port.
+port = free_port(socket.SOCK_STREAM)
+sim, link, status, finished = rehearse(
+    connection="tcp:127.0.0.1:%d" % port, port=port,
+    channel=TcpTerrainChannel)
+broke_at = len(status)
+closed(sim)
+real = start_plane(FakeTerrainPlane(), port=port, channel=TcpTerrainChannel)
+note("(the link breaks, and opens again onto the other device)",
+     wait_for(lambda: False in status[broke_at:]
+              and status[-1] is True, 30.0), status[broke_at:])
+time.sleep(2.0)
+refused("the same TCP port, opened again", link, real[1], finished)
+link.stop()
+closed(real)
+
+# Another device sending to the same listening UDP port.
+sim, link, status, finished = rehearse()
+closed(sim)
+real = start_plane(FakeTerrainPlane(), port=sim[2])
+note("(the link hears the other device)",
+     wait_for(lambda: ("HEARTBEAT", None) in real[1].got, 10.0))
+time.sleep(2.0)
+refused("another device on the same UDP port", link, real[1], finished)
+link.stop()
+closed(real)
+
+# And the simulator itself, started again on the same port: asked again,
+# it says so again, and the rehearsal goes on without reconnecting.
+sim, link, status, finished = rehearse()
+closed(sim)
+again = start_plane(FakeTerrainPlane(sim_speedup=1), port=sim[2])
+note("the simulator started again is recognised again",
+     wait_for(lambda: link.terrain_upload_blocker() is None, 20.0),
+     link.terrain_upload_blocker())
+link.stop()
+closed(again)
 
 print("")
 print("FAILED: %s" % ", ".join(fails) if fails else "all passed")

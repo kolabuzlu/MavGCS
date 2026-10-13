@@ -14,6 +14,8 @@ read from ArduPilot master on 2026-10-12, piece by piece:
   - asking: once per TERRAIN_REQUEST slot, and with a position fix no more
     than once every 2 s, its own square first and then any square in
     memory with parts missing, in memory order (send_request);
+  - with a position, the squares round it held in memory as well, 0.7 of
+    a square away each way (update_surrounding_tiles, added 2026-10-13);
   - TERRAIN_DATA taken only for a square in memory (handle_terrain_data);
   - TERRAIN_CHECK answered at once with a TERRAIN_REPORT for that place,
     spacing 0 where it has no height, and the pending/loaded counts
@@ -228,6 +230,7 @@ class FakeTerrainPlane:
     def send_request(self):
         if not self.active():
             return
+        self._schedule_disk_io()
         if self.position is None:
             for e in self.cache:
                 if e.state in (VALID, DIRTY) and self._request_missing(e):
@@ -249,6 +252,25 @@ class FakeTerrainPlane:
             return
         if self.position is not None:
             self.height_amsl(self.position[0], self.position[1])
+            # update_surrounding_tiles: the squares round it as well, 0.7
+            # of a square away each way - held in memory, and so asked for
+            # like any other.
+            for x in (-1, 0, 1):
+                for y in (-1, 0, 1):
+                    lat, lon = T.offset(
+                        self.position[0], self.position[1],
+                        x * T.BLOCK_SIZE_X * 0.7 * self.spacing,
+                        y * T.BLOCK_SIZE_Y * 0.7 * self.spacing)
+                    self.height_amsl(lat, lon)
+        self._schedule_disk_io()
+
+    def _schedule_disk_io(self):
+        """schedule_disk_io: one read or write handed to the IO thread, and
+        collected on the next call. ArduPilot calls it from update() and
+        from send_request() both (TerrainGCS.cpp), so with requests
+        streamed its card works about twice as often as update() alone
+        would make it - which the mirror missed until 2026-10-13, and lost
+        squares a real one does not."""
         if self.io is not None and self.io_done:
             kind, e, block = self.io
             if kind == "read":

@@ -598,8 +598,15 @@ class MavlinkLink(QThread):
         self._vehicle_heard = False
         # Whether the aircraft is ArduPilot's simulator (SITL): it has
         # settings a flight controller does not - see
-        # _request_simulator_check.
+        # _request_simulator_check. Tied to what answered - the connection
+        # and, on a listening UDP link, the one device sending to it - and
+        # to it not going quiet since: see _simulator_holds.
         self._simulator = False
+        self._simulator_peer = None
+        self._simulator_asks_left = 0
+        self._simulator_ask_at = 0.0
+        # When the aircraft's own heartbeat last came on the link in use.
+        self._vehicle_hb_at = 0.0
         self._remove_requests = []      # likewise
         self._choice_requests = []      # likewise; "" means automatic
         # The link the user picked by hand, as its connection string - or
@@ -829,6 +836,7 @@ class MavlinkLink(QThread):
             self.master.target_system = hb.get_srcSystem()
             self.master.target_component = hb.get_srcComponent()
             self._vehicle_heard = True
+            self._vehicle_hb_at = time.time()
             self.connection_status.emit(
                 True,
                 f"Connected (sysid={self.master.target_system}, "
@@ -1325,7 +1333,7 @@ class MavlinkLink(QThread):
                     )
                 elif (name == "SIM_SPEEDUP"
                       and math.isfinite(msg.param_value)):
-                    self._simulator = True
+                    self._note_simulator_answer(time.time())
                 elif name == "TERRAIN_FOLLOW":
                     # Whatever drew this reading - our own write, the
                     # parameter window, another ground station, a
@@ -1609,6 +1617,7 @@ class MavlinkLink(QThread):
                     continue
                 if msg.get_srcSystem() != self.master.target_system:
                     continue
+                self._note_vehicle_heartbeat(time.time())
 
                 try:
                     mode = mavutil.mode_string_v10(msg)
@@ -2168,9 +2177,82 @@ class MavlinkLink(QThread):
         usb, what = self._usb_where()
         if usb:
             return True, what
-        if self._simulator:
+        if self._simulator_holds(time.time()):
             return True, "ArduPilot's simulator (SITL)"
         return False, what
+
+    # The simulator's answer stands for as long as the same device keeps
+    # talking on the same connection. A pause this long in its heartbeat,
+    # another connection, or another device sending, and it does not.
+    SIMULATOR_QUIET_S = 10.0
+    # On a listening UDP link, the devices heard from within this long are
+    # the ones that could have answered.
+    SIMULATOR_SENDER_S = 5.0
+    # Once the answer stops standing, asked again this often, this many
+    # times: the simulator started again says so as soon as the one it
+    # replaced has been quiet long enough not to be taken for it, and
+    # anything else never will.
+    SIMULATOR_ASK_EVERY_S = 2.0
+    SIMULATOR_ASKS = 8
+
+    def _link_peer(self, now):
+        """(the connection in use, the devices sending to it lately) - what
+        the simulator's answer is tied to. The devices are known only on a
+        listening UDP link, where anything may start sending to the port;
+        on any other link the set is empty, and the connection is all.
+        None for the devices if they could not be read."""
+        conn = (self._active_link.conn
+                if self._multi and self._active_link is not None
+                else self.master)
+        heard = getattr(conn, "clients_last_alive", None)
+        if not heard:
+            return conn, frozenset()
+        try:
+            return conn, frozenset(address for address, at
+                                   in list(heard.items())
+                                   if now - at <= self.SIMULATOR_SENDER_S)
+        except RuntimeError:            # changed while being read
+            return conn, None
+
+    def _note_simulator_answer(self, now):
+        """SIM_SPEEDUP answered with a value: the simulator - on the link in
+        use, and from the one device sending on it. With two sending at
+        once there is no telling which one answered, so neither is
+        believed."""
+        conn, senders = self._link_peer(now)
+        if conn is None or senders is None or len(senders) > 1:
+            return
+        self._simulator = True
+        self._simulator_peer = (conn, senders)
+        self._simulator_asks_left = 0
+
+    def _simulator_holds(self, now):
+        """The simulator answered on this very connection, nothing else has
+        sent on it since, and it has not gone quiet."""
+        if not self._simulator or self._simulator_peer is None:
+            return False
+        conn, senders = self._link_peer(now)
+        then_conn, then_senders = self._simulator_peer
+        return (conn is not None and conn is then_conn
+                and senders is not None and senders <= then_senders
+                and now - self._vehicle_hb_at <= self.SIMULATOR_QUIET_S)
+
+    def _note_vehicle_heartbeat(self, now):
+        """The aircraft's own heartbeat, on the link in use. When what said
+        it was the simulator may no longer be what is talking - the link
+        was switched or opened again, another device sent, or it went quiet
+        - the answer is forgotten and the question asked again: the
+        simulator says so again, an aircraft never does."""
+        if self._simulator and not self._simulator_holds(now):
+            self._simulator = False
+            self._simulator_peer = None
+            self._simulator_asks_left = self.SIMULATOR_ASKS
+            self._simulator_ask_at = now
+        if self._simulator_asks_left and now >= self._simulator_ask_at:
+            self._simulator_asks_left -= 1
+            self._simulator_ask_at = now + self.SIMULATOR_ASK_EVERY_S
+            self._request_simulator_check()
+        self._vehicle_hb_at = now
 
     def _terrain_send(self, fn):
         try:
@@ -2942,6 +3024,10 @@ class MavlinkLink(QThread):
         value. That answer is what lets Terrain Upload run against SITL,
         which talks over the network, while a real aircraft on any link but
         its USB - a radio, or LTE arriving on 127.0.0.1 - is still refused.
+        Asked on connecting, and asked again whenever the answer stops
+        standing (_note_vehicle_heartbeat): a real aircraft reached later
+        in the same session, by Add Link or on the same port, is never
+        taken for the simulator that answered before it.
         """
         if self.master is None:
             return

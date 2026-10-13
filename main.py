@@ -4885,6 +4885,8 @@ class MainWindow(QMainWindow):
             self.on_terrain_upload_requested)
         self.map_view.terrain_upload_stopped.connect(
             self.on_terrain_upload_stopped)
+        self.map_view.waypoint_mode_off.connect(
+            self.on_map_waypoint_mode_off)
         self.map_view.adsb_toggled.connect(self.adsb_worker.set_enabled)
         self.map_view.adsb_center_changed.connect(self.adsb_worker.update_center)
         # Under the watcher only, say what the map is drawing every few
@@ -6659,6 +6661,12 @@ class MainWindow(QMainWindow):
 
     def on_waypoint_mode_toggled(self, enabled):
         self.map_view.set_waypoint_mode(enabled)
+
+    def on_map_waypoint_mode_off(self):
+        """The map stopped queueing waypoints itself - drawing a fence or
+        a terrain area takes its clicks - so the box says so as well,
+        rather than staying ticked over clicks that queue nothing."""
+        self.waypoint_panel.queue_checkbox.setChecked(False)
 
     def on_waypoint_added(self, lat, lon, wp_id):
         self._waypoint_queue.append(
