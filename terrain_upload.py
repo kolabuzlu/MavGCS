@@ -548,28 +548,37 @@ def flight_controller_usb(connection_string, comports=None):
 # Heights from the map
 
 def square_heights(provider, square, spacing):
-    """(the square's heights as int16 [28][32], "ok"), or (None, why).
+    """(the square's heights as int16 [28][32], "ok..."), or (None, why).
 
     Rounded up to the whole metre the aircraft stores: what it is told is
     never lower than the map. Never a made-up height - a square with any
     point the map has no ground for is not loaded at all, because the
-    aircraft would take a guess for the truth. "absent" is ground the
-    dataset does not have (sea, or a few withheld areas); "failed" is a
-    tile that could not be fetched just now.
+    aircraft would take a guess for the truth. "absent" is land the map's
+    store has no tile for, in either of its sets; "failed" is a tile that
+    could not be fetched just now.
+
+    "ok" is the 30 m map throughout. Open sea is 0 m, which is a height
+    and not a guess - the tile store's own advice for the cells it has no
+    tile for, decided from its list (copernicus_cells) - and a cell whose
+    30 m tile is withheld is read from the 90 m one: "ok, sea", "ok, 90 m"
+    or "ok, 90 m, sea" say which.
     """
     lats, lons = square_points(square, spacing)
     out = np.full(lats.shape, np.nan)
     tlat = np.floor(lats).astype(np.int64)
     tlon = np.floor(lons).astype(np.int64)
+    sources = set()
     for a, b in sorted(set(zip(tlat.ravel().tolist(), tlon.ravel().tolist()))):
         here = (tlat == a) & (tlon == b)
         tile, state = provider.tile_for(a + 0.5, b + 0.5)
         if tile is None:
             return None, state
+        sources.add(getattr(tile, "source", "30 m"))
         out[here] = tile.sample_many(lats[here], lons[here])
     if not np.all(np.isfinite(out)) or out.min() < -500 or out.max() > 9000:
         return None, "absent"
-    return np.ceil(out).astype(np.int16), "ok"
+    return np.ceil(out).astype(np.int16), ", ".join(
+        ["ok"] + [s for s in ("90 m", "sea") if s in sources])
 
 
 class MapReader:
@@ -823,6 +832,7 @@ class TerrainUpload:
         self._result = {}           # square -> loaded / there / failed /
                                     #           nomap / lost / mismatch
         self._why_nomap = {}
+        self._source_of = {}        # square -> "ok", "ok, 90 m", "ok, sea"...
         self._answered = set()      # area squares this upload sent
         self._sent_at = {}          # square -> when each part last went
         self._extra = set()         # squares outside it, answered
@@ -1010,13 +1020,14 @@ class TerrainUpload:
                 self._why_nomap[sq] = state
             else:
                 self._usable.append(sq)
+                self._source_of[sq] = state
         if not self._usable:
             self._give_up("Terrain upload: %s" % (
                 "the map could not be downloaded - check the internet "
                 "connection and try again."
                 if set(self._why_nomap.values()) == {"failed"} else
-                "MavGCS's map has no ground for this area (sea, or ground "
-                "the map does not cover). Nothing was loaded."), now)
+                "MavGCS's map has no ground for this area. Nothing was "
+                "loaded."), now)
             return
         self._area = set(self._usable)
         for sq in self._usable:
@@ -1191,11 +1202,11 @@ class TerrainUpload:
         ArduPilot keeps the ground round itself in memory (with a
         position: its own square and the eight round it) and asks for the
         first square in memory with parts missing - the same one, again
-        and again, until it has it. Ground the map has no data for (sea,
-        ground the map leaves out, or a tile that cannot be downloaded
-        now) can never be given it, and squares after that one in its
-        memory wait behind it (found on ArduPilot's simulator,
-        2026-10-13)."""
+        and again, until it has it. Ground the map has no data for (a
+        tile that cannot be downloaded now, or land missing from the
+        map's store) can never be given it, and squares after that one in
+        its memory wait behind it (found on ArduPilot's simulator,
+        2026-10-13). Open sea is not such ground: it is 0 m."""
         for sq, (asks, why, last_at) in self._unanswerable.items():
             if asks >= self.STUCK_ASKS and now - last_at < self.STUCK_S:
                 return sq, why
@@ -1494,6 +1505,21 @@ class TerrainUpload:
             head = ("Terrain upload %s: %d square%s of %s loaded and checked"
                     % ("done" if ok else "finished with problems", loaded,
                        "" if loaded == 1 else "s", self._square_size()))
+            # Said, so the pilot knows what is under those squares: sea
+            # taken as 0 m, and ground read from the coarser map.
+            sources = [self._source_of.get(sq, "ok")
+                       for sq, result in self._result.items()
+                       if result == "loaded"]
+            sea = sum(1 for src in sources if "sea" in src)
+            coarse = sum(1 for src in sources if "90 m" in src)
+            said = []
+            if sea:
+                said.append("%d over open sea (0 m there)" % sea)
+            if coarse:
+                said.append("%d from the 90 m map (Copernicus withholds its "
+                            "30 m map there)" % coarse)
+            if said:
+                parts.append("of them, " + " and ".join(said))
             if there:
                 parts.append("%d already on the card" % there)
             if self._extra:
@@ -1516,8 +1542,7 @@ class TerrainUpload:
                 parts.append("%d not loaded: %s" % (
                     nomap, "the map could not be downloaded"
                     if set(self._why_nomap.values()) == {"failed"} else
-                    "no map data there (sea, or ground the map does not "
-                    "cover)"))
+                    "no map data there"))
         text = head
         if parts:
             text += " - " + "; ".join(parts)
@@ -1597,9 +1622,9 @@ def _stuck_text(square, why, spacing):
                 "check the internet connection and try again"
                 % _place_text(square, spacing))
     return ("the aircraft keeps asking first for ground near itself, around "
-            "%s, that the map has no data for (sea, or ground the map does "
-            "not cover) - try again before it has a GPS fix, or with it "
-            "further from there" % _place_text(square, spacing))
+            "%s, that the map has no data for - try again before it has a "
+            "GPS fix, or with it further from there"
+            % _place_text(square, spacing))
 
 
 def _place_text(square, spacing):

@@ -16,8 +16,9 @@ code mirrored in Python, with time stepped rather than waited for:
 4. Only a flight controller's own USB counts as one.
 5. The upload, start to end, with what can go wrong along the way: squares
    already on the card, Disable Download, no card, a small memory, a lost
-   write, ground the map lacks, the aircraft armed or the cable no longer
-   the link in use halfway through.
+   write, ground the map lacks, open sea and the cells whose 30 m map is
+   withheld, the aircraft armed or the cable no longer the link in use
+   halfway through.
 """
 
 import math
@@ -36,7 +37,8 @@ import numpy as np
 
 import terrain_upload as T
 from fake_terrain import FakeTerrainPlane
-from terrain_provider import _TileData
+from fake_tiles import FakeStore
+from terrain_provider import TerrainProvider, _TileData
 
 fails = []
 
@@ -753,6 +755,60 @@ note("and the strips are on the card, whole",
      len(strips) == 2 and all(r.plane.on_card(sq) is not None
                               and r.plane.on_card(sq)[0] == (1 << 56) - 1
                               for sq in strips), strips)
+
+# Open sea, and the cells whose 30 m map Copernicus withholds (2026-10-13):
+# loaded at 0 m and from the 90 m map, where nothing was loaded before -
+# through the real provider, against a stand-in for the tile store.
+def ground(lats, lons):
+    return 1500.0 + 300.0 * (np.asarray(lats) - 40.0) \
+        + 200.0 * (np.asarray(lons) - 31.0)
+
+
+def kept_as_sent(rig, provider):
+    """Every square on the card whole, holding the heights the map gives."""
+    for sq in rig.session._usable:
+        card = rig.plane.on_card(sq)
+        if card is None or card[0] != (1 << 56) - 1:
+            return False
+        if not np.array_equal(card[1], T.square_heights(provider, sq, 100)[0]):
+            return False
+    return True
+
+
+with FakeStore(otherwise="down") as store:
+    p = TerrainProvider()
+    r = Rig(FakeTerrainPlane(), box(42.5, 31.5, 1.0), world=p)
+    done = r.run()
+    n = len(r.session._usable)
+    note("over the open Black Sea: done, every square loaded",
+         done and done[0] and n > 0 and "no map" not in done[1], done)
+    note("at 0 m, and said so - with no network needed for it",
+         kept_as_sent(r, p) and not store.asked
+         and "of them, %d over open sea (0 m there)" % n in done[1],
+         (store.asked[:1], done))
+
+with FakeStore() as store:
+    store.put(90, 40, 43, ground)
+    p = TerrainProvider()
+    r = Rig(FakeTerrainPlane(), box(40.6, 43.1, 1.0), world=p)
+    done = r.run()
+    n = len(r.session._usable)
+    note("over Kars, where the 30 m map is withheld: done, every square",
+         done and done[0] and n > 0 and "no map" not in done[1], done)
+    note("from the 90 m map, and said so",
+         kept_as_sent(r, p) and not store.asked_for(30, 40, 43)
+         and "of them, %d from the 90 m map" % n in done[1], done)
+
+with FakeStore() as store:
+    store.put(30, 41, 31, ground)
+    p = TerrainProvider()
+    r = Rig(FakeTerrainPlane(), box(42.0, 31.5, 1.0), world=p)
+    done = r.run()
+    sources = r.session._source_of
+    note("across the coast at 42 N: land and sea both loaded",
+         done and done[0] and "no map" not in done[1]
+         and "ok" in sources.values() and "ok, sea" in sources.values()
+         and kept_as_sent(r, p), done)
 
 r = Rig(FakeTerrainPlane(), box(LAT0, LON0, 30.0), max_squares=50)
 done = r.run()

@@ -35,9 +35,15 @@ import tifffile
 
 from PySide6.QtCore import QThread, Signal
 
+import copernicus_cells
 from app_paths import data_dir
 
 BASE_URL = "https://copernicus-dem-30m.s3.amazonaws.com"
+# The same ground at 90 m (GLO-90), for the cells whose 30 m tiles the
+# Copernicus programme withholds - Kars, Igdir and Cildir among them (see
+# copernicus_cells). Tiles of about 5 MB, named _COG_30_ for their three
+# arcseconds.
+BASE_URL_90 = "https://copernicus-dem-90m.s3.amazonaws.com"
 # Not next to the code: in a packaged build that's inside the unpacked
 # bundle, which is replaced wholesale on upgrade (and may not be writable).
 # See app_paths.data_dir().
@@ -158,17 +164,22 @@ _EDGE_SLACK = 1e-6
 
 
 class _TileData:
-    """A decoded DEM tile: elevation grid + geographic transform."""
+    """A decoded DEM tile: elevation grid + geographic transform, and
+    which set it came from: "30 m", or "90 m" where the 30 m tile is
+    withheld."""
 
-    __slots__ = ("grid", "height", "width", "origin_lat", "origin_lon", "px_lat", "px_lon")
+    __slots__ = ("grid", "height", "width", "origin_lat", "origin_lon",
+                 "px_lat", "px_lon", "source")
 
-    def __init__(self, grid, origin_lat, origin_lon, px_lat, px_lon):
+    def __init__(self, grid, origin_lat, origin_lon, px_lat, px_lon,
+                 source="30 m"):
         self.grid = grid
         self.height, self.width = grid.shape
         self.origin_lat = origin_lat
         self.origin_lon = origin_lon
         self.px_lat = px_lat
         self.px_lon = px_lon
+        self.source = source
 
     def sample(self, lat, lon):
         """Bilinear sample at lat/lon, or None if outside this tile.
@@ -263,6 +274,31 @@ def _decode_tile(raw: bytes) -> _TileData:
     return _TileData(grid, origin_lat, origin_lon, px_lat, px_lon)
 
 
+class _SeaTile:
+    """Open sea: a cell neither Copernicus set has a tile for, where
+    Copernicus says to take the height as 0 m. Its coastal tiles say the
+    same of the sea inside them: 59% of the Istanbul tile is exactly 0 m
+    (checked 2026-10-13). Which cells these are comes from the built-in
+    list (copernicus_cells), never from the tile store's answer."""
+
+    source = "sea"
+
+    def sample(self, lat, lon):
+        return 0.0
+
+    def sample_many(self, lats, lons):
+        return np.zeros(np.shape(lats), dtype=np.float64)
+
+
+_SEA = _SeaTile()
+
+
+def _cell(lat, lon):
+    """The whole degrees of the cell holding lat/lon - the tile's, as
+    tile_name() picks it."""
+    return math.floor(lat), math.floor(lon)
+
+
 # How long to leave a tile alone after a fetch that failed for a reason
 # that might not last. Long enough that sampling a leg does not retry it
 # hundreds of times, short enough that the ground appears soon after the
@@ -278,6 +314,9 @@ class TerrainProvider:
     GeoTIFFs, disk-cached under CACHE_DIR and kept as decoded numpy arrays
     in a small in-memory LRU (a handful of tiles is already tens of MB).
 
+    Where the 30 m tile is withheld, the 90 m one (GLO-90) answers for the
+    same ground; over open sea, 0 m (see copernicus_cells, 2026-10-13).
+
     Not thread-safe for concurrent callers - used exclusively from
     TerrainRadarWorker's own background thread.
     """
@@ -285,12 +324,13 @@ class TerrainProvider:
     def __init__(self, on_status=None):
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self._tiles = OrderedDict()  # key -> _TileData, most-recently-used last
-        # Two different things that used to share one set. A tile the
-        # server says is not there - ocean, or off the edge of the
-        # dataset - will never be there, and remembering that is free. A
-        # tile we merely failed to fetch says nothing about whether it
-        # exists, and remembering that one permanently is how a single
-        # timeout used to remove that ground for the rest of the session.
+        # Two different things that used to share one set. Land the store
+        # says it has no tile for, in either set, will not grow one, and
+        # remembering that is free. A tile we merely failed to fetch says
+        # nothing about whether it exists, and remembering that one
+        # permanently is how a single timeout used to remove that ground
+        # for the rest of the session. (Open sea is neither: it is known
+        # without asking - see copernicus_cells.)
         self._absent = set()        # no such tile, ever
         self._failed = {}           # key -> when it is worth trying again
         # key -> (bytes so far, bytes expected). Read from the GUI thread
@@ -305,10 +345,15 @@ class TerrainProvider:
         self._last_status = None
         self._last_status_at = 0.0
 
-    def _load_tile(self, key: str):
+    def _load_tile(self, key: str, cell):
         if key in self._tiles:
             self._tiles.move_to_end(key)
             return self._tiles[key]
+        kind = copernicus_cells.kind(*cell)
+        if kind == "sea":
+            # Known from the list, not asked for: nothing the store or the
+            # network answers can make land read as sea.
+            return _SEA
         if key in self._absent:
             return None
         retry_at = self._failed.get(key)
@@ -320,7 +365,35 @@ class TerrainProvider:
                 return None
             del self._failed[key]
 
-        path = CACHE_DIR / f"{key}.tif"
+        # The 30 m tile where the 30 m set has the cell, and the 90 m one
+        # where it withholds it - or should the 30 m store ever have no
+        # tile for a cell its own list names. A fetch that failed says
+        # nothing either way, so it goes no further than that.
+        sources = [("90 m", key.replace("_COG_10_", "_COG_30_", 1),
+                    BASE_URL_90)]
+        if kind == "30 m":
+            sources.insert(0, ("30 m", key, BASE_URL))
+        for source, name, base in sources:
+            tile, outcome = self._fetch(name, base)
+            if tile is not None:
+                tile.source = source
+                self._tiles[key] = tile
+                while len(self._tiles) > MAX_CACHED_TILES:
+                    self._tiles.popitem(last=False)
+                return tile
+            if outcome == "failed":
+                self._failed[key] = time.monotonic() + TILE_RETRY_S
+                return None
+        # Land, by the list, that the store has no tile for in either set:
+        # no data - never sea.
+        self._absent.add(key)
+        return None
+
+    def _fetch(self, name, base):
+        """(the decoded tile, "ok"); (None, "absent") where the store says
+        it has no such tile; (None, "failed") for anything that might not
+        last. From the disk cache when it is there."""
+        path = CACHE_DIR / f"{name}.tif"
         raw = None
         if path.exists():
             try:
@@ -328,7 +401,7 @@ class TerrainProvider:
             except OSError:
                 raw = None
         if raw is None:
-            url = f"{BASE_URL}/{key}/{key}.tif"
+            url = f"{base}/{name}/{name}.tif"
             try:
                 with urllib.request.urlopen(url, timeout=15) as resp:
                     # Read in chunks rather than in one call, so the
@@ -343,7 +416,7 @@ class TerrainProvider:
                         total = 0
                     chunks, got = [], 0
                     with self._lock:
-                        self._fetching[key] = (0, total)
+                        self._fetching[name] = (0, total)
                     self._notify(force=True)
                     while True:
                         chunk = resp.read(262144)
@@ -352,7 +425,7 @@ class TerrainProvider:
                         chunks.append(chunk)
                         got += len(chunk)
                         with self._lock:
-                            self._fetching[key] = (got, total)
+                            self._fetching[name] = (got, total)
                         self._notify()
                     raw = b"".join(chunks)
                 if cache_limit_bytes() > 0:
@@ -384,19 +457,15 @@ class TerrainProvider:
             except urllib.error.HTTPError as exc:
                 # 404 or 403 from the tile store means there is no such
                 # tile. That will not change; anything else might.
-                if exc.code in (403, 404):
-                    self._absent.add(key)
-                else:
-                    self._failed[key] = time.monotonic() + TILE_RETRY_S
-                return None
+                return None, ("absent" if exc.code in (403, 404)
+                              else "failed")
             except (urllib.error.URLError, OSError):
                 # A timeout or a dropped connection. Try again shortly
                 # rather than writing this ground off for good.
-                self._failed[key] = time.monotonic() + TILE_RETRY_S
-                return None
+                return None, "failed"
             finally:
                 with self._lock:
-                    self._fetching.pop(key, None)
+                    self._fetching.pop(name, None)
                 self._notify(force=True)
 
         try:
@@ -409,13 +478,8 @@ class TerrainProvider:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
-            self._failed[key] = time.monotonic() + TILE_RETRY_S
-            return None
-
-        self._tiles[key] = tile
-        while len(self._tiles) > MAX_CACHED_TILES:
-            self._tiles.popitem(last=False)
-        return tile
+            return None, "failed"
+        return tile, "ok"
 
     def _notify(self, force=False):
         """Tell whoever is listening what the terrain is doing.
@@ -474,21 +538,22 @@ class TerrainProvider:
 
     def elevation(self, lat: float, lon: float):
         """Terrain elevation (m, ~= MSL) at lat/lon, or None if unavailable."""
-        tile = self._load_tile(tile_name(lat, lon))
+        tile = self._load_tile(tile_name(lat, lon), _cell(lat, lon))
         return tile.sample(lat, lon) if tile else None
 
     def tile_for(self, lat: float, lon: float):
         """(the decoded tile holding lat/lon, or None; and why if None).
 
-        "absent" is a tile the store says does not exist - sea, or ground
-        the dataset leaves out - and will not appear by asking again.
-        "failed" is one that could not be fetched just now and might yet.
-        The terrain upload needs the two kept apart: it must never send a
-        height for ground it has no data for, and it should say which of
-        the two it was.
+        Open sea comes back as a tile of 0 m, and a cell whose 30 m tile is
+        withheld as its 90 m one: each tile says which in its .source.
+        "absent" is land the store has no tile for in either set, and will
+        not appear by asking again; "failed" is one that could not be
+        fetched just now and might yet. The terrain upload needs the two
+        kept apart: it must never send a height for ground it has no data
+        for, and it should say which of the two it was.
         """
         key = tile_name(lat, lon)
-        tile = self._load_tile(key)
+        tile = self._load_tile(key, _cell(lat, lon))
         if tile is not None:
             return tile, "ok"
         return None, ("absent" if key in self._absent else "failed")
